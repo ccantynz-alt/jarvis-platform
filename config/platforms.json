@@ -1,0 +1,75 @@
+{
+  "platforms": {
+    "zoobicon": {
+      "name": "zoobicon",
+      "display_name": "Zoobicon",
+      "server": "66.42.121.161",
+      "path": "/root/zoobicon",
+      "repo": "git@github.com:ccantynz-alt/zoobicon.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "React", "Node.js"],
+      "status": "active"
+    },
+    "vapron": {
+      "name": "vapron",
+      "display_name": "Vapron",
+      "server": "66.42.121.161",
+      "path": "/root/vapron",
+      "repo": "git@github.com:ccantynz-alt/vapron.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "React"],
+      "status": "active"
+    },
+    "bookaride": {
+      "name": "bookaride",
+      "display_name": "Bookaride",
+      "server": "66.42.121.161",
+      "path": "/root/bookaride",
+      "repo": "git@github.com:ccantynz-alt/bookaride.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "React"],
+      "status": "active"
+    },
+    "gatetest": {
+      "name": "gatetest",
+      "display_name": "GateTest",
+      "server": "66.42.121.161",
+      "path": "/root/gatetest",
+      "repo": "git@github.com:ccantynz-alt/gatetest.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "Node.js"],
+      "status": "active"
+    },
+    "alecrae": {
+      "name": "alecrae",
+      "display_name": "AlecRae",
+      "server": "66.42.121.161",
+      "path": "/root/alecrae",
+      "repo": "git@github.com:ccantynz-alt/alecrae.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "React", "Next.js"],
+      "status": "active"
+    },
+    "voxlen": {
+      "name": "voxlen",
+      "display_name": "Voxlen",
+      "server": "66.42.121.161",
+      "path": "/root/voxlen",
+      "repo": "git@github.com:ccantynz-alt/voxlen.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "React", "Rust", "Tauri", "Swift"],
+      "status": "active"
+    }
+  },
+  "defaults": {
+    "branch_strategy": "direct-to-main",
+    "commit_convention": "feat|fix|refactor|docs",
+    "ci_check_timeout_seconds": 300
+  }
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Jarvis Orchestrator — Claude Code dispatch engine
+After=network.target jarvis-memory.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/usr/bin/node src/orchestrator.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/jarvis/config/secrets.env
+
+[Install]
+WantedBy=multi-user.target
