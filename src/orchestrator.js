@@ -87,13 +87,21 @@ async function logToMemory(payload) {
   }
 }
 
+function platformEnv(platform) {
+  const extra = {};
+  if (platform === 'gatetest' && process.env.GATETEST_ADMIN_PASSWORD) {
+    extra.GATETEST_ADMIN_PASSWORD = process.env.GATETEST_ADMIN_PASSWORD;
+  }
+  return extra;
+}
+
 function runLocal(platform, path, prompt, job) {
   const proc = spawn(
     'claude',
     ['--dangerously-skip-permissions', '--print', prompt],
     {
       cwd: path,
-      env: { ...process.env, HOME: '/root' },
+      env: { ...process.env, HOME: '/root', ...platformEnv(platform) },
       stdio: ['ignore', 'pipe', 'pipe'],
     }
   );
@@ -130,7 +138,10 @@ function runLocal(platform, path, prompt, job) {
 function runRemote(platform, server, path, prompt, job) {
   // Escape single quotes in the prompt for shell safety
   const safePrompt = prompt.replace(/'/g, "'\\''");
-  const sshCmd = `cd ${path} && claude --dangerously-skip-permissions --print '${safePrompt}'`;
+  const extraEnvStr = Object.entries(platformEnv(platform))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ');
+  const sshCmd = `cd ${path} && ${extraEnvStr ? extraEnvStr + ' ' : ''}claude --dangerously-skip-permissions --print '${safePrompt}'`;
 
   const proc = spawn(
     'ssh',

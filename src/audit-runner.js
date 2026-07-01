@@ -10,6 +10,8 @@ const app = express();
 app.use(express.json());
 const db = new Database('/opt/jarvis/memory/jarvis.db');
 
+const GATETEST_ADMIN_PASSWORD = process.env.GATETEST_ADMIN_PASSWORD;
+
 const PLATFORM_CONFIG = {
   zoobicon: {
     path: process.env.ZOOBICON_PATH || '/var/www/zoobicon',
@@ -33,21 +35,24 @@ const PLATFORM_CONFIG = {
     checkCmd: null
   },
   gatetest: {
-    path: process.env.GATETEST_PATH || '/var/www/gatetest',
+    path: process.env.GATETEST_PATH || '/opt/gatetest',
     urls: ['https://gatetest.ai'],
-    buildCmd: 'cd website && npx next build',
+    buildCmd: 'node --test tests/*.test.js',
     testCmd: 'node --test tests/*.test.js',
-    checkCmd: 'node bin/gatetest.js --list'
+    checkCmd: 'node bin/gatetest.js --list',
+    // Extra env vars injected into every command for this platform
+    env: GATETEST_ADMIN_PASSWORD ? { GATETEST_ADMIN_PASSWORD } : {},
   }
 };
 
-function runCmd(cmd, cwd, timeoutMs = 120000) {
+function runCmd(cmd, cwd, timeoutMs = 120000, extraEnv = {}) {
   try {
     const output = execSync(cmd, {
       cwd,
       encoding: 'utf8',
       timeout: timeoutMs,
-      stdio: 'pipe'
+      stdio: 'pipe',
+      env: { ...process.env, ...extraEnv },
     });
     return { ok: true, output: output.slice(0, 8000) };
   } catch (e) {
@@ -119,16 +124,18 @@ async function runAudit(platform) {
     health_score: 100
   };
 
+  const env = config.env || {};
+
   // Step 1: Build
   console.log(`[audit] ${platform}: running build...`);
-  report.build = runCmd(config.buildCmd, config.path, 180000);
+  report.build = runCmd(config.buildCmd, config.path, 180000, env);
   const buildErrors = extractErrors(report.build.output);
   report.errors.push(...buildErrors.map(e => `BUILD: ${e}`));
 
   // Step 2: Tests
   if (config.testCmd) {
     console.log(`[audit] ${platform}: running tests...`);
-    report.tests = runCmd(config.testCmd, config.path, 120000);
+    report.tests = runCmd(config.testCmd, config.path, 120000, env);
     const testErrors = extractErrors(report.tests.output);
     report.errors.push(...testErrors.map(e => `TEST: ${e}`));
   }
@@ -136,7 +143,7 @@ async function runAudit(platform) {
   // Step 3: Extra checks
   if (config.checkCmd) {
     console.log(`[audit] ${platform}: running checks...`);
-    report.checks = runCmd(config.checkCmd, config.path, 60000);
+    report.checks = runCmd(config.checkCmd, config.path, 60000, env);
     const checkErrors = extractErrors(report.checks.output);
     report.errors.push(...checkErrors.map(e => `CHECK: ${e}`));
   }
