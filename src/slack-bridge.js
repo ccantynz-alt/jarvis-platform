@@ -132,6 +132,21 @@ function detectIntent(raw) {
   return { type: 'passthrough' };
 }
 
+// ── Safe JSON fetch ──────────────────────────────────────────────────────────
+// Memory service occasionally appends an HTML 404 page after the JSON body.
+// Strip it before parsing so we get the real data instead of a parse error.
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  const text = await r.text();
+  const trimmed = text.replace(/<!DOCTYPE[\s\S]*$/i, '').trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    throw new Error('Memory service unavailable');
+  }
+}
+
 // ── Slack send helper ────────────────────────────────────────────────────────
 
 async function sendSlack(text, channel = SLACK_CHANNEL) {
@@ -233,7 +248,7 @@ async function handleStatus(channel) {
   try {
     const [metrics, memory] = await Promise.allSettled([
       fetch(`${METRICS}/metrics/current`).then(r => r.json()),
-      fetch(`${MEMORY}/memory/summary`).then(r => r.json()),
+      fetchJSON(`${MEMORY}/memory/summary`),
     ]);
 
     const m  = metrics.status  === 'fulfilled' ? metrics.value  : {};
@@ -273,7 +288,7 @@ async function handlePlatformStatus(platform, channel) {
 
   // 1. Memory lookup
   try {
-    const mem = await fetch(`${MEMORY}/memory/platform/${platform}`).then(r => r.json());
+    const mem = await fetchJSON(`${MEMORY}/memory/platform/${platform}`);
     if (mem && mem.name) {
       const e = mem.health_score > 80 ? '✅' : mem.health_score > 50 ? '⚠️' : '🔴';
       msg += `${e} Status: ${mem.status} (${mem.health_score}/100)\n`;
@@ -287,22 +302,24 @@ async function handlePlatformStatus(platform, channel) {
     msg += `_Memory lookup failed: ${e.message}_\n`;
   }
 
-  // 2. Screenshot of live URL
-  const url = PLATFORM_URLS[platform] ?? `https://${platform}.com`;
-  try {
-    const shot = await fetch(`${SCREENSHOT}/screenshot/capture`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    }).then(r => r.json());
+  // 2. Screenshot — only for platforms with a known public URL
+  const url = PLATFORM_URLS[platform];
+  if (url) {
+    try {
+      const shot = await fetch(`${SCREENSHOT}/screenshot/capture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      }).then(r => r.json());
 
-    if (shot.path || shot.url) {
-      msg += `📸 Screenshot: ${shot.url ?? shot.path ?? 'captured'}`;
-    } else if (shot.error) {
-      msg += `📸 Screenshot failed: ${shot.error}`;
+      if (shot.path || shot.url) {
+        msg += `📸 Screenshot: ${shot.url ?? shot.path ?? 'captured'}`;
+      } else if (shot.error) {
+        msg += `📸 Screenshot failed: ${shot.error}`;
+      }
+    } catch (e) {
+      msg += `📸 Screenshot service unavailable: ${e.message}`;
     }
-  } catch (e) {
-    msg += `📸 Screenshot service unavailable: ${e.message}`;
   }
 
   return sendSlack(msg, channel);
@@ -314,7 +331,7 @@ async function handleBriefing(channel) {
   msg += `${new Date().toLocaleDateString('en-NZ', { timeZone: 'Pacific/Auckland', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}\n\n`;
 
   try {
-    const memory = await fetch(`${MEMORY}/memory/summary`).then(r => r.json());
+    const memory = await fetchJSON(`${MEMORY}/memory/summary`);
     const platforms = memory.platforms || [];
 
     const healthy   = platforms.filter(p => p.health_score > 80);
