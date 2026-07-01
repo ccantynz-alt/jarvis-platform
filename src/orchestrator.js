@@ -1,6 +1,7 @@
 import express from 'express';
 import { spawn } from 'child_process';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync, existsSync } from 'fs';
+import { join } from 'path';
 import { randomUUID } from 'crypto';
 import cron from 'node-cron';
 
@@ -36,16 +37,42 @@ function loadRegistry() {
   return JSON.parse(raw).platforms;
 }
 
-function buildPrompt(platform, task) {
-  return [
+function loadDesignRefs(platformPath) {
+  const designDir = join(platformPath, 'design-refs');
+  if (!existsSync(designDir)) return [];
+  try {
+    return readdirSync(designDir)
+      .filter(f => /\.(png|jpg|jpeg|webp|gif|mp4|mov|svg|pdf)$/i.test(f))
+      .map(f => join(designDir, f));
+  } catch {
+    return [];
+  }
+}
+
+function buildPrompt(platform, task, platformPath) {
+  const parts = [
     `Read CLAUDE.md.`,
     `Run bash /opt/jarvis/scripts/session-start.sh ${platform}.`,
+  ];
+
+  // Include design references if they exist in the platform repo
+  const designRefs = platformPath ? loadDesignRefs(platformPath) : [];
+  if (designRefs.length > 0) {
+    parts.push(
+      `DESIGN REFERENCES: The following design files are available in ${platformPath}/design-refs/ to guide your work:`,
+      designRefs.map(f => `  - ${f}`).join('\n'),
+      `Review these files for visual context before making UI changes.`,
+    );
+  }
+
+  parts.push(
     `Task: ${task}`,
     `Before finishing: run the project's type-check and build commands to verify nothing is broken.`,
     `Commit all changes with a clear message explaining what was done and why.`,
     `Push to the default branch using the configured git remote.`,
     `End with bash /opt/jarvis/scripts/session-end.sh ${platform}.`,
-  ].join(' ');
+  );
+  return parts.join(' ');
 }
 
 async function logToMemory(payload) {
@@ -205,7 +232,12 @@ app.post('/dispatch', async (req, res) => {
   };
   jobs.set(jobId, job);
 
-  const prompt = buildPrompt(platform, task);
+  const prompt = buildPrompt(platform, task, job.isLocal ? entry.path : null);
+  const designRefs = job.isLocal ? loadDesignRefs(entry.path) : [];
+  if (designRefs.length > 0) {
+    console.log(`[orchestrator] design-refs for ${platform}: ${designRefs.length} file(s)`);
+    logEvent('DESIGN', `Found ${designRefs.length} design ref(s) for ${platform}`);
+  }
   logEvent('DISPATCH', `Job ${jobId.slice(0,8)} queued → ${platform}: ${task.slice(0,80)}`);
   console.log(`[orchestrator] dispatching job ${jobId} → ${platform} (${entry.server})`);
 
