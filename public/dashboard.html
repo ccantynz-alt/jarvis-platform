@@ -233,6 +233,17 @@
         </div>
       </div>
 
+      <!-- PLATFORM_STATUS_FULL -->
+      <div class="cyber-panel p-4 rounded bg-slate-900/50 col-span-3" style="grid-column: span 3 / span 3;">
+        <div class="flex items-center justify-between border-b border-cyan-900/50 pb-2 mb-3">
+          <span class="text-xs text-cyan-500 font-bold tracking-widest">// PLATFORM_STATUS</span>
+          <span id="status-updated" class="text-[10px] text-slate-600"></span>
+        </div>
+        <div id="platform-status-grid" class="grid grid-cols-3 gap-3 text-xs">
+          <div class="text-slate-600 text-[10px] col-span-3">Loading platform status...</div>
+        </div>
+      </div>
+
       <!-- VAPRON_STACK -->
       <div class="cyber-panel p-4 rounded bg-slate-900/50 flex-1">
         <span class="text-xs text-cyan-500 font-bold tracking-widest border-b border-cyan-900/50 pb-2 mb-3 block">// VAPRON_STACK</span>
@@ -604,6 +615,60 @@ function set(id, text, styles, isHtml) {
 
 // Ping keepalive
 setInterval(() => send({ type: 'ping' }), 25000);
+
+// ── Platform Status (full detail panel) ──────────────────────────────────────
+
+async function fetchPlatformStatus() {
+  try {
+    const r    = await fetch('/api/platform-status');
+    const data = await r.json();
+    renderPlatformStatusGrid(data);
+  } catch (e) {
+    const el = document.getElementById('platform-status-grid');
+    if (el) el.innerHTML = `<div class="text-red-400 text-[10px] col-span-3">Status fetch failed: ${e.message}</div>`;
+  }
+}
+
+function renderPlatformStatusGrid(data) {
+  const grid = document.getElementById('platform-status-grid');
+  const upd  = document.getElementById('status-updated');
+  if (!grid) return;
+  if (upd && data.updated) upd.textContent = 'updated ' + data.updated.slice(11, 16) + ' UTC';
+
+  const platforms = data.platforms || [];
+  if (!platforms.length) {
+    grid.innerHTML = '<div class="text-slate-600 text-[10px] col-span-3">No platforms found</div>';
+    return;
+  }
+
+  grid.innerHTML = platforms.map(p => {
+    const score   = p.health_score ?? 0;
+    const scoreColor = score > 80 ? 'text-emerald-400' : score > 50 ? 'text-amber-400' : 'text-red-400';
+    const dotCls  = score > 80 ? 'dot-online' : score > 50 ? 'dot-warn' : 'dot-offline';
+    const deploy  = p.last_deploy  ? p.last_deploy.slice(0, 60)  : '—';
+    const agent   = p.last_agent_run   ? p.last_agent_run   : '—';
+    const shot    = p.last_screenshot  ? p.last_screenshot  : '—';
+
+    return `<div class="cyber-panel p-3 rounded bg-slate-950/60 space-y-1.5">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class="status-dot ${dotCls}"></div>
+          <span class="text-slate-200 font-bold">${p.display || p.name}</span>
+        </div>
+        <span class="${scoreColor} font-bold text-[11px]">${score}/100</span>
+      </div>
+      <div class="text-slate-500 text-[10px] leading-relaxed">
+        <div><span class="text-slate-600">status:</span> <span class="${scoreColor}">${p.status}</span></div>
+        <div title="${deploy}"><span class="text-slate-600">deploy:</span> ${deploy.slice(0, 50)}</div>
+        <div><span class="text-slate-600">agent:</span> ${agent}</div>
+        <div><span class="text-slate-600">screenshot:</span> ${shot}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+fetchPlatformStatus();
+setInterval(fetchPlatformStatus, 30000);
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 

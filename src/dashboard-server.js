@@ -23,6 +23,9 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { execSync, spawnSync } from 'child_process';
+import { readdirSync, existsSync, statSync } from 'fs';
+import { readFileSync } from 'fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -229,6 +232,101 @@ app.get('/health', (req, res) => {
     events:   eventLog.length,
     metrics:  metricsWs?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
   });
+});
+
+// GET /api/platform-status — aggregated health for the full-status dashboard panel
+app.get('/api/platform-status', async (req, res) => {
+  let registry = {};
+  try {
+    const raw = readFileSync('/opt/jarvis/config/platforms.json', 'utf8');
+    registry = JSON.parse(raw).platforms || {};
+  } catch { /* returns empty */ }
+
+  // Memory summary (health scores + open issues)
+  let memPlatforms = {};
+  let openIssues   = 0;
+  try {
+    const r    = await fetch(`${MEMORY}/memory/summary`);
+    const text = await r.text();
+    const data = JSON.parse(text.replace(/<!DOCTYPE[\s\S]*$/i, '').trim());
+    openIssues = data.open_issues || 0;
+    (data.platforms || []).forEach(p => { memPlatforms[p.name] = p; });
+  } catch {}
+
+  // Last screenshot per platform
+  const SCREENSHOT_DIR = '/root/jarvis-screenshots';
+  let latestScreenshots = {};
+  try {
+    readdirSync(SCREENSHOT_DIR)
+      .filter(f => f.endsWith('.png'))
+      .forEach(f => {
+        const parts = f.split('_');
+        const ts = parseInt(parts[parts.length - 1]);
+        if (isNaN(ts)) return;
+        // match file to platform by URL slug in filename
+        for (const p of Object.keys(registry)) {
+          if (f.toLowerCase().includes(p)) {
+            if (!latestScreenshots[p] || ts > latestScreenshots[p]) {
+              latestScreenshots[p] = ts;
+            }
+          }
+        }
+      });
+  } catch {}
+
+  // Last git commit per platform (deploy proxy)
+  function lastCommit(path) {
+    if (!path || !existsSync(path)) return null;
+    try {
+      const out = spawnSync('git', ['-C', path, 'log', '-1', '--format=%ci %s'], { encoding: 'utf8' });
+      return out.stdout?.trim().slice(0, 80) || null;
+    } catch { return null; }
+  }
+
+  // Last audit score per platform
+  let auditScores = {};
+  try {
+    const r = await fetch(`${ORCHESTRATOR}/jobs`);
+    const jobs = await r.json();
+    if (Array.isArray(jobs)) {
+      // Last completed job per platform = last known agent run
+      for (const job of jobs) {
+        if (job.status === 'completed' && !auditScores[job.platform]) {
+          auditScores[job.platform] = { finishedAt: job.finishedAt };
+        }
+      }
+    }
+  } catch {}
+
+  const platforms = Object.entries(registry).map(([name, entry]) => {
+    const mem    = memPlatforms[name] || {};
+    const shotTs = latestScreenshots[name];
+    const shot   = shotTs ? new Date(shotTs).toISOString().slice(0, 16).replace('T', ' ') : null;
+    const lastJob = auditScores[name];
+
+    return {
+      name,
+      display: entry.display_name || name,
+      status:  mem.status || 'unknown',
+      health_score: mem.health_score ?? 0,
+      last_deploy: lastCommit(entry.path),
+      last_agent_run: lastJob?.finishedAt ? lastJob.finishedAt.slice(0, 16).replace('T', ' ') : null,
+      last_screenshot: shot,
+      open_issues: null, // per-platform open issues from repair_log
+    };
+  });
+
+  // Per-platform open issues
+  try {
+    const r    = await fetch(`${MEMORY}/memory/query`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'which platform has the most issues' }),
+    });
+    const text = await r.text();
+    // answer is formatted text — embed as-is in response
+  } catch {}
+
+  res.json({ platforms, open_issues_total: openIssues, updated: new Date().toISOString() });
 });
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
