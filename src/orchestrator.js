@@ -15,6 +15,16 @@ const REGISTRY_PATH = '/opt/jarvis/config/platforms.json';
 // the async dispatch use case. Jobs are also recorded in Jarvis memory.
 const jobs = new Map();
 
+// Event log for dashboard consumption (circular buffer, last 200 events)
+const eventLog = [];
+const MAX_EVENTS = 200;
+
+function logEvent(category, message) {
+  const entry = { ts: new Date().toISOString(), category, message: String(message).slice(0, 160) };
+  eventLog.push(entry);
+  if (eventLog.length > MAX_EVENTS) eventLog.shift();
+}
+
 function loadRegistry() {
   const raw = readFileSync(REGISTRY_PATH, 'utf8');
   return JSON.parse(raw).platforms;
@@ -114,6 +124,8 @@ function runRemote(platform, server, path, prompt, job) {
     job.error = stderr.slice(-2000);
     job.finishedAt = new Date().toISOString();
     console.log(`[orchestrator] job ${job.id} (${platform}@${server}) finished — exit ${code}`);
+    logEvent(success ? 'JOB' : 'ERR',
+      `Agent ${success ? 'completed' : 'failed'} — ${job.id.slice(0,8)} on ${platform} (exit ${code})`);
     logToMemory({
       platform,
       status: success ? 'healthy' : 'error',
@@ -125,6 +137,7 @@ function runRemote(platform, server, path, prompt, job) {
     job.status = 'failed';
     job.error = err.message;
     job.finishedAt = new Date().toISOString();
+    logEvent('ERR', `Agent spawn error — ${job.id.slice(0,8)} on ${platform}: ${err.message}`);
     console.error(`[orchestrator] job ${job.id} ssh error:`, err.message);
   });
 }
@@ -181,6 +194,7 @@ app.post('/dispatch', async (req, res) => {
   jobs.set(jobId, job);
 
   const prompt = buildPrompt(platform, task);
+  logEvent('DISPATCH', `Job ${jobId.slice(0,8)} queued → ${platform}: ${task.slice(0,80)}`);
   console.log(`[orchestrator] dispatching job ${jobId} → ${platform} (${entry.server})`);
 
   await logToMemory({
@@ -225,10 +239,18 @@ app.get('/platforms', (req, res) => {
   }
 });
 
+// GET /events  — recent event log for dashboard consumption
+app.get('/events', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  res.json(eventLog.slice(-limit));
+});
+
 // GET /health
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', port: PORT, jobs: jobs.size });
+  res.json({ status: 'ok', port: PORT, jobs: jobs.size, events: eventLog.length });
 });
+
+logEvent('SYS', 'Orchestrator initialized — ready to dispatch agents');
 
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`[orchestrator] listening on http://127.0.0.1:${PORT}`);

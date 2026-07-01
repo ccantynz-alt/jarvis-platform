@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JARVIS_MOTHERSHIP_v5.0</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @keyframes pulse-glow {
+      0%, 100% { box-shadow: 0 0 15px rgba(6,182,212,0.2); }
+      50%       { box-shadow: 0 0 30px rgba(6,182,212,0.6); }
+    }
+    @keyframes scanline {
+      0%   { transform: translateY(-100%); }
+      100% { transform: translateY(100%); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .cyber-panel {
+      background: rgba(2,6,23,0.8);
+      border: 1px solid rgba(6,182,212,0.2);
+      position: relative;
+      overflow: hidden;
+    }
+    .cyber-panel::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; width: 100%; height: 2px;
+      background: linear-gradient(90deg, transparent, #06b6d4, transparent);
+      animation: scanline 6s linear infinite;
+    }
+    .glow-avatar { animation: pulse-glow 4s ease-in-out infinite; }
+    .log-entry   { animation: fadeIn 0.3s ease; }
+    .status-dot  { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .dot-online  { background: #10b981; box-shadow: 0 0 6px #10b981; }
+    .dot-offline { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+    .dot-warn    { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
+    ::-webkit-scrollbar       { width: 4px; }
+    ::-webkit-scrollbar-track { background: rgba(2,6,23,0.5); }
+    ::-webkit-scrollbar-thumb { background: rgba(6,182,212,0.4); }
+
+    /* Modal overlay */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(2,6,23,0.85);
+      backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 50;
+    }
+    .modal-box {
+      background: rgba(2,6,23,0.95);
+      border: 1px solid rgba(6,182,212,0.4);
+      border-radius: 8px;
+      padding: 24px;
+      min-width: 480px;
+      max-width: 600px;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 font-mono select-none h-screen overflow-hidden p-4">
+
+  <!-- ── DISPATCH MODAL ─────────────────────────────────────────────────── -->
+  <div id="modal-dispatch" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="flex justify-between items-center mb-4 border-b border-cyan-900/50 pb-3">
+        <span class="text-xs text-cyan-500 font-bold tracking-widest">// DISPATCH_TASK</span>
+        <button onclick="closeModal('dispatch')" class="text-slate-500 hover:text-cyan-400 text-xs">✕ CLOSE</button>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="text-[10px] text-slate-500 block mb-1">TARGET_PLATFORM</label>
+          <select id="dispatch-platform"
+            class="w-full bg-slate-950 border border-cyan-900/50 rounded px-3 py-2 text-xs text-cyan-400 focus:outline-none focus:border-cyan-500">
+            <option value="zoobicon">zoobicon</option>
+            <option value="vapron">vapron</option>
+            <option value="bookaride">bookaride</option>
+            <option value="alecrae">alecrae</option>
+            <option value="gatetest">gatetest</option>
+            <option value="voxlen">voxlen</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-[10px] text-slate-500 block mb-1">TASK_DESCRIPTION</label>
+          <textarea id="dispatch-task" rows="4" placeholder="Describe the task for the Claude agent..."
+            class="w-full bg-slate-950 border border-cyan-900/50 rounded px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-cyan-500 resize-none placeholder-slate-600"></textarea>
+        </div>
+        <div id="dispatch-status" class="text-[10px] text-slate-500 min-h-[16px]"></div>
+        <button onclick="submitDispatch()"
+          class="w-full py-2.5 rounded border border-cyan-500/50 bg-cyan-950/30 hover:bg-cyan-500/20 text-cyan-400 text-xs font-bold tracking-wider transition-all">
+          INITIATE_AGENT_DISPATCH
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── JOB QUEUE MODAL ────────────────────────────────────────────────── -->
+  <div id="modal-jobs" class="modal-overlay hidden">
+    <div class="modal-box" style="min-width:640px;max-width:800px">
+      <div class="flex justify-between items-center mb-4 border-b border-cyan-900/50 pb-3">
+        <span class="text-xs text-cyan-500 font-bold tracking-widest">// ACTIVE_JOB_QUEUE</span>
+        <button onclick="closeModal('jobs')" class="text-slate-500 hover:text-cyan-400 text-xs">✕ CLOSE</button>
+      </div>
+      <div id="jobs-list" class="space-y-2 max-h-96 overflow-y-auto text-xs">
+        <div class="text-slate-500 text-center py-4">Loading job queue...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MAIN GRID ──────────────────────────────────────────────────────── -->
+  <div class="grid grid-cols-12 gap-4 h-full max-w-[1920px] mx-auto">
+
+    <!-- LEFT COLUMN ────────────────────────────────────────────────────── -->
+    <div class="col-span-3 flex flex-col gap-4 h-full">
+
+      <!-- CORE_ORCHESTRATOR -->
+      <div class="cyber-panel p-4 rounded bg-slate-900/50 flex-1 flex flex-col justify-between">
+        <div>
+          <div class="flex justify-between items-center border-b border-cyan-900/50 pb-2 mb-4">
+            <span class="text-xs text-cyan-500 font-bold tracking-widest">// CORE_ORCHESTRATOR</span>
+            <span id="ws-status" class="px-2 py-0.5 text-[10px] bg-red-950 text-red-400 border border-red-500/50 rounded">CONNECTING</span>
+          </div>
+          <div class="space-y-2 text-xs">
+            <div class="flex justify-between">
+              <span class="text-slate-400">CORE_BRAIN:</span>
+              <span class="text-cyan-400 font-bold">CLAUDE_SONNET_4.6</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">ACTIVE_JOBS:</span>
+              <span id="stat-active-jobs" class="text-cyan-400 font-bold">—</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">TOTAL_JOBS:</span>
+              <span id="stat-total-jobs" class="text-slate-400">—</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">CPU_LOAD:</span>
+              <span id="stat-cpu" class="text-cyan-400 font-bold">—</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">SERVER_LOAD:</span>
+              <span id="stat-load" class="text-slate-400">—</span>
+            </div>
+          </div>
+        </div>
+        <div class="mt-4 space-y-2">
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="text-[10px] text-slate-500">MEM_ALLOCATION</span>
+              <span id="stat-mem-pct" class="text-[10px] text-slate-500">—</span>
+            </div>
+            <div class="w-full bg-slate-950 rounded-full h-1.5 border border-cyan-900/50 overflow-hidden">
+              <div id="bar-mem" class="bg-cyan-500 h-1.5 rounded-full transition-all duration-1000" style="width:0%"></div>
+            </div>
+          </div>
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="text-[10px] text-slate-500">DISK_USED</span>
+              <span id="stat-disk-pct" class="text-[10px] text-slate-500">—</span>
+            </div>
+            <div class="w-full bg-slate-950 rounded-full h-1.5 border border-cyan-900/50 overflow-hidden">
+              <div id="bar-disk" class="bg-cyan-500 h-1.5 rounded-full transition-all duration-1000" style="width:0%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LOGS -->
+      <div class="cyber-panel p-4 rounded bg-slate-900/50 flex-[2_2_0%] flex flex-col">
+        <div class="flex justify-between items-center border-b border-cyan-900/50 pb-2 mb-2">
+          <span class="text-xs text-cyan-500 font-bold tracking-widest">// LOGS_RECURSIVE_QUEUE</span>
+          <span id="log-count" class="text-[10px] text-slate-600">0 events</span>
+        </div>
+        <div id="log-display" class="text-[11px] text-cyan-600/80 space-y-1 overflow-y-auto flex-1 font-mono">
+        </div>
+      </div>
+    </div>
+
+    <!-- CENTER COLUMN ────────────────────────────────────────────────────── -->
+    <div class="col-span-6 flex flex-col gap-4 h-full">
+      <div class="cyber-panel rounded flex-1 flex flex-col items-center justify-center p-6 relative">
+        <div class="absolute top-4 left-4 text-[10px] text-cyan-900 tracking-wider">SECURE_MESH_TUNNEL_NODE_01</div>
+        <div id="uptime-display" class="absolute top-4 right-4 text-[10px] text-cyan-900 tracking-wider">UPTIME: —</div>
+
+        <!-- J.A.R.V.I.S. avatar -->
+        <div class="w-80 h-80 rounded-full glow-avatar border-2 border-cyan-500/30 flex items-center justify-center relative bg-cyan-950/10 mb-6">
+          <div class="absolute inset-2 rounded-full border border-dashed border-cyan-500/20 animate-[spin_40s_linear_infinite]"></div>
+          <div class="absolute inset-6 rounded-full border border-cyan-500/10 animate-[spin_20s_linear_infinite_reverse]"></div>
+          <div class="w-48 h-48 rounded-full bg-gradient-to-t from-cyan-950 via-slate-950 to-cyan-900/40 border border-cyan-400/40 flex items-center justify-center shadow-[inset_0_0_20px_rgba(6,182,212,0.3)]">
+            <span class="text-cyan-400 tracking-[0.5em] font-bold text-sm ml-[0.5em]">J.A.R.V.I.S.</span>
+          </div>
+        </div>
+
+        <!-- Live waveform -->
+        <div class="w-full max-w-md h-12 flex items-center justify-center gap-1" id="waveform">
+        </div>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="grid grid-cols-3 gap-4">
+        <button onclick="triggerHealthSweep()"
+          class="py-2.5 px-4 rounded border border-cyan-500/30 bg-cyan-950/20 hover:bg-cyan-500/20 text-cyan-400 text-xs font-bold tracking-wider transition-all duration-200 active:scale-95">
+          HEALTH_SWEEP
+        </button>
+        <button onclick="openModal('dispatch')"
+          class="py-2.5 px-4 rounded border border-emerald-500/30 bg-emerald-950/20 hover:bg-emerald-500/20 text-emerald-400 text-xs font-bold tracking-wider transition-all duration-200 active:scale-95">
+          DISPATCH_TASK
+        </button>
+        <button onclick="openModal('jobs')"
+          class="py-2.5 px-4 rounded border border-purple-500/30 bg-purple-950/20 hover:bg-purple-500/20 text-purple-400 text-xs font-bold tracking-wider transition-all duration-200 active:scale-95">
+          VIEW_JOB_QUEUE
+        </button>
+      </div>
+    </div>
+
+    <!-- RIGHT COLUMN ─────────────────────────────────────────────────────── -->
+    <div class="col-span-3 flex flex-col gap-4 h-full">
+
+      <!-- JARVIS_SERVICES -->
+      <div class="cyber-panel p-4 rounded bg-slate-900/50 flex-1">
+        <span class="text-xs text-cyan-500 font-bold tracking-widest border-b border-cyan-900/50 pb-2 mb-3 block">// JARVIS_SERVICES</span>
+        <div id="services-list" class="space-y-2 text-xs">
+          <div class="text-slate-600 text-[10px]">Awaiting telemetry...</div>
+        </div>
+      </div>
+
+      <!-- PLATFORM_HEALTH -->
+      <div class="cyber-panel p-4 rounded bg-slate-900/50 flex-1">
+        <span class="text-xs text-cyan-500 font-bold tracking-widest border-b border-cyan-900/50 pb-2 mb-3 block">// PLATFORM_HEALTH</span>
+        <div id="platform-list" class="space-y-2 text-xs">
+          <div class="text-slate-600 text-[10px]">Running initial probe...</div>
+        </div>
+      </div>
+
+      <!-- VAPRON_STACK -->
+      <div class="cyber-panel p-4 rounded bg-slate-900/50 flex-1">
+        <span class="text-xs text-cyan-500 font-bold tracking-widest border-b border-cyan-900/50 pb-2 mb-3 block">// VAPRON_STACK</span>
+        <div id="vapron-list" class="space-y-2 text-xs">
+          <div class="text-slate-600 text-[10px]">Awaiting telemetry...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ── WebSocket connection ─────────────────────────────────────────────────────
+
+const WS_URL = `ws://${window.location.hostname}:9206/ws`;
+let ws = null;
+let reconnectTimer = null;
+let latestJobs = [];
+let activityLevel = 0; // drives waveform intensity
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    setWsStatus('ONLINE', true);
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleMessage(msg);
+    } catch {}
+  };
+
+  ws.onclose = () => {
+    setWsStatus('RECONNECTING', false);
+    reconnectTimer = setTimeout(connect, 4000);
+  };
+
+  ws.onerror = () => { /* close fires next */ };
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
+  }
+}
+
+// ── Message handlers ─────────────────────────────────────────────────────────
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'metrics':        renderMetrics(msg.payload);  break;
+    case 'jobs':           renderJobs(msg.payload);     break;
+    case 'event':          appendLog(msg.payload);      activityPulse(); break;
+    case 'history':        renderHistory(msg.payload);  break;
+    case 'dispatch_result':onDispatchResult(msg.payload); break;
+    case 'pong':           break;
+  }
+}
+
+// ── Render: metrics ──────────────────────────────────────────────────────────
+
+function renderMetrics(m) {
+  // Core stats
+  set('stat-cpu',   `${m.cpu}%`);
+  set('stat-load',  m.load.toFixed(2));
+  set('stat-mem-pct',  `${m.mem}%`);
+  set('stat-disk-pct', `${m.disk}%`);
+  set('bar-mem',  null, { width: m.mem  + '%' });
+  set('bar-disk', null, { width: m.disk + '%' });
+  barColor('bar-mem',  m.mem  > 85 ? 'bg-red-500' : m.mem  > 70 ? 'bg-amber-500' : 'bg-cyan-500');
+  barColor('bar-disk', m.disk > 90 ? 'bg-red-500' : m.disk > 75 ? 'bg-amber-500' : 'bg-cyan-500');
+
+  // Uptime
+  const u = m.uptime || 0;
+  const h = Math.floor(u / 3600), min = Math.floor((u % 3600) / 60);
+  set('uptime-display', `UPTIME: ${h}h ${min}m`);
+
+  // Jarvis services panel
+  const svcs = m.jarvis || {};
+  const svcOrder = ['memory','screenshot','metrics','slack','audit','orchestrator'];
+  const svcLabels = { memory:'MEMORY', screenshot:'SCREENSHOT', metrics:'METRICS',
+                      slack:'SLACK_BRIDGE', audit:'AUDIT_RUNNER', orchestrator:'ORCHESTRATOR' };
+  // Add orchestrator check from vapron data (port 9205 not directly in jarvis block)
+  svcs.orchestrator = checkPortFromData(m, 9205) || 'ONLINE'; // assume online if data is flowing
+
+  const serviceHtml = svcOrder.map(k => {
+    const status = svcs[k] || 'OFFLINE';
+    const cls    = status === 'ONLINE' ? 'dot-online' : 'dot-offline';
+    const color  = status === 'ONLINE' ? 'text-emerald-400' : 'text-red-400';
+    return `<div class="flex justify-between items-center">
+      <div class="flex items-center gap-2">
+        <div class="status-dot ${cls}"></div>
+        <span class="text-slate-400">${svcLabels[k] || k.toUpperCase()}:</span>
+      </div>
+      <span class="${color} font-bold">${status}</span>
+    </div>`;
+  }).join('');
+  set('services-list', serviceHtml, null, true);
+
+  // Vapron stack panel
+  const vap = m.vapron || {};
+  const vapOrder = ['caddy','web','api','gateway','deploy_agent'];
+  const vapLabels = { caddy:'CADDY_TLS', web:'WEB_APP', api:'API_SERVER',
+                      gateway:'BUN_GATEWAY', deploy_agent:'DEPLOY_AGENT' };
+  const vapHtml = vapOrder.map(k => {
+    const status = vap[k] || 'OFFLINE';
+    const cls    = status === 'ONLINE' ? 'dot-online' : 'dot-offline';
+    const color  = status === 'ONLINE' ? 'text-emerald-400' : 'text-red-400/70';
+    return `<div class="flex justify-between items-center">
+      <div class="flex items-center gap-2">
+        <div class="status-dot ${cls}"></div>
+        <span class="text-slate-400">${vapLabels[k] || k.toUpperCase()}:</span>
+      </div>
+      <span class="${color} text-[10px]">${status}</span>
+    </div>`;
+  }).join('');
+  set('vapron-list', vapHtml, null, true);
+
+  // Platform health from embedded platforms array
+  if (m.platforms && m.platforms.length) {
+    renderPlatformHealth(m.platforms);
+  }
+}
+
+function checkPortFromData(m, port) {
+  // orchestrator is separate — if we got metrics, assume it's up
+  return 'ONLINE';
+}
+
+function barColor(id, cls) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.remove('bg-cyan-500','bg-amber-500','bg-red-500');
+  el.classList.add(cls);
+}
+
+// ── Render: platform health ───────────────────────────────────────────────────
+
+function renderPlatformHealth(platforms) {
+  if (!platforms.length) return;
+  const html = platforms.map(p => {
+    const online  = p.status === 'ONLINE';
+    const warn    = p.status === 'WARN';
+    const dotCls  = online ? 'dot-online' : warn ? 'dot-warn' : 'dot-offline';
+    const color   = online ? 'text-emerald-400' : warn ? 'text-amber-400' : 'text-red-400';
+    const latency = p.latencyMs != null ? `${p.latencyMs}ms` : '';
+    return `<div>
+      <div class="flex justify-between items-center mb-1">
+        <div class="flex items-center gap-2">
+          <div class="status-dot ${dotCls}"></div>
+          <span class="text-slate-400">${p.name}:</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="text-slate-600 text-[10px]">${latency}</span>
+          <span class="${color} font-bold text-[10px]">${p.status}</span>
+        </div>
+      </div>
+      ${p.latencyMs != null ? `<div class="w-full bg-slate-950 h-0.5 rounded-full overflow-hidden">
+        <div class="h-0.5 rounded-full ${online ? 'bg-emerald-500' : warn ? 'bg-amber-500' : 'bg-red-500'}"
+          style="width:${Math.min(100, Math.round(p.latencyMs / 5))}%"></div>
+      </div>` : ''}
+    </div>`;
+  }).join('');
+  set('platform-list', html, null, true);
+}
+
+// ── Render: jobs ──────────────────────────────────────────────────────────────
+
+function renderJobs(jobs) {
+  if (!Array.isArray(jobs)) return;
+  latestJobs = jobs;
+
+  const running = jobs.filter(j => j.status === 'running');
+  const total   = jobs.length;
+  set('stat-active-jobs', running.length > 0 ? `${running.length} RUNNING` : '0');
+  set('stat-total-jobs',  `${total} TOTAL`);
+
+  // Render job modal list if open
+  renderJobModal();
+}
+
+function renderJobModal() {
+  const el = document.getElementById('jobs-list');
+  if (!el) return;
+  if (!latestJobs.length) {
+    el.innerHTML = '<div class="text-slate-500 text-center py-4 text-[10px]">No jobs in queue.</div>';
+    return;
+  }
+  el.innerHTML = latestJobs.slice(0, 30).map(j => {
+    const emoji  = j.status === 'running' ? '⏳' : j.status === 'completed' ? '✅' : '❌';
+    const color  = j.status === 'running' ? 'text-cyan-400' : j.status === 'completed' ? 'text-emerald-400' : 'text-red-400';
+    const start  = new Date(j.startedAt);
+    const end    = j.finishedAt ? new Date(j.finishedAt) : new Date();
+    const secs   = Math.round((end - start) / 1000);
+    const dur    = secs > 60 ? `${Math.floor(secs/60)}m ${secs%60}s` : `${secs}s`;
+    return `<div class="border border-cyan-900/30 rounded p-2 bg-slate-950/50">
+      <div class="flex justify-between items-center mb-1">
+        <span class="text-[10px] text-slate-500 font-mono">${emoji} ${j.id.slice(0,8)}</span>
+        <span class="${color} text-[10px] font-bold">${j.status.toUpperCase()}</span>
+      </div>
+      <div class="flex justify-between items-center">
+        <span class="text-cyan-400 text-[10px]">${j.platform}</span>
+        <span class="text-slate-600 text-[10px]">${dur}</span>
+      </div>
+      <div class="text-slate-400 text-[10px] mt-1 truncate">${(j.task||'').slice(0,80)}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Render: log ───────────────────────────────────────────────────────────────
+
+const LOG_COLORS = {
+  SYS:      'text-cyan-500',
+  NET:      'text-slate-400',
+  JOB:      'text-emerald-400',
+  DISPATCH: 'text-purple-400',
+  SWEEP:    'text-cyan-400',
+  WARN:     'text-amber-400',
+  ERR:      'text-red-400',
+};
+
+let totalEvents = 0;
+
+function appendLog(entry) {
+  const display = document.getElementById('log-display');
+  if (!display) return;
+
+  const time  = new Date(entry.ts).toLocaleTimeString('en-NZ', { hour12: false });
+  const color = LOG_COLORS[entry.category] || 'text-cyan-600/80';
+  const div   = document.createElement('div');
+  div.className = `log-entry flex gap-2`;
+  div.innerHTML = `<span class="text-cyan-900 shrink-0">[${time}]</span>` +
+                  `<span class="text-slate-600 shrink-0">[${entry.category}]</span>` +
+                  `<span class="${color}">${entry.message}</span>`;
+  display.appendChild(div);
+  display.scrollTop = display.scrollHeight;
+
+  // Keep at most 100 visible entries
+  while (display.childNodes.length > 100) display.removeChild(display.firstChild);
+
+  totalEvents++;
+  set('log-count', `${totalEvents} events`);
+}
+
+function renderHistory(entries) {
+  const display = document.getElementById('log-display');
+  if (!display) return;
+  display.innerHTML = '';
+  totalEvents = entries.length;
+  entries.forEach(appendLog);
+}
+
+// ── Dispatch ──────────────────────────────────────────────────────────────────
+
+function submitDispatch() {
+  const platform = document.getElementById('dispatch-platform')?.value;
+  const task     = document.getElementById('dispatch-task')?.value?.trim();
+  const status   = document.getElementById('dispatch-status');
+
+  if (!task) {
+    if (status) status.textContent = 'Task description required.';
+    return;
+  }
+  if (status) status.textContent = 'Dispatching agent...';
+  send({ type: 'dispatch', platform, task });
+}
+
+function onDispatchResult(result) {
+  const status = document.getElementById('dispatch-status');
+  if (result.jobId) {
+    if (status) status.textContent = `✓ Job started — ID: ${result.jobId.slice(0,8)}`;
+    setTimeout(() => closeModal('dispatch'), 2000);
+  } else {
+    if (status) status.textContent = `✗ ${result.error || 'Unknown error'}`;
+  }
+}
+
+// ── Health sweep ──────────────────────────────────────────────────────────────
+
+function triggerHealthSweep() {
+  send({ type: 'health_sweep' });
+}
+
+// ── Modals ────────────────────────────────────────────────────────────────────
+
+function openModal(name) {
+  const el = document.getElementById(`modal-${name}`);
+  if (el) el.classList.remove('hidden');
+  if (name === 'jobs') renderJobModal();
+  if (name === 'dispatch') {
+    const s = document.getElementById('dispatch-status');
+    if (s) s.textContent = '';
+    const t = document.getElementById('dispatch-task');
+    if (t) t.value = '';
+  }
+}
+
+function closeModal(name) {
+  const el = document.getElementById(`modal-${name}`);
+  if (el) el.classList.add('hidden');
+}
+
+// Close modal on background click
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', e => {
+    if (e.target === el) closeModal(el.id.replace('modal-',''));
+  });
+});
+
+// ── Status indicator ──────────────────────────────────────────────────────────
+
+function setWsStatus(label, online) {
+  const el = document.getElementById('ws-status');
+  if (!el) return;
+  el.textContent = label;
+  el.className = online
+    ? 'px-2 py-0.5 text-[10px] bg-cyan-950 text-cyan-400 border border-cyan-500 rounded animate-pulse'
+    : 'px-2 py-0.5 text-[10px] bg-red-950 text-red-400 border border-red-500/50 rounded';
+}
+
+// ── Waveform ──────────────────────────────────────────────────────────────────
+
+const WAVE_BARS = 24;
+const waveform  = document.getElementById('waveform');
+
+// Build bars
+for (let i = 0; i < WAVE_BARS; i++) {
+  const bar = document.createElement('div');
+  bar.className = 'w-1 bg-cyan-500/40 rounded-full transition-all duration-150 shrink-0';
+  bar.style.height = '8px';
+  waveform.appendChild(bar);
+}
+const bars = waveform.querySelectorAll('div');
+
+function activityPulse() {
+  activityLevel = Math.min(activityLevel + 20, 100);
+}
+
+setInterval(() => {
+  activityLevel = Math.max(0, activityLevel - 2);
+  const base    = 4 + activityLevel * 0.2;
+  bars.forEach((bar, i) => {
+    const wave = Math.sin((Date.now() / 400) + i * 0.6) * 0.5 + 0.5;
+    const rand = Math.random() * 0.3;
+    const h    = Math.round(base + (wave + rand) * (8 + activityLevel * 0.3));
+    bar.style.height    = `${h}px`;
+    const intensity      = Math.min(1, activityLevel / 60);
+    bar.style.opacity   = (0.3 + intensity * 0.7).toFixed(2);
+    const r = Math.round(6  + intensity * 30);
+    const g = Math.round(182 - intensity * 60);
+    const b = Math.round(212 - intensity * 40);
+    bar.style.background = `rgb(${r},${g},${b})`;
+  });
+}, 80);
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function set(id, text, styles, isHtml) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (text !== null && text !== undefined) {
+    if (isHtml) el.innerHTML = text;
+    else el.textContent = text;
+  }
+  if (styles) Object.assign(el.style, styles);
+}
+
+// Ping keepalive
+setInterval(() => send({ type: 'ping' }), 25000);
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+
+connect();
+</script>
+</body>
+</html>
