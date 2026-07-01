@@ -1,0 +1,24 @@
+{
+  "name": "jarvis-platform",
+  "version": "1.0.0",
+  "description": "Jarvis autonomous agent platform — MarcoReid Intelligence Systems",
+  "type": "module",
+  "scripts": {
+    "memory": "node src/memory-server.js",
+    "screenshot": "node src/screenshot-service.js",
+    "metrics": "node src/metrics-collector.js",
+    "slack": "node src/slack-bridge.js",
+    "audit": "node src/audit-runner.js",
+    "health": "bash scripts/health-check.sh"
+  },
+  "dependencies": {
+    "@slack/bolt": "^4.7.3",
+    "better-sqlite3": "^9.4.3",
+    "express": "^4.18.3",
+    "node-cron": "^4.5.0",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

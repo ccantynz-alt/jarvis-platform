@@ -2,6 +2,12 @@ import express from 'express';
 import { spawn } from 'child_process';
 import { readFileSync } from 'fs';
 import { randomUUID } from 'crypto';
+import cron from 'node-cron';
+
+const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
+const AUDIT         = 'http://127.0.0.1:9204';
+const SCREENSHOT    = 'http://127.0.0.1:9201';
+const MEMORY_SVC    = 'http://127.0.0.1:9200';
 
 const app = express();
 app.use(express.json());
@@ -57,7 +63,7 @@ async function logToMemory(payload) {
 function runLocal(platform, path, prompt, job) {
   const proc = spawn(
     'claude',
-    ['--print', prompt],
+    ['--dangerously-skip-permissions', '--print', prompt],
     {
       cwd: path,
       env: { ...process.env, HOME: '/root' },
@@ -97,7 +103,7 @@ function runLocal(platform, path, prompt, job) {
 function runRemote(platform, server, path, prompt, job) {
   // Escape single quotes in the prompt for shell safety
   const safePrompt = prompt.replace(/'/g, "'\\''");
-  const sshCmd = `cd ${path} && claude --print '${safePrompt}'`;
+  const sshCmd = `cd ${path} && claude --dangerously-skip-permissions --print '${safePrompt}'`;
 
   const proc = spawn(
     'ssh',
@@ -255,6 +261,136 @@ app.get('/events', (req, res) => {
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', port: PORT, jobs: jobs.size, events: eventLog.length });
 });
+
+// ── Cron helpers ─────────────────────────────────────────────────────────────
+
+async function slackSend(text) {
+  try {
+    await fetch(`${SLACK_BRIDGE}/slack/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+  } catch (e) {
+    console.error('[cron] slack send failed:', e.message);
+  }
+}
+
+async function cronDailyAudit() {
+  logEvent('CRON', 'Daily audit sprint starting — scanning all platforms');
+  const registry = loadRegistry();
+  const names = Object.keys(registry).filter(p => p !== 'jarvis');
+
+  for (const platform of names) {
+    try {
+      logEvent('CRON', `Audit: ${platform}`);
+      const r = await fetch(`${AUDIT}/audit/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform }),
+      });
+      const data = await r.json();
+      const score  = data.health_score ?? '?';
+      const issues = (data.issues || []).length;
+      const emoji  = score > 80 ? '✅' : score > 50 ? '⚠️' : '🔴';
+      await slackSend(`${emoji} *${platform}* audit — score ${score}/100, ${issues} issue(s)`);
+    } catch (e) {
+      await slackSend(`❌ *${platform}* audit failed: ${e.message}`);
+    }
+  }
+  logEvent('CRON', 'Daily audit sprint complete');
+}
+
+async function cronDailyScreenshots() {
+  logEvent('CRON', 'Daily screenshot baseline run starting');
+  const PLATFORM_URLS = {
+    zoobicon: 'https://zoobicon.com',
+    vapron:   'https://vapron.ai',
+    alecrae:  'https://alecrae.com',
+    gatetest: 'https://gatetest.ai',
+    voxlen:   'https://voxlen.com',
+    bookaride:'https://bookaride.com',
+  };
+
+  for (const [platform, url] of Object.entries(PLATFORM_URLS)) {
+    try {
+      logEvent('CRON', `Screenshot: ${platform}`);
+      await fetch(`${SCREENSHOT}/screenshot/capture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, baseline: true }),
+      });
+    } catch (e) {
+      console.error(`[cron] screenshot ${platform} failed:`, e.message);
+    }
+  }
+  await slackSend(`📸 Daily screenshot baselines captured for ${Object.keys(PLATFORM_URLS).length} platforms`);
+  logEvent('CRON', 'Daily screenshot baseline run complete');
+}
+
+async function cronWeeklySummary() {
+  logEvent('CRON', 'Weekly health summary starting');
+  try {
+    const r = await fetch(`${MEMORY_SVC}/memory/summary`);
+    const text = await r.text();
+    const mem = JSON.parse(text.replace(/<!DOCTYPE[\s\S]*$/i, '').trim());
+    const platforms = mem.platforms || [];
+
+    const day = new Date().toLocaleDateString('en-NZ', {
+      timeZone: 'Pacific/Auckland', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+    });
+
+    let msg = `📊 *JARVIS WEEKLY HEALTH SUMMARY — ${day}*\n\n`;
+
+    const healthy  = platforms.filter(p => p.health_score > 80);
+    const warning  = platforms.filter(p => p.health_score > 0 && p.health_score <= 80);
+    const unknown  = platforms.filter(p => p.health_score === 0);
+
+    if (healthy.length)  msg += `*Healthy (${healthy.length}):* ${healthy.map(p => `✅ ${p.name}`).join('  ')}\n`;
+    if (warning.length) {
+      msg += `\n*Needs attention:*\n`;
+      for (const p of warning) {
+        msg += `⚠️ *${p.name}* — score ${p.health_score}/100`;
+        if (p.last_issue) msg += ` — _${String(p.last_issue).slice(0, 80)}_`;
+        msg += '\n';
+      }
+    }
+    if (unknown.length)  msg += `\n*Not yet audited:* ${unknown.map(p => `❓ ${p.name}`).join('  ')}\n`;
+    if (mem.open_issues > 0) msg += `\n⚠️ *${mem.open_issues} open issues across all platforms*\n`;
+
+    const runningJobs = Array.from(jobs.values()).filter(j => j.status === 'running');
+    if (runningJobs.length) msg += `\n⏳ *${runningJobs.length} agent job(s) currently running*`;
+
+    await slackSend(msg);
+  } catch (e) {
+    await slackSend(`❌ Weekly summary failed: ${e.message}`);
+  }
+  logEvent('CRON', 'Weekly health summary sent');
+}
+
+// ── Cron schedule ─────────────────────────────────────────────────────────────
+// 6am NZ = UTC 18:00 (NZST, UTC+12) or 17:00 (NZDT, UTC+13 in summer)
+// Running at 18:00 UTC covers standard time; close enough year-round.
+
+cron.schedule('0 18 * * *', () => {
+  console.log('[cron] 6am daily audit sprint triggered');
+  cronDailyAudit().catch(e => console.error('[cron] audit error:', e.message));
+});
+
+cron.schedule('0 18 * * *', () => {
+  console.log('[cron] 6am daily screenshot baseline triggered');
+  cronDailyScreenshots().catch(e => console.error('[cron] screenshot error:', e.message));
+});
+
+cron.schedule('0 19 * * 1', () => {
+  console.log('[cron] Monday 7am weekly summary triggered');
+  cronWeeklySummary().catch(e => console.error('[cron] weekly summary error:', e.message));
+});
+
+// Manual trigger endpoints for testing
+app.post('/cron/audit',     (_req, res) => { cronDailyAudit();       res.json({ triggered: 'audit' }); });
+app.post('/cron/screenshots',(_req, res) => { cronDailyScreenshots(); res.json({ triggered: 'screenshots' }); });
+app.post('/cron/weekly',    (_req, res) => { cronWeeklySummary();    res.json({ triggered: 'weekly' }); });
 
 logEvent('SYS', 'Orchestrator initialized — ready to dispatch agents');
 
