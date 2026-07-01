@@ -14,7 +14,7 @@
 
 import express from 'express';
 import { App as BoltApp } from '@slack/bolt';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -501,6 +501,62 @@ app.post('/slack/alert', async (req, res) => {
   const text  = `${emoji} *JARVIS ALERT — ${(platform || '').toUpperCase()}*\n${message}`;
   const result = await sendSlack(text);
   res.json(result);
+});
+
+// POST /slack/image-alert — upload an image file to Slack and post with a message
+// Uses Slack's current upload flow: getUploadURLExternal → PUT → completeUploadExternal
+app.post('/slack/image-alert', async (req, res) => {
+  const { platform, message, filepath, filename } = req.body;
+  if (!filepath || !filename) return res.status(400).json({ error: 'filepath and filename required' });
+  if (!existsSync(filepath)) return res.status(400).json({ error: `File not found: ${filepath}` });
+  if (!SLACK_BOT_TOKEN) return res.status(503).json({ error: 'no_token' });
+
+  try {
+    const fileData = readFileSync(filepath);
+    const fileSize = fileData.length;
+
+    // Step 1: get upload URL
+    const urlRes = await fetch('https://slack.com/api/files.getUploadURLExternal', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename, length: fileSize }),
+    }).then(r => r.json());
+
+    if (!urlRes.ok) {
+      return res.status(500).json({ error: `getUploadURL failed: ${urlRes.error}` });
+    }
+
+    // Step 2: PUT the file
+    await fetch(urlRes.upload_url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'image/png' },
+      body: fileData,
+    });
+
+    // Step 3: complete upload, post to channel
+    const channel = (SLACK_CHANNEL || '#jarvis').replace(/^#/, '');
+    const completeRes = await fetch('https://slack.com/api/files.completeUploadExternal', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        files: [{ id: urlRes.file_id }],
+        channel_id: channel,
+        initial_comment: message || `📸 Screenshot from *${platform || 'unknown'}*`,
+      }),
+    }).then(r => r.json());
+
+    if (!completeRes.ok) {
+      console.error('[slack] completeUpload failed:', completeRes.error);
+      // Fall back to text-only alert
+      await sendSlack(`${message || '📸 Screenshot'} _(image upload failed: ${completeRes.error})_`);
+    }
+
+    res.json({ ok: completeRes.ok, file_id: urlRes.file_id });
+  } catch (e) {
+    console.error('[slack] image-alert error:', e.message);
+    await sendSlack(`📸 Visual regression detected on *${platform}* — image upload failed: ${e.message}`);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // POST /slack/events — legacy Slack HTTP Events API fallback
