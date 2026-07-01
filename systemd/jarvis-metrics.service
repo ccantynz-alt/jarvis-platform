@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis Metrics Collector
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/usr/bin/node src/metrics-collector.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target

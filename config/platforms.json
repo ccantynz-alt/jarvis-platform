@@ -53,6 +53,19 @@
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
       "tech_stack": ["TypeScript", "React", "Next.js"],
+      "status": "active",
+      "services": ["alecrae-api", "alecrae-mta", "alecrae-web"],
+      "port": 4100
+    },
+    "jarvis": {
+      "name": "jarvis",
+      "display_name": "Jarvis Platform",
+      "server": "66.42.121.161",
+      "path": "/opt/jarvis",
+      "repo": "git@github.com:ccantynz-alt/jarvis-platform.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["Node.js", "JavaScript"],
       "status": "active"
     },
     "voxlen": {

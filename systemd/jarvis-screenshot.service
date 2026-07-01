@@ -1,0 +1,18 @@
+[Unit]
+Description=Jarvis Screenshot Service (CDP)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/usr/bin/node src/screenshot-service.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/jarvis/config/secrets.env
+
+[Install]
+WantedBy=multi-user.target
