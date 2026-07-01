@@ -87,6 +87,12 @@ function detectIntent(raw) {
   // Strip Slack formatting tags, normalise whitespace
   const text = raw.toLowerCase().replace(/<[^>]+>/g, '').trim();
 
+  // "ask jarvis ..." — highest priority, must match before other rules
+  if (/^ask\s+(jarvis\s+)?/.test(text)) {
+    const question = raw.replace(/<[^>]+>/g, '').replace(/^ask\s+(jarvis\s+)?/i, '').trim();
+    return { type: 'ask', question };
+  }
+
   if (/\b(briefing|morning report|daily report|morning|good morning)\b/.test(text)) {
     return { type: 'briefing' };
   }
@@ -173,6 +179,22 @@ async function sendSlack(text, channel = SLACK_CHANNEL) {
 }
 
 // ── Command handlers ─────────────────────────────────────────────────────────
+
+async function handleAsk(question, channel) {
+  if (!question) {
+    return sendSlack('Ask me something — e.g. "ask jarvis what broke on vapron this week"', channel);
+  }
+  try {
+    const r = await fetchJSON(`${MEMORY}/memory/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question }),
+    });
+    return sendSlack(`🧠 ${r.answer || 'No answer found.'}`, channel);
+  } catch (e) {
+    return sendSlack(`❌ Memory query failed: ${e.message}`, channel);
+  }
+}
 
 async function handleDispatch(rawText, platform, channel) {
   const task = rawText.replace(/<[^>]+>/g, '').trim();
@@ -403,6 +425,7 @@ async function handleCommand(rawText, channel) {
   console.log(`[slack] intent=${JSON.stringify(intent)} text="${rawText.replace(/<[^>]+>/g, '').slice(0, 60)}"`);
 
   switch (intent.type) {
+    case 'ask':            return handleAsk(intent.question, channel);
     case 'dispatch':       return handleDispatch(rawText, intent.platform, channel);
     case 'jobs':           return handleJobs(channel);
     case 'status':         return handleStatus(channel);
