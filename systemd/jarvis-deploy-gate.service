@@ -1,0 +1,19 @@
+[Unit]
+Description=Jarvis Deploy Gate — GateTest scan on every platform deploy
+After=network.target jarvis-memory.service jarvis-slack.service jarvis-orchestrator.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/usr/bin/node src/deploy-gate.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+Environment=GATETEST_PATH=/opt/gatetest
+EnvironmentFile=/opt/jarvis/config/secrets.env
+
+[Install]
+WantedBy=multi-user.target
