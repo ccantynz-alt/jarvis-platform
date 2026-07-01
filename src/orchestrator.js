@@ -130,8 +130,9 @@ function runRemote(platform, server, path, prompt, job) {
 }
 
 // POST /dispatch  { platform, task }
+// platform="auto" → scan task text for a known platform name, fall back to "vapron"
 app.post('/dispatch', async (req, res) => {
-  const { platform, task } = req.body || {};
+  let { platform, task } = req.body || {};
 
   if (!platform || !task) {
     return res.status(400).json({ error: 'platform and task are required' });
@@ -142,6 +143,16 @@ app.post('/dispatch', async (req, res) => {
     registry = loadRegistry();
   } catch (e) {
     return res.status(500).json({ error: 'failed to load platform registry: ' + e.message });
+  }
+
+  // Auto-detect platform from task text when caller passes platform="auto"
+  if (platform === 'auto') {
+    const taskLower = task.toLowerCase();
+    const matched = Object.keys(registry).find(p =>
+      new RegExp(`\\b${p}\\b`).test(taskLower) || taskLower.includes(p),
+    );
+    platform = matched ?? 'vapron';
+    console.log(`[orchestrator] auto-detected platform="${platform}" from task text`);
   }
 
   const entry = registry[platform];
