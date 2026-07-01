@@ -164,7 +164,13 @@ app.post('/dispatch', async (req, res) => {
     const matched = Object.keys(registry).find(p =>
       new RegExp(`\\b${p}\\b`).test(taskLower) || taskLower.includes(p),
     );
-    platform = matched ?? 'vapron';
+    if (!matched) {
+      return res.status(400).json({
+        error: 'Could not detect platform from task text. Which platform?',
+        known: Object.keys(registry),
+      });
+    }
+    platform = matched;
     console.log(`[orchestrator] auto-detected platform="${platform}" from task text`);
   }
 

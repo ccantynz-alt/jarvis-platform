@@ -74,12 +74,10 @@ function matchPlatform(text) {
 // ── Intent detection ──────────────────────────────────────────────────────────
 
 const DISPATCH_VERBS = [
-  'fix', 'repair', 'build', 'deploy', 'upgrade', 'update', 'refactor',
-  'improve', 'add', 'remove', 'implement', 'create', 'change', 'rewrite',
-  'make', 'set', 'enable', 'disable', 'migrate', 'clean', 'optimize',
-  'debug', 'investigate', 'resolve', 'ship', 'release', 'install', 'test',
-  'write', 'generate', 'fetch', 'delete', 'reset', 'configure', 'connect',
+  'fix', 'upgrade', 'build', 'repair', 'add', 'create', 'update', 'deploy', 'run', 'scan',
 ];
+
+const QUESTION_WORDS = ['what', 'how', 'why', 'is', 'are', 'does', 'can'];
 
 /**
  * Classify raw Slack message text into one of:
@@ -113,7 +111,13 @@ function detectIntent(raw) {
     return { type: 'status' };
   }
 
-  // Dispatch — has an action verb
+  // Questions (what/how/why/is/are/does/can) → status, never dispatch
+  const isQuestion = QUESTION_WORDS.some(w => new RegExp(`^${w}\\b`).test(text));
+  if (isQuestion) {
+    return platform ? { type: 'platform-status', platform } : { type: 'status' };
+  }
+
+  // Dispatch — has a recognised action verb
   const hasVerb = DISPATCH_VERBS.some(v => new RegExp(`\\b${v}\\b`).test(text));
   if (hasVerb) {
     return { type: 'dispatch', platform: platform ?? 'auto' };
@@ -160,7 +164,11 @@ async function handleDispatch(rawText, platform, channel) {
   let resolvedPlatform = platform;
 
   if (platform === 'auto') {
-    resolvedPlatform = matchPlatform(task) ?? 'vapron';
+    resolvedPlatform = matchPlatform(task);
+    if (!resolvedPlatform) {
+      const known = platformNames().join(', ');
+      return sendSlack(`Which platform? Known: ${known}`, channel);
+    }
   }
 
   await sendSlack(
