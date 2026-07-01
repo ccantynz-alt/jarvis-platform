@@ -288,11 +288,18 @@ async function handleStatus(channel) {
     }
 
     const platforms = mem.platforms || [];
-    if (platforms.length) {
+    // Only show platforms in the registry — memory can hold stale/removed entries
+    const knownPlatforms = platformNames();
+    const filtered = platforms.filter(p => knownPlatforms.includes(p.name));
+    if (filtered.length) {
       msg += `\n*Platform health:*\n`;
-      for (const p of platforms) {
-        const e = p.health_score > 80 ? '✅' : p.health_score > 50 ? '⚠️' : '🔴';
-        msg += `${e} ${p.name}: ${p.status} (${p.health_score}/100)\n`;
+      for (const p of filtered) {
+        // Use status string as primary signal; fall back to health_score only when set
+        const healthy = p.status === 'healthy' || p.health_score > 80;
+        const warn    = p.status === 'working'  || (p.health_score > 50 && p.health_score <= 80);
+        const e = healthy ? '✅' : warn ? '⚠️' : '🔴';
+        const score = p.health_score > 0 ? ` (${p.health_score}/100)` : '';
+        msg += `${e} ${p.name}: ${p.status}${score}\n`;
       }
     }
     if (mem.open_issues > 0) {
@@ -354,22 +361,29 @@ async function handleBriefing(channel) {
 
   try {
     const memory = await fetchJSON(`${MEMORY}/memory/summary`);
-    const platforms = memory.platforms || [];
+    // Filter to only registry platforms — drop stale memory entries
+    const allPlatforms = memory.platforms || [];
+    const platforms = allPlatforms.filter(p => names.includes(p.name));
 
-    const healthy   = platforms.filter(p => p.health_score > 80);
-    const warning   = platforms.filter(p => p.health_score > 0 && p.health_score <= 80);
+    // Healthy = status is 'healthy', OR health_score > 80 if set
+    const healthy   = platforms.filter(p => p.status === 'healthy' || p.health_score > 80);
+    const warning   = platforms.filter(p => !healthy.includes(p) && (p.status === 'working' || p.status === 'error' || (p.health_score > 0 && p.health_score <= 80)));
     const audited   = new Set(platforms.map(p => p.name));
     const unaudited = names.filter(n => !audited.has(n));
 
     if (healthy.length) {
       msg += `*Healthy:*\n`;
-      for (const p of healthy) msg += `✅ ${p.name} (${p.health_score}/100)\n`;
+      for (const p of healthy) {
+        const score = p.health_score > 0 ? ` (${p.health_score}/100)` : '';
+        msg += `✅ ${p.name}${score}\n`;
+      }
       msg += '\n';
     }
     if (warning.length) {
       msg += `*Needs attention:*\n`;
       for (const p of warning) {
-        msg += `⚠️ ${p.name} (${p.health_score}/100)`;
+        const score = p.health_score > 0 ? ` (${p.health_score}/100)` : '';
+        msg += `⚠️ ${p.name}${score}`;
         if (p.last_issue) msg += ` — _${String(p.last_issue).slice(0, 80)}_`;
         msg += '\n';
       }
