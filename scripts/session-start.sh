@@ -66,6 +66,28 @@ except Exception as e:
   print(f'Memory read error: {e}')
 " 2>/dev/null || echo "Memory service not responding — start with: systemctl start jarvis-memory"
 
+# GateTest awareness
+echo ""
+echo "━━━ GATETEST ━━━"
+if [ -d "/opt/gatetest" ]; then
+  # Check if the GateTest process is running
+  if pgrep -f "gatetest" > /dev/null 2>&1 || curl -sf http://127.0.0.1:4200/health > /dev/null 2>&1; then
+    echo "✅ GateTest: RUNNING at /opt/gatetest"
+  else
+    echo "⚠️  GateTest: installed at /opt/gatetest (not running)"
+  fi
+  echo ""
+  echo "  Before frontend changes — capture baseline:"
+  echo "    node /opt/gatetest/bin/gatetest.js scan --url <platform_url> --modules visualRegression"
+  echo "  After changes — compare:"
+  echo "    node /opt/gatetest/bin/gatetest.js scan --url <platform_url> --modules visualRegression"
+  echo "  ⚠️  NEVER deploy frontend changes without a visual diff."
+  echo ""
+  echo "  MCP server: npx @gatetest/mcp-server"
+else
+  echo "❌ GateTest not found at /opt/gatetest"
+fi
+
 # Service health
 echo ""
 echo "━━━ JARVIS SERVICES ━━━"
