@@ -221,6 +221,70 @@ async function pollAndDiffJobs() {
 
 app.use(express.json());
 
+// ── Visual baselines static file server ──────────────────────────────────────
+// Serves /opt/jarvis/visual-baselines/ at /screenshots/ so Craig can browse
+// baseline and diff images via SSH tunnel: ssh -L 9206:localhost:9206 <server>
+// then open http://localhost:9206/screenshots/
+//
+// Route order matters: the GET listing handlers must come BEFORE app.use(static)
+// so that directory requests get the HTML index instead of a static 302.
+
+const VISUAL_BASELINES_DIR = '/opt/jarvis/visual-baselines';
+
+// GET /screenshots + /screenshots/ — HTML directory listing
+// Single handler for both forms (Express matches /screenshots against /screenshots/ too,
+// so a separate redirect handler causes an infinite loop).
+app.get(['/screenshots', '/screenshots/'], (req, res) => {
+  if (!existsSync(VISUAL_BASELINES_DIR)) {
+    return res.status(404).send('<pre>Directory /opt/jarvis/visual-baselines does not exist yet.</pre>');
+  }
+
+  let files;
+  try {
+    files = readdirSync(VISUAL_BASELINES_DIR)
+      .map(name => {
+        const st = statSync(`${VISUAL_BASELINES_DIR}/${name}`);
+        return { name, size: st.size, mtime: st.mtime, isDir: st.isDirectory() };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch (e) {
+    return res.status(500).send(`<pre>Error reading directory: ${e.message}</pre>`);
+  }
+
+  const rows = files.map(f => {
+    const href = `/screenshots/${encodeURIComponent(f.name)}${f.isDir ? '/' : ''}`;
+    const size = f.isDir ? '—' : `${(f.size / 1024).toFixed(1)} KB`;
+    const ts   = f.mtime.toISOString().replace('T', ' ').slice(0, 19);
+    const icon = f.isDir ? '📁' : f.name.match(/\.(png|jpg|webp|gif)$/i) ? '🖼️' : '📄';
+    return `<tr><td>${icon} <a href="${href}">${f.name}</a></td><td>${size}</td><td>${ts}</td></tr>`;
+  }).join('\n');
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Visual Baselines</title>
+<style>
+  body{font-family:monospace;background:#0d1117;color:#c9d1d9;padding:2rem}
+  h1{color:#58a6ff}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
+  table{border-collapse:collapse;width:100%}
+  th{text-align:left;border-bottom:1px solid #30363d;padding:.4rem .8rem;color:#8b949e}
+  td{padding:.3rem .8rem;border-bottom:1px solid #21262d}
+  tr:hover td{background:#161b22}
+</style></head>
+<body>
+<h1>📸 Visual Baselines</h1>
+<p style="color:#8b949e">${VISUAL_BASELINES_DIR} — ${files.length} item(s)</p>
+<table><thead><tr><th>Name</th><th>Size</th><th>Modified</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="3" style="color:#8b949e">No files yet.</td></tr>'}</tbody>
+</table></body></html>`);
+});
+
+// Static file serving for individual files under /screenshots/<filename>
+// Registered after the listing handler so directory GET is handled above.
+app.use('/screenshots', express.static(VISUAL_BASELINES_DIR, {
+  index: false,
+  dotfiles: 'ignore',
+}));
+
 app.get('/', (req, res) => {
   res.sendFile(join(__dirname, '../public/dashboard.html'));
 });
