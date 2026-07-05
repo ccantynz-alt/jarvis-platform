@@ -14,7 +14,7 @@ const app = express();
 app.use(express.json());
 
 const PORT = 9205;
-const OWN_IP = '66.42.121.161';
+const OWN_IP = process.env.OWN_IP || '66.42.121.161';
 const MEMORY_URL = 'http://127.0.0.1:9200';
 const REGISTRY_PATH = '/opt/jarvis/config/platforms.json';
 
