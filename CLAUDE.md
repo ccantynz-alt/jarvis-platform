@@ -15,16 +15,17 @@ stay healthy without human intervention.
 Jarvis serves Craig Canty / MarcoReid Intelligence Systems.
 
 Platforms Jarvis monitors (source of truth: `config/platforms.json` —
-read it, don't trust this list):
-- Zoobicon (zoobicon.com) — AI website builder
-- Vapron (vapron.ai) — self-hosted infrastructure platform
-- AlecRae (alecrae.com) — AI legal + accounting platform; **runs on THIS box**
-  at `/opt/alecrae` (bun API on :4100, Next.js on :4200, user `alecrae`)
-- MarcoReid (marcoreid.com) — premium professional tier
-- GateTest (gatetest.ai) — code quality platform, local checkout `/opt/gatetest`
-- Gluecron (gluecron.com) — AI-native git host; **runs on THIS box** as a
-  Docker container behind Coolify/Traefik (see Gotchas below)
-- eSIM MVNO — pre-launch
+read it, don't trust this list). As of 2026-07-06 the registry contains:
+zoobicon, vapron, bookaride, gatetest, alecrae, jarvis, voxlen, gluecron.
+Notes:
+- AlecRae **runs on THIS box** at `/opt/alecrae` (bun API :4100, Next.js
+  :4200, user `alecrae`)
+- Gluecron **runs on THIS box** as a Docker container behind
+  Coolify/Traefik (see Gotchas below)
+- GateTest has a local checkout at `/opt/gatetest`
+- MarcoReid and the eSIM MVNO are talked about but NOT yet in the
+  registry — Haiku intent routing can't target a platform that isn't
+  registered. Add them when they're real.
 
 ---
 
@@ -38,7 +39,7 @@ read it, don't trust this list):
 | jarvis-slack | src/slack-bridge.js | 9203 | loopback | Slack command interface |
 | jarvis-audit | src/audit-runner.js | 9204 | loopback | Build + test audit runner |
 | jarvis-orchestrator | src/orchestrator.js | 9205 | loopback | Dispatch engine — spawns Claude agents (local + SSH) |
-| jarvis-dashboard | src/dashboard-server.js | 9206 | **0.0.0.0 — PUBLIC, NO AUTH (known debt)** | Status panel + screenshot browser |
+| jarvis-dashboard | src/dashboard-server.js | 9206 | 0.0.0.0 + token auth | Status panel + screenshot browser; token = JARVIS_DASHBOARD_TOKEN in secrets.env, login once per device via `?token=` |
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | loopback | GateTest scan gating platform deploys |
 
 All are managed by systemd (`systemctl status 'jarvis-*'`) and survive reboots.
@@ -129,8 +130,7 @@ Public (0.0.0.0):
 - :22 sshd
 - :80 / :443 — **Coolify's Traefik** (`coolify-proxy` container) — TLS front door for gluecron.com and other Coolify apps
 - :6001/:6002 — Coolify realtime; :8000 — Coolify web UI; :8080 — Traefik (published by Coolify)
-- :9206 — jarvis-dashboard (no auth — known debt, see below)
-- :631 — cupsd (printing daemon; should not be public, known debt)
+- :9206 — jarvis-dashboard (token auth; `/health` open for off-box watcher)
 
 Loopback only:
 - :4100 AlecRae API (bun) · :4200 AlecRae web (next)
@@ -191,27 +191,36 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   timeout, HTTP 000), not error. TLS completes, then silence. Fix: label
   `traefik.docker.network=coolify`, recreate only that service. Cost us
   gluecron.com downtime until 2026-07-06.
-- **`gluecron-update.service`** (legacy auto-deploy timer, not Jarvis's)
-  fails every 60s — its git remote lacks HTTPS creds. Log noise, not an
-  outage. Fix or disable it, don't rediscover it.
-- **detectIntent() is keyword matching**, not NLP. Slack phrasings that
-  don't contain a known verb/platform substring fall through. Historical
-  bugs: everything used to default-dispatch to vapron. When routing
-  misbehaves, dry-run it: `curl 'http://127.0.0.1:9203/slack/test?text=...'`
+- **`gluecron-update.timer`** (legacy auto-deploy, not Jarvis's) was
+  disabled 2026-07-06 after failing every 60s for days (git remote had no
+  creds; Coolify owns the gluecron deploy now). The cups snap was disabled
+  the same day (it exposed cupsd publicly on :631). Don't re-enable either
+  without a reason.
+- **Slack intent routing is two-tier**: keyword fast-path for confident
+  short commands, Haiku CLI classification (~3-10s) for ambiguous natural
+  phrasing, silent keyword fallback on any classifier failure. Debug with
+  `curl 'http://127.0.0.1:9203/slack/test?text=...'` — it returns
+  {keyword, haiku, chosen, haiku_ms}. Haiku can only route to platforms
+  present in platforms.json.
 - **Memory hygiene:** `repair_log` and `agent_context` tables exist but are
   empty — sessions skip the mid-session logging in the protocol below. The
   memory is only as smart as what gets written to it.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
-1. jarvis-dashboard (:9206) is public with zero auth — needs a token gate
-   or Traefik basic-auth + TLS.
-2. cupsd exposed on 0.0.0.0:631 — disable or firewall.
-3. Intent routing should be a cheap Claude (Haiku) classification call, not
-   substring matching.
-4. No external watcher: Jarvis monitors the platforms but nothing off-box
+1. No external watcher: Jarvis monitors the platforms but nothing off-box
    monitors Jarvis. If this box dies, the reporter dies with it.
-5. No scheduled backup of memory/jarvis.db.
+   (`:9206/health` is intentionally unauthenticated for this purpose.)
+2. Haiku intent classification runs via CLI cold-start (~3-10s per
+   ambiguous message). An ANTHROPIC_API_KEY in secrets.env + switching
+   classifyIntent to the HTTP Messages API would cut that to ~300ms.
+3. Orchestrator still runs agents as root with
+   --dangerously-skip-permissions; migrate to the Claude Agent SDK with
+   scoped permissions.
+4. MarcoReid / eSIM not in platforms.json (see WHAT JARVIS IS).
+
+Cleared 2026-07-06: dashboard auth (was #1), cupsd exposure (was #2),
+keyword-only intents (was #3), no DB backups (was #5) — see git log.
 
 ---
 
