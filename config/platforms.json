@@ -138,8 +138,8 @@
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
       "tech_stack": ["Python", "FastAPI", "React", "TypeScript"],
-      "status": "active",
-      "notes": "Fork of upstream abi/screenshot-to-code (third-party). Local checkout on the box; backend + frontend + docker-compose."
+      "status": "inactive",
+      "notes": "Fork of upstream abi/screenshot-to-code (third-party). backend container Exited (137)=OOM 2026-07-03; not running. No public site. Bring up with: cd /opt/screenshot-to-code && docker compose up -d."
     }
   },
   "defaults": {
