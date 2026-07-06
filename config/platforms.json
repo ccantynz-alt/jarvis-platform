@@ -48,7 +48,7 @@
       "name": "alecrae",
       "display_name": "AlecRae",
       "server": "66.42.121.161",
-      "path": "/root/alecrae",
+      "path": "/opt/alecrae",
       "repo": "git@github.com:ccantynz-alt/alecrae.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
@@ -77,6 +77,18 @@
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
       "tech_stack": ["TypeScript", "React", "Rust", "Tauri", "Swift"],
+      "status": "active"
+    },
+    "gluecron": {
+      "name": "gluecron",
+      "display_name": "Gluecron",
+      "server": "66.42.121.161",
+      "path": "/root/gluecron",
+      "repo": "git@github.com:ccantynz-alt/Gluecron.com.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "Bun", "Hono", "Drizzle ORM"],
+      "site_url": "https://gluecron.com",
       "status": "active"
     }
   },
