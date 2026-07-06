@@ -1,0 +1,13 @@
+[Unit]
+Description=Jarvis Memory Backup (WAL-safe SQLite online backup)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/opt/jarvis/scripts/backup-memory.sh
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production

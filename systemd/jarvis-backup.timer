@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Jarvis memory backup at 03:30
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+Unit=jarvis-backup.service
+
+[Install]
+WantedBy=timers.target
