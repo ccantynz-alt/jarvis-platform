@@ -24,6 +24,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { execSync, spawnSync } from 'child_process';
+import { createHash, timingSafeEqual } from 'crypto';
 import { readdirSync, existsSync, statSync } from 'fs';
 import { readFileSync } from 'fs';
 
@@ -33,6 +34,42 @@ const ORCHESTRATOR  = 'http://127.0.0.1:9205';
 const METRICS_REST  = 'http://127.0.0.1:9202';
 const METRICS_WS    = 'ws://127.0.0.1:9202';
 const MEMORY        = 'http://127.0.0.1:9200';
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+// Token auth for everything except /health (probed by the external uptime
+// watcher). Craig visits http://<server>:9206/?token=<TOKEN> once per device;
+// a 30-day httpOnly cookie remembers him after that. Token lives in
+// /opt/jarvis/config/secrets.env as JARVIS_DASHBOARD_TOKEN. If the token is
+// unset we fail CLOSED — never fall back to open access.
+
+const AUTH_TOKEN     = process.env.JARVIS_DASHBOARD_TOKEN || '';
+const AUTH_COOKIE    = 'jarvis_auth';
+const COOKIE_MAX_AGE = 30 * 24 * 60 * 60; // 30 days, in seconds
+
+// Constant-time comparison on equal-length digests — never compare raw strings.
+function tokenMatches(candidate) {
+  if (!AUTH_TOKEN || !candidate) return false;
+  const a = createHash('sha256').update(String(candidate)).digest();
+  const b = createHash('sha256').update(AUTH_TOKEN).digest();
+  return timingSafeEqual(a, b);
+}
+
+function parseCookies(header) {
+  const out = {};
+  for (const part of String(header || '').split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+// Pull a token off a request: Bearer header first, then the auth cookie.
+function requestToken(req) {
+  const header = String(req.headers.authorization || '');
+  if (header.startsWith('Bearer ')) return header.slice(7).trim();
+  return parseCookies(req.headers.cookie)[AUTH_COOKIE] || null;
+}
 
 // ── Event log (circular buffer) ──────────────────────────────────────────────
 
@@ -54,7 +91,13 @@ function logEvent(category, message) {
 
 const app    = express();
 const server = createServer(app);
-const wss    = new WebSocketServer({ server, path: '/ws' });
+const wss    = new WebSocketServer({
+  server,
+  path: '/ws',
+  // Same auth as HTTP — browsers send the jarvis_auth cookie on the same-site
+  // upgrade request, so an authenticated dashboard connects transparently.
+  verifyClient: (info) => tokenMatches(requestToken(info.req)),
+});
 const clients = new Set();
 
 function broadcast(msg) {
@@ -221,6 +264,30 @@ async function pollAndDiffJobs() {
 
 app.use(express.json());
 
+// Auth gate — everything below this middleware requires a valid token.
+app.use((req, res, next) => {
+  if (req.path === '/health') return next(); // external uptime watcher
+
+  if (!AUTH_TOKEN) {
+    return res.status(503).send('dashboard token not configured');
+  }
+
+  // One-time login link: ?token=<TOKEN> sets the cookie, then redirects to the
+  // same path with the query param stripped so the token never sits in the URL.
+  if (typeof req.query.token === 'string') {
+    if (!tokenMatches(req.query.token)) return res.status(401).send('unauthorized');
+    res.setHeader('Set-Cookie',
+      `${AUTH_COOKIE}=${encodeURIComponent(req.query.token)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE}`);
+    const params = new URLSearchParams(req.query);
+    params.delete('token');
+    const qs = params.toString();
+    return res.redirect(302, req.path + (qs ? `?${qs}` : ''));
+  }
+
+  if (tokenMatches(requestToken(req))) return next();
+  return res.status(401).send('unauthorized');
+});
+
 // ── Visual baselines static file server ──────────────────────────────────────
 // Serves /opt/jarvis/visual-baselines/ at /screenshots/ so Craig can browse
 // baseline and diff images via SSH tunnel: ssh -L 9206:localhost:9206 <server>
@@ -290,12 +357,8 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({
-    status:   'ok',
-    clients:  clients.size,
-    events:   eventLog.length,
-    metrics:  metricsWs?.readyState === WebSocket.OPEN ? 'connected' : 'disconnected',
-  });
+  // Unauthenticated (external uptime watcher) — status only, no internals.
+  res.json({ status: 'ok' });
 });
 
 // GET /api/platform-status — aggregated health for the full-status dashboard panel
