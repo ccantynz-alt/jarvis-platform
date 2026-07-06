@@ -15,6 +15,7 @@
 import express from 'express';
 import { App as BoltApp } from '@slack/bolt';
 import { readFileSync, existsSync } from 'fs';
+import { spawn } from 'child_process';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -82,60 +83,186 @@ const QUESTION_WORDS = ['what', 'how', 'why', 'is', 'are', 'does', 'can'];
 /**
  * Classify raw Slack message text into one of:
  *   dispatch | jobs | status | platform-status | briefing | help | passthrough
+ *
+ * Each result carries `confident: true|false`:
+ *   true  → exact/clear command (short direct command, explicit "ask jarvis",
+ *           explicit "how is X / check X" phrasing) — safe fast path
+ *   false → matched a fallback/default rule (question fallthrough, guessed
+ *           dispatch platform, incidental keyword hit in a long sentence) —
+ *           handleCommand will consult the Haiku classifier
  */
 function detectIntent(raw) {
   // Strip Slack formatting tags, normalise whitespace
   const text = raw.toLowerCase().replace(/<[^>]+>/g, '').trim();
 
+  // Short direct commands ("status", "jobs", "morning briefing") are confident;
+  // long natural sentences that happen to contain a keyword are not.
+  const isShortCommand = text.split(/\s+/).filter(Boolean).length <= 4;
+
   // "ask jarvis ..." — highest priority, must match before other rules
   if (/^ask\s+(jarvis\s+)?/.test(text)) {
     const question = raw.replace(/<[^>]+>/g, '').replace(/^ask\s+(jarvis\s+)?/i, '').trim();
-    return { type: 'ask', question };
+    return { type: 'ask', question, confident: true };
   }
 
   if (/\b(briefing|morning report|daily report|morning|good morning)\b/.test(text)) {
-    return { type: 'briefing' };
+    return { type: 'briefing', confident: isShortCommand };
   }
 
   if (/\bjobs?\b|\bwhat'?s running\b|\bwhat are you doing\b|\bqueue\b|\brunning tasks?\b/.test(text)) {
-    return { type: 'jobs' };
+    return { type: 'jobs', confident: isShortCommand };
   }
 
   if (/\b(help|commands?|what can you do)\b/.test(text)) {
-    return { type: 'help' };
+    return { type: 'help', confident: isShortCommand };
   }
 
   const platform = matchPlatform(text);
 
   // "how is X", "check X", "X status" — explicit status query with platform
   if (platform && /\b(how is|check|status of|health of|what'?s (wrong|up) with|is .* (up|down|working))\b/.test(text)) {
-    return { type: 'platform-status', platform };
+    return { type: 'platform-status', platform, confident: true };
   }
 
   // General status — no platform name, just "status" / "health"
   if (!platform && /\b(status|health)\b/.test(text)) {
-    return { type: 'status' };
+    return { type: 'status', confident: isShortCommand };
   }
 
   // Questions (what/how/why/is/are/does/can) → status, never dispatch
+  // Fallthrough guess — not confident, let Haiku have a look.
   const isQuestion = QUESTION_WORDS.some(w => new RegExp(`^${w}\\b`).test(text));
   if (isQuestion) {
-    return platform ? { type: 'platform-status', platform } : { type: 'status' };
+    return platform
+      ? { type: 'platform-status', platform, confident: false }
+      : { type: 'status', confident: false };
   }
 
-  // Dispatch — has a recognised action verb
+  // Dispatch — has a recognised action verb. Platform may be guessed/defaulted,
+  // and verb matching is substring-level — not confident.
   const hasVerb = DISPATCH_VERBS.some(v => new RegExp(`\\b${v}\\b`).test(text));
   if (hasVerb) {
-    return { type: 'dispatch', platform: platform ?? 'auto' };
+    return { type: 'dispatch', platform: platform ?? 'auto', confident: false };
   }
 
-  // Platform mentioned without a clear verb → treat as status query
+  // Platform mentioned without a clear verb → treat as status query (guess)
   if (platform) {
-    return { type: 'platform-status', platform };
+    return { type: 'platform-status', platform, confident: false };
   }
 
   // Nothing matched → passthrough to orchestrator
-  return { type: 'passthrough' };
+  return { type: 'passthrough', confident: false };
+}
+
+// ── LLM intent classification (Claude Haiku via local `claude` CLI) ──────────
+//
+// Used only when detectIntent() returns a non-confident (fallback/guessed)
+// result. Spawns the locally-authenticated `claude` CLI — no API keys touched.
+// Returns a validated intent object, or null on ANY failure (timeout, non-zero
+// exit, unparseable output, unknown type/platform) so callers can fall back
+// to the keyword result.
+
+const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
+const CLASSIFY_TIMEOUT_MS = 20000;
+const INTENT_TYPES = ['ask', 'dispatch', 'jobs', 'status', 'platform-status', 'briefing', 'help'];
+
+function buildClassifyPrompt(text) {
+  const platforms = platformNames();
+  return [
+    'You classify Slack messages sent to Jarvis, an ops assistant that manages web platforms.',
+    'Classify the message below into exactly one intent type:',
+    '',
+    '- "dispatch": user wants work done on a platform (fix, build, change, deploy something). Shape: {"type":"dispatch","platform":"<name or null>","task":"<what to do>"}',
+    '- "ask": a knowledge/history question for the memory system (what broke, what happened, past issues). Shape: {"type":"ask","question":"<the question>"}',
+    '- "jobs": asking what jobs/tasks are currently running or queued. Shape: {"type":"jobs"}',
+    '- "status": general system/server health overview, not about one specific platform. Shape: {"type":"status"}',
+    '- "platform-status": health/state of one specific platform, incl. "why is X slow/down/broken" diagnostics. Shape: {"type":"platform-status","platform":"<name>"}',
+    '- "briefing": a morning/daily summary or rundown of everything. Shape: {"type":"briefing"}',
+    '- "help": asking what Jarvis can do, or the message is unparseable/unclear. Shape: {"type":"help"}',
+    '',
+    `Known platforms: ${platforms.join(', ')}`,
+    'Set "platform" to null if no known platform is mentioned.',
+    'Respond with STRICT JSON only — a single object, no prose, no markdown fences.',
+    '',
+    `Message: ${JSON.stringify(text)}`,
+  ].join('\n');
+}
+
+function runClaudeCli(prompt) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const done = (val) => { if (!settled) { settled = true; resolve(val); } };
+
+    const proc = spawn('claude', ['--model', HAIKU_MODEL, '--print', prompt], {
+      env: { ...process.env, HOME: '/root' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const timer = setTimeout(() => {
+      console.warn('[slack] haiku classify timed out — killing CLI');
+      proc.kill('SIGKILL');
+      done(null);
+    }, CLASSIFY_TIMEOUT_MS);
+
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      console.warn('[slack] haiku classify spawn error:', e.message);
+      done(null);
+    });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        console.warn(`[slack] haiku classify exit ${code}: ${stderr.slice(0, 200)}`);
+        return done(null);
+      }
+      done(stdout);
+    });
+  });
+}
+
+async function classifyIntent(text) {
+  const output = await runClaudeCli(buildClassifyPrompt(text));
+  if (!output) return null;
+
+  // Defensive parse: strip markdown fences, isolate the first {...} object
+  let body = output.trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/, '')
+    .trim();
+  const braces = body.match(/\{[\s\S]*\}/);
+  if (braces) body = braces[0];
+
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    console.warn('[slack] haiku classify unparseable output:', output.slice(0, 200));
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || !INTENT_TYPES.includes(parsed.type)) {
+    console.warn('[slack] haiku classify invalid intent:', JSON.stringify(parsed).slice(0, 200));
+    return null;
+  }
+
+  // Validate platform against the live registry; unknown → null
+  let platform = typeof parsed.platform === 'string' ? parsed.platform.toLowerCase().trim() : null;
+  if (platform && !platformNames().includes(platform)) platform = null;
+
+  const intent = { type: parsed.type };
+  if (parsed.type === 'dispatch') {
+    intent.platform = platform ?? 'auto';
+    if (typeof parsed.task === 'string' && parsed.task.trim()) intent.task = parsed.task.trim();
+  } else if (parsed.type === 'platform-status') {
+    if (!platform) return null; // handler requires a real platform
+    intent.platform = platform;
+  } else if (parsed.type === 'ask') {
+    intent.question = (typeof parsed.question === 'string' && parsed.question.trim()) || text;
+  }
+  return intent;
 }
 
 // ── Safe JSON fetch ──────────────────────────────────────────────────────────
@@ -435,7 +562,20 @@ function handleHelp(channel) {
  * Returns immediately after dispatching (fire-and-forget for slow operations).
  */
 async function handleCommand(rawText, channel) {
-  const intent = detectIntent(rawText);
+  const t0 = Date.now();
+  let intent = detectIntent(rawText);
+  let via = 'keyword';
+
+  // Keyword result was a fallback/guess — ask Haiku, prefer its answer if valid
+  if (!intent.confident) {
+    const haiku = await classifyIntent(rawText);
+    if (haiku) {
+      intent = haiku;
+      via = 'haiku';
+    }
+  }
+
+  console.log(`[slack] intent via ${via} (${Date.now() - t0}ms)`);
   console.log(`[slack] intent=${JSON.stringify(intent)} text="${rawText.replace(/<[^>]+>/g, '').slice(0, 60)}"`);
 
   switch (intent.type) {
@@ -618,11 +758,25 @@ app.post('/slack/events', async (req, res) => {
 });
 
 // GET /slack/test?text=... — dry-run intent detection (no Slack post)
-app.get('/slack/test', (req, res) => {
+// Exercises the same fast-path/Haiku logic as handleCommand:
+// haiku is only invoked (non-null haiku_ms) when the keyword result is not confident.
+app.get('/slack/test', async (req, res) => {
   const text = (req.query.text || '').toString();
   if (!text) return res.status(400).json({ error: 'text query param required' });
-  const intent = detectIntent(text);
-  res.json({ text, intent, platforms: platformNames() });
+
+  const keyword = detectIntent(text);
+  let haiku = null;
+  let haiku_ms = null;
+  let chosen = keyword;
+
+  if (!keyword.confident) {
+    const t0 = Date.now();
+    haiku = await classifyIntent(text);
+    haiku_ms = Date.now() - t0;
+    if (haiku) chosen = haiku;
+  }
+
+  res.json({ text, keyword, haiku, chosen, haiku_ms, platforms: platformNames() });
 });
 
 // GET /slack/health
