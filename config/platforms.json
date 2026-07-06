@@ -90,6 +90,56 @@
       "tech_stack": ["TypeScript", "Bun", "Hono", "Drizzle ORM"],
       "site_url": "https://gluecron.com",
       "status": "active"
+    },
+    "universal-ai-operator": {
+      "name": "universal-ai-operator",
+      "display_name": "Universal AI Operator",
+      "server": "66.42.121.161",
+      "path": "/root/universal-ai-operator",
+      "repo": "",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["Python", "Docker"],
+      "status": "active",
+      "notes": "Local-only, no git remote as of 2026-07-06 (master_engine.py + venv + Dockerfile). No public domain."
+    },
+    "marcoreid": {
+      "name": "marcoreid",
+      "display_name": "MarcoReid",
+      "server": "vercel",
+      "path": "",
+      "repo": "git@github.com:ccantynz-alt/marcoreid.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "Next.js"],
+      "site_url": "https://www.marcoreid.com",
+      "status": "active",
+      "notes": "Vercel-hosted (not on the box). Deploy is Vercel's; Jarvis monitors the live site + repo, not a local checkout."
+    },
+    "davenroe": {
+      "name": "davenroe",
+      "display_name": "DavenRoe",
+      "server": "vercel",
+      "path": "",
+      "repo": "git@github.com:ccantynz-alt/davenroe.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["TypeScript", "Next.js"],
+      "site_url": "https://www.davenroe.com",
+      "status": "active",
+      "notes": "Vercel-hosted (not on the box). Deploy is Vercel's; Jarvis monitors the live site + repo, not a local checkout."
+    },
+    "screenshot-to-code": {
+      "name": "screenshot-to-code",
+      "display_name": "Screenshot to Code",
+      "server": "66.42.121.161",
+      "path": "/opt/screenshot-to-code",
+      "repo": "https://github.com/abi/screenshot-to-code",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": ["Python", "FastAPI", "React", "TypeScript"],
+      "status": "active",
+      "notes": "Fork of upstream abi/screenshot-to-code (third-party). Local checkout on the box; backend + frontend + docker-compose."
     }
   },
   "defaults": {
