@@ -4,6 +4,7 @@ import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import cron from 'node-cron';
+import { pickExecutor } from './executors.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -13,10 +14,30 @@ const MEMORY_SVC    = 'http://127.0.0.1:9200';
 const app = express();
 app.use(express.json());
 
-const PORT = 9205;
+// Defaults to 9205 (the live port). Honouring PORT lets a test instance bind a
+// free port without touching the live service; secrets.env sets no PORT, so the
+// systemd service still binds 9205 unchanged.
+const PORT = parseInt(process.env.PORT, 10) || 9205;
 const OWN_IP = process.env.OWN_IP || '66.42.121.161';
 const MEMORY_URL = 'http://127.0.0.1:9200';
 const REGISTRY_PATH = '/opt/jarvis/config/platforms.json';
+
+// ── Cloud (CCR) dispatch config ───────────────────────────────────────────────
+// EVERYTHING in the cloud path is INERT unless JARVIS_CLOUD_ENABLED === '1'
+// AND both JARVIS_CLOUD_TOKEN and JARVIS_CLOUD_ENV are set. With the flag off
+// (the default), pickExecutor never returns 'cloud' and none of this runs.
+//
+// ⚠️  HUMAN CONFIRMATION REQUIRED before enabling cloud mode:
+//   - CLOUD_API_URL below is a BEST-GUESS at the Anthropic code/triggers
+//     ("routines") create+run endpoint. Confirm the real URL + auth scheme
+//     (Bearer token vs x-api-key, anthropic-version header) against live docs.
+//   - The callback must be reachable FROM the cloud agent. The orchestrator
+//     binds loopback-only (127.0.0.1:9205), so a cloud agent CANNOT reach it
+//     directly — a human must expose a public callback URL (tunnel / dashboard
+//     host / reverse proxy) and set JARVIS_CALLBACK_URL to it.
+const CLOUD_API_URL = process.env.JARVIS_CLOUD_API_URL
+  || 'https://api.anthropic.com/v1/routines';   // <-- NEEDS HUMAN CONFIRMATION
+const CLOUD_MODEL = 'claude-sonnet-5';
 
 // In-memory job store — survives process lifetime only, which is enough for
 // the async dispatch use case. Jobs are also recorded in Jarvis memory.
@@ -186,10 +207,113 @@ function runRemote(platform, server, path, prompt, job) {
   });
 }
 
+// Resolve a job to a clean failure without crashing the process. Sets the
+// SAME fields runLocal/runRemote set on failure (status/error/exitCode/finishedAt).
+function failJob(job, message) {
+  job.status = 'failed';
+  job.error = String(message).slice(-2000);
+  job.exitCode = job.exitCode == null ? 1 : job.exitCode;
+  job.finishedAt = new Date().toISOString();
+  logEvent('ERR', `Job ${job.id.slice(0, 8)} failed: ${String(message).slice(0, 100)}`);
+  console.error(`[orchestrator] job ${job.id} failed:`, message);
+  logToMemory({
+    platform: job.platform,
+    status: 'error',
+    notes: `Orchestrator job ${job.id} (cloud): failed — ${String(message).slice(0, 120)}`,
+  });
+}
+
+// runCloud — dispatch a cloud CCR agent via the Anthropic code/triggers API.
+// Clones entry.repo, appends a FINAL-STEP instruction telling the agent to POST
+// its result back to /dispatch/callback. Resolves the SAME job fields runLocal
+// sets. On any misconfiguration or API error it fails the job cleanly (never
+// crashes). Reached only when JARVIS_CLOUD_ENABLED==='1' routes here.
+async function runCloud(platform, entry, prompt, job) {
+  const token = process.env.JARVIS_CLOUD_TOKEN;
+  const environmentId = process.env.JARVIS_CLOUD_ENV;
+
+  // Fail cleanly (do NOT crash) when cloud creds are missing.
+  if (!token || !environmentId) {
+    const missing = !token ? 'JARVIS_CLOUD_TOKEN' : 'JARVIS_CLOUD_ENV';
+    return failJob(job, `cloud dispatch unavailable: ${missing} is not set`);
+  }
+  if (!entry.repo) {
+    return failJob(job, `cloud dispatch requires a git repo for platform "${platform}" (entry.repo is empty)`);
+  }
+
+  // The cloud agent runs off-box, so it cannot reach the loopback orchestrator.
+  // A human must set JARVIS_CALLBACK_URL to a publicly reachable endpoint that
+  // proxies to POST /dispatch/callback. Falls back to a best-effort URL.
+  const callbackUrl = process.env.JARVIS_CALLBACK_URL
+    || `http://${OWN_IP}:${PORT}/dispatch/callback`;
+
+  const finalStep = [
+    ``,
+    ``,
+    `FINAL STEP (required): after all work is complete, report back to Jarvis by`,
+    `sending an HTTP POST to ${callbackUrl}`,
+    `with header "X-Jarvis-Token: ${token}" and a JSON body:`,
+    `{"jobId":"${job.id}","ok":true,"summary":"<one-paragraph summary of what you did>"}`,
+    `Set "ok" to false if the task could not be completed.`,
+  ].join('\n');
+
+  const content = prompt + finalStep;
+
+  // Request shape per the reference (routines/trigger create+run). Endpoint and
+  // auth scheme are BEST-GUESS — see CLOUD_API_URL note. Needs human confirmation.
+  const body = {
+    name: `jarvis-${platform}-${job.id.slice(0, 8)}`,
+    run_once_at: new Date().toISOString(),
+    job_config: {
+      ccr: {
+        environment_id: environmentId,
+        session_context: {
+          model: CLOUD_MODEL,
+          sources: [{ git_repository: { url: entry.repo } }],
+          allowed_tools: ['Read', 'Edit', 'Write', 'Bash'],
+        },
+        events: [
+          { data: { type: 'user', message: { role: 'user', content } } },
+        ],
+      },
+    },
+  };
+
+  try {
+    const r = await fetch(CLOUD_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+
+    if (!r.ok) {
+      return failJob(job, `cloud API ${r.status}: ${text.slice(0, 500)}`);
+    }
+
+    // Dispatched OK. The job stays 'running' until the agent POSTs the callback,
+    // at which point /dispatch/callback resolves status/output/finishedAt.
+    job.status = 'running';
+    job.output = `Cloud agent dispatched (CCR ${CLOUD_MODEL}). Awaiting callback for job ${job.id}. API response: ${text.slice(0, 500)}`;
+    logEvent('CLOUD', `Cloud agent dispatched — ${job.id.slice(0, 8)} on ${platform}`);
+    logToMemory({
+      platform,
+      status: 'working',
+      notes: `Orchestrator job ${job.id} dispatched to cloud (${platform}); awaiting callback`,
+    });
+  } catch (e) {
+    return failJob(job, `cloud dispatch error: ${e.message}`);
+  }
+}
+
 // POST /dispatch  { platform, task }
 // platform="auto" → scan task text for a known platform name, fall back to "vapron"
 app.post('/dispatch', async (req, res) => {
-  let { platform, task } = req.body || {};
+  let { platform, task, executor: requestedExecutor } = req.body || {};
 
   if (!platform || !task) {
     return res.status(400).json({ error: 'platform and task are required' });
@@ -258,14 +382,22 @@ app.post('/dispatch', async (req, res) => {
     notes: `Orchestrator job ${jobId} started: ${task.slice(0, 100)}`,
   });
 
+  // Choose the executor. With JARVIS_CLOUD_ENABLED unset, pickExecutor returns
+  // exactly the legacy result: 'local' for OWN_IP, 'remote' otherwise — so the
+  // branch below resolves to today's runLocal/runRemote, byte-identical.
+  const executor = pickExecutor(platform, entry, task, requestedExecutor);
+  job.executor = executor;
+
   // Dispatch async — response returns immediately with the job ID
-  if (job.isLocal) {
+  if (executor === 'cloud') {
+    runCloud(platform, entry, prompt, job);
+  } else if (executor === 'local') {
     runLocal(platform, entry.path, prompt, job);
   } else {
     runRemote(platform, entry.server, entry.path, prompt, job);
   }
 
-  res.json({ jobId, status: 'running', platform, isLocal: job.isLocal });
+  res.json({ jobId, status: 'running', platform, isLocal: job.isLocal, executor });
 });
 
 // GET /status/:jobId
@@ -275,6 +407,42 @@ app.get('/status/:jobId', (req, res) => {
     return res.status(404).json({ error: 'Job not found' });
   }
   res.json(job);
+});
+
+// POST /dispatch/callback  { jobId, ok, summary }
+// Cloud CCR agents POST here when they finish. Authenticated by the shared
+// X-Jarvis-Token header (must equal JARVIS_CLOUD_TOKEN). Harmless when unused:
+// if JARVIS_CLOUD_TOKEN is not set, every request is rejected with 401.
+app.post('/dispatch/callback', (req, res) => {
+  const expected = process.env.JARVIS_CLOUD_TOKEN;
+  const provided = req.header('X-Jarvis-Token');
+  if (!expected || !provided || provided !== expected) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const { jobId, ok, summary } = req.body || {};
+  if (!jobId) return res.status(400).json({ error: 'jobId is required' });
+
+  const job = jobs.get(jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+
+  const success = ok === true || ok === 'true';
+  job.status = success ? 'completed' : 'failed';
+  job.exitCode = success ? 0 : 1;
+  job.output = String(summary || '').slice(-4000);
+  if (!success) job.error = String(summary || 'cloud agent reported failure').slice(-2000);
+  job.finishedAt = new Date().toISOString();
+
+  logEvent(success ? 'JOB' : 'ERR',
+    `Cloud callback — ${jobId.slice(0, 8)} on ${job.platform} ${success ? 'completed' : 'failed'}`);
+  console.log(`[orchestrator] cloud callback for job ${jobId} — ${success ? 'completed' : 'failed'}`);
+  logToMemory({
+    platform: job.platform,
+    status: success ? 'healthy' : 'error',
+    notes: `Orchestrator cloud job ${jobId}: ${success ? 'completed' : 'failed'} (via callback)`,
+  });
+
+  res.json({ ok: true });
 });
 
 // GET /jobs  — list all jobs (most recent first)
