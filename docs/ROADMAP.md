@@ -31,11 +31,11 @@ live (`mcp.gatetest.ai`).
 ## THE 20 MOVES (order = strategy; reliability is the floor)
 
 ### Phase 1 — STABILIZE (kill "everything breaks")
-1. Restart policies + autoheal on every service & container.
-2. Resource guards — per-container memory limits + pre-OOM alerting.
-3. Extend off-box watcher to every platform's public health.
-4. Consolidate the proxy layer (4 front doors → 1).
-5. Restore-drill the memory backup (prove recovery).
+1. ✅ Restart policies — all jarvis-* + gatetest-mcp = `Restart=always`, alecrae = `on-failure`. (Container autoheal deferred — could conflict with Coolify; Craig call.)
+2. ⬜ Resource guards — per-container memory limits + pre-OOM alerting.
+3. ✅ Off-box watcher extended to the whole public fleet (`jarvis-fleet-watcher`, hourly, deduped GitHub-issue alerts, known-down list to avoid noise).
+4. ⬜ Consolidate the proxy layer (4 front doors → 1) — endgame is Vapron (#18).
+5. ✅ Restore-drill passed — backup recovers faithfully (all tables match, integrity ok).
 
 ### Phase 2 — ALIGN (stop the burning)
 6. This ledger — every agent reads/updates it. **(seeded by this file)**
