@@ -7,3 +7,6 @@ logs/*.log
 /reports/
 .env
 .env.local
+.ssh/
+visual-baselines/
+deploy-gate-workspace/
