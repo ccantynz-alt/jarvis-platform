@@ -9,17 +9,20 @@ set -uo pipefail
 MEM="http://127.0.0.1:9200/memory/platform/update"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# platform|probe-url|expected  (expected=no means known-not-deployed, won't flag red)
+# platform|probe-url   — probes the platform's REAL public presence (the site
+# the owner cares about), so dashboard numbers match reality.
 FLEET="
-zoobicon|https://zoobicon.com|yes
-vapron|https://vapron.ai|yes
-gluecron|https://gluecron.com|yes
-alecrae|https://alecrae.com|yes
-marcoreid|https://www.marcoreid.com|yes
-davenroe|https://www.davenroe.com|yes
-bookaride|https://bookaride.com|yes
-voxlen|https://voxlen.com|yes
-gatetest|https://mcp.gatetest.ai/healthz|yes
+jarvis|http://127.0.0.1:9206/health
+zoobicon|https://zoobicon.com
+vapron|https://vapron.ai
+gluecron|https://gluecron.com
+alecrae|https://alecrae.com
+marcoreid|https://www.marcoreid.com
+davenroe|https://www.davenroe.com
+bookaride|https://bookaride.com
+voxlen|https://voxlen.com
+gatetest|https://gatetest.ai
+gatetest-mcp|https://mcp.gatetest.ai/healthz
 "
 
 summary=""
