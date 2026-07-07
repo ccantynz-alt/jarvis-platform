@@ -1,0 +1,8 @@
+[Unit]
+Description=Jarvis on-box fleet health probe → memory
+After=network.target jarvis-memory.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/jarvis/scripts/fleet-check.sh
+WorkingDirectory=/opt/jarvis
