@@ -29,18 +29,19 @@ Notes:
 
 ---
 
-## THE EIGHT SERVICES
+## THE NINE SERVICES
 
 | Service | File | Port | Bind | Purpose |
 |---------|------|------|------|---------|
-| jarvis-memory | src/memory-server.js | 9200 | loopback | Cross-session SQLite memory |
+| jarvis-memory | src/memory-server.js | 9200 | loopback | Cross-session SQLite memory + notifications inbox |
 | jarvis-screenshot | src/screenshot-service.js | 9201 | loopback | CDP screenshot capture |
 | jarvis-metrics | src/metrics-collector.js | 9202 | loopback | Real server metrics + WebSocket |
-| jarvis-slack | src/slack-bridge.js | 9203 | loopback | Slack command interface |
+| jarvis-slack | src/slack-bridge.js | 9203 | loopback | **FROZEN LEGACY** (decision 2026-07-08) — zero new features; dual-write until Gateway proven, then retire. Do NOT build on or recommend Slack. |
 | jarvis-audit | src/audit-runner.js | 9204 | loopback | Build + test audit runner |
 | jarvis-orchestrator | src/orchestrator.js | 9205 | loopback | Dispatch engine — spawns Claude agents (local + SSH) |
 | jarvis-dashboard | src/dashboard-server.js | 9206 | 0.0.0.0 + token auth | Status panel + screenshot browser; token = JARVIS_DASHBOARD_TOKEN in secrets.env, login once per device via `?token=` |
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | loopback | GateTest scan gating platform deploys |
+| jarvis-gateway | src/gateway-server.js | 9208 | loopback, exposed ONLY via `tailscale serve` (tailnet HTTPS) | **THE interface** — conversational voice/text control channel + notification inbox. Spec: docs/GATEWAY.md. Token = JARVIS_GATEWAY_TOKEN. |
 
 All are managed by systemd (`systemctl status 'jarvis-*'`) and survive reboots.
 All have a `/health` endpoint Claude must probe before assuming they are running.
@@ -85,7 +86,7 @@ closed. Don't add to that number.)
 
 ### Rule 4 — Never break co-tenants
 This box also runs AlecRae, Gluecron, GateTest, and the Coolify stack.
-Jarvis owns ports 9200–9207 and nothing else. Before binding any port,
+Jarvis owns ports 9200–9208 and nothing else. Before binding any port,
 check `ss -tlnp`. Do not modify co-tenant config from this repo.
 
 ### Rule 5 — No competitor dependencies
@@ -98,9 +99,9 @@ If you need browser automation, extend src/screenshot-service.js.
 ## ARCHITECTURE
 
 ```
-Craig (Slack / iPad)
-        ↓
-jarvis-slack (9203) ── detectIntent() ──→ jarvis-orchestrator (9205)
+Craig (voice/text, iPad/phone — tailnet) ──► https://vultr.<tailnet>.ts.net
+        ↓ tailscale serve                        [Slack = frozen legacy sidecar via 9203]
+jarvis-gateway (9208) ── lib/conversation.js ──→ jarvis-orchestrator (9205)
                                                ↓ spawns
                               claude --print (local cwd, or ssh -i .ssh/orchestrator root@<server>)
                                                ↓ uses
@@ -133,9 +134,11 @@ Public (0.0.0.0):
 - :9206 — jarvis-dashboard (token auth; `/health` open for off-box watcher)
 
 Loopback only:
+- :3000 gatetest-web (binds 10.0.1.1, coolify bridge — Traefik fronts gatetest.ai)
 - :4100 AlecRae API (bun) · :4200 AlecRae web (next)
 - :5432 Postgres
 - :9200–9205, :9207 Jarvis services
+- :9208 jarvis-gateway — loopback + `tailscale serve https:443` (tailnet-only HTTPS; never expose publicly)
 
 The old doctrine said Vapron owns 3000/3001/8090/9099 — **not true on this
 box**. Vapron lives elsewhere; check `config/platforms.json` for servers.
@@ -186,6 +189,14 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
 
 ## GOTCHAS (hard-won — read before debugging)
 
+- **Gateway voice needs the https `.ts.net` name, never a raw IP:** iOS Safari
+  grants microphone/speech-recognition only in secure contexts. `tailscale
+  serve` provides the cert; `http://100.x.y.z:9208` can never do STT. Also:
+  iOS `speechSynthesis` must be primed by a user gesture (gateway.html does
+  this on the first mic tap) or replies stay silent.
+- **Tailscale on this box runs `--accept-dns=false`** so resolv.conf is
+  untouched (co-tenant safety). Only Craig's devices need MagicDNS names.
+  UFW has `allow in on tailscale0`; the tailnet is invisible publicly.
 - **Coolify/Traefik two-network hang:** an app container attached to two
   Docker networks while Traefik only sits on `coolify` will HANG (gateway
   timeout, HTTP 000), not error. TLS completes, then silence. Fix: label
