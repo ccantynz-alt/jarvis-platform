@@ -51,6 +51,17 @@ db.exec(`
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'jarvis',
+    level TEXT NOT NULL DEFAULT 'info',
+    title TEXT NOT NULL,
+    body TEXT,
+    speech TEXT,
+    read_at TEXT
+  );
 `);
 
 const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
@@ -175,6 +186,43 @@ app.post('/memory/repair/verify', (req, res) => {
     UPDATE repair_log SET fix_verified = ?, verified_at = ? WHERE id = ?
   `).run(verified ? 1 : 0, new Date().toISOString(), repair_id);
   res.json({ ok: true });
+});
+
+// ── Notifications (Gateway inbox — durable store, see docs/GATEWAY.md) ──────
+
+// POST /memory/notifications — record a notification
+app.post('/memory/notifications', (req, res) => {
+  const { source = 'jarvis', level = 'info', title, body, speech } = req.body;
+  if (!title) return res.status(400).json({ error: 'title required' });
+  const result = db.prepare(`
+    INSERT INTO notifications (ts, source, level, title, body, speech)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(new Date().toISOString(), source, level, title, body || null, speech || null);
+  res.json({ id: result.lastInsertRowid });
+});
+
+// GET /memory/notifications?unread=1&limit=50
+app.get('/memory/notifications', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  const rows = req.query.unread
+    ? db.prepare('SELECT * FROM notifications WHERE read_at IS NULL ORDER BY id DESC LIMIT ?').all(limit)
+    : db.prepare('SELECT * FROM notifications ORDER BY id DESC LIMIT ?').all(limit);
+  const unread = db.prepare('SELECT COUNT(*) AS c FROM notifications WHERE read_at IS NULL').get().c;
+  res.json({ notifications: rows, unread });
+});
+
+// POST /memory/notifications/read-all
+app.post('/memory/notifications/read-all', (req, res) => {
+  const r = db.prepare('UPDATE notifications SET read_at = ? WHERE read_at IS NULL')
+    .run(new Date().toISOString());
+  res.json({ ok: true, marked: r.changes });
+});
+
+// POST /memory/notifications/:id/read
+app.post('/memory/notifications/:id/read', (req, res) => {
+  const r = db.prepare('UPDATE notifications SET read_at = ? WHERE id = ? AND read_at IS NULL')
+    .run(new Date().toISOString(), req.params.id);
+  res.json({ ok: true, marked: r.changes });
 });
 
 // GET /memory/summary — human-readable summary for Slack

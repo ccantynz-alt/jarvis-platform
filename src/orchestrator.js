@@ -5,6 +5,7 @@ import { join } from 'path';
 import { randomUUID } from 'crypto';
 import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
+import { notify } from './lib/notify.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -475,15 +476,13 @@ app.get('/health', (_req, res) => {
 
 // ── Cron helpers ─────────────────────────────────────────────────────────────
 
+// Kept name for the cron callers; now fans out via lib/notify.js
+// (durable inbox → gateway push → Slack only while NOTIFY_SLACK_LEGACY=1).
 async function slackSend(text) {
   try {
-    await fetch(`${SLACK_BRIDGE}/slack/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
-    });
+    await notify({ source: 'orchestrator-cron', title: text.split('\n')[0].slice(0, 120), body: text });
   } catch (e) {
-    console.error('[cron] slack send failed:', e.message);
+    console.error('[cron] notify failed:', e.message);
   }
 }
 
