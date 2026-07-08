@@ -43,7 +43,7 @@ tailscale serve --bg https:443 http://127.0.0.1:<vapron-health-port>
 ### 3. Heartbeat to the Jarvis Gateway (dead-man's switch)
 Every 5 minutes, POST:
 ```bash
-curl -s -X POST https://vultr.<tailnet>.ts.net/internal/heartbeat \
+curl -s -X POST https://jarvis.tailbd6217.ts.net/internal/heartbeat \
   -H "Authorization: Bearer $JARVIS_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"source":"vapron-158","status":"ok"}'

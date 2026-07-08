@@ -99,7 +99,7 @@ If you need browser automation, extend src/screenshot-service.js.
 ## ARCHITECTURE
 
 ```
-Craig (voice/text, iPad/phone — tailnet) ──► https://vultr.<tailnet>.ts.net
+Craig (voice/text, iPad/phone — tailnet) ──► https://jarvis.tailbd6217.ts.net
         ↓ tailscale serve                        [Slack = frozen legacy sidecar via 9203]
 jarvis-gateway (9208) ── lib/conversation.js ──→ jarvis-orchestrator (9205)
                                                ↓ spawns

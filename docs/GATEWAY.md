@@ -7,7 +7,7 @@ to a durable inbox. Approved full-scope by Craig 2026-07-08 (see ROADMAP decisio
 ## Topology
 
 ```
-Craig's iPad/phone/laptop ──(Tailscale mesh)──► https://vultr.<tailnet>.ts.net
+Craig's iPad/phone/laptop ──(Tailscale mesh)──► https://jarvis.tailbd6217.ts.net
                                                   │  tailscale serve (LE cert, tailnet-only)
                                                   ▼
                                     jarvis-gateway  127.0.0.1:9208
@@ -81,6 +81,6 @@ bridge code one month later.
 
 158 joins the tailnet (Craig authenticates; handoff brief has the steps), exposes its health
 endpoint via its own `tailscale serve` (tailnet-only, never public), and POSTs a 5-minute
-heartbeat to `https://vultr.<tailnet>.ts.net/internal/heartbeat`. Jarvis fleet-check probes
+heartbeat to `https://jarvis.tailbd6217.ts.net/internal/heartbeat`. Jarvis fleet-check probes
 the 158 health URL; a heartbeat stale >15 min raises an inbox alert. **No SSH either
 direction, ever** (estate model).
