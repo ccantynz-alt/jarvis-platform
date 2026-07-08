@@ -3,7 +3,7 @@
 > **This is the single source of truth.** Every agent (Jarvis-dispatched, Vapron's,
 > or interactive) reads this at session start and updates it the moment a decision
 > changes. If this file disagrees with reality, fix reality *or* fix this file —
-> never leave them out of sync. Last updated: 2026-07-07.
+> never leave them out of sync. Last updated: 2026-07-08.
 
 ---
 
@@ -19,11 +19,12 @@
 | Vapron stays on **149.28.119.158**, Jarvis controls it remotely | ✅ DECIDED | Critical shared backend → its own resilient home, not co-located. |
 | All platforms → **Vapron as backend via API onboarding** (dogfood) | ✅ DECIDED (direction) | Vapron already has the API + SDK (`packages/sdk`). Roll out one platform at a time. |
 | **🚫 NEVER merge a platform's codebase/deploy INTO Vapron** | ✅ LOCKED — anti-pattern | A previous agent physically merged AlecRae + Vapron; that caused the conflicts. Integration is **API-only** via Vapron's onboarding tool (injects the SDK/API). Three concepts stay separate: (1) merge=FORBIDDEN, (2) API-onboarding=the model, (3) hosting=where the app runs, independent of both. Each platform stays its own repo/deploy. |
-| Jarvis Gateway = **private mesh (Tailscale), NOT public HTML** | ✅ DECIDED (direction) | PWA front-end can be public (powerless); control channel private. Build when Voxlen is green. |
+| Jarvis Gateway = **private mesh (Tailscale), NOT public HTML** | ✅ DECIDED 2026-07-08 (Craig) — BUILD NOW | Full scope approved: Tailscale mesh (161 + 158 + Craig's devices), conversational Gateway at :9208 via `tailscale serve` HTTPS, **voice = browser-native Web Speech API** (iPad Safari STT/TTS). NOT gated on Voxlen (Voxlen may replace the ears later). See docs/GATEWAY.md. |
+| **Two-box estate model** — 161 hosts/serves, 158 = Vapron backend over HTTPS, **never SSH between boxes** | ✅ DECIDED 2026-07-08 (Craig) | Cross-box work ships as handoff briefs (docs/handoffs/). Cross-box monitoring/heartbeats go over the **tailnet**, not SSH, not public internet. Supersedes move #16. |
 | Cloud executor (`runCloud`) | 🔒 OFF | Stays off until registry repos are fixed (#8) + cloud creds confirmed. |
 | Canonical Vapron repo | 🟡 RECOMMEND `/root/Vapron` (`ccantynz-alt/Vapron`, branch `Main`) | Craig to confirm which GitHub repo he actually pushes to. |
 | GateTest canonical repo | 🟡 INFER `crclabs-hq/GateTest` | All tonight's work came from there; registry wrongly says `ccantynz-alt/gatetest`. Craig to confirm. |
-| **Slack** — keep or drop | ⏳ PENDING | Leaning: replace with the conversational Gateway; Slack becomes legacy. Not yet locked. |
+| **Slack** — keep or drop | ✅ DECIDED 2026-07-08 (Craig) — **FROZEN LEGACY** | jarvis-slack keeps running with **zero new features**. Notifications dual-write (Gateway inbox + Slack) via `NOTIFY_SLACK_LEGACY=1` until Gateway proven (criteria in docs/GATEWAY.md: 14 green days + daily-driven + zero missed notifications), then flag off → disable → delete. **Agents: do NOT build on or recommend Slack.** The interface is the Jarvis Gateway. |
 | Registry repo fixes (gatetest/alecrae/bookaride) | ⏳ PENDING Craig confirm | Blocks safe cloud dispatch. |
 
 ## BANKED (done — do not redo)
@@ -58,17 +59,16 @@ live (`mcp.gatetest.ai`).
 
 ### Phase 4 — CONSOLIDATE onto Vapron
 15. Confirm canonical Vapron repo; clean the 3-checkout mess.
-16. Add Jarvis SSH key to 158 + update registry (Jarvis can't reach 158 today).
+16. ~~Add Jarvis SSH key to 158~~ **SUPERSEDED 2026-07-08 by estate model: never SSH between boxes.** 158 joins the tailnet (handoff brief) and exposes health + heartbeat over it; registry gets the tailnet health URL.
 17. Onboard GateTest to Vapron as pilot tenant #1 (prove the loop).
 18. Migrate off Coolify → Vapron proxy (endgame of #4).
 19. Roll remaining platforms onto Vapron; Jarvis's #1 monitor = Vapron API health.
 
 ### Phase 5 — INTERFACE (the product)
-20. Jarvis Gateway MVP — private mesh, streaming brain, voice in/out (when Voxlen green; may be the ears).
+20. 🔨 IN PROGRESS 2026-07-08 — Jarvis Gateway MVP: Tailscale mesh + jarvis-gateway (:9208, `tailscale serve` HTTPS) + browser-native voice. Spec: docs/GATEWAY.md. Un-gated from Voxlen.
 
 ---
 
 ## OPEN QUESTIONS FOR CRAIG (unblock when convenient)
-- Slack: keep, drop, or keep-and-plan-migration?
 - Canonical repo per platform (esp. gatetest: `ccantynz-alt/gatetest` vs `crclabs-hq/GateTest`).
-- Deploy GateTest site now (compose+Traefik) or wait for the Vapron path?
+- ~~Deploy GateTest site now or wait for Vapron path?~~ ✅ RESOLVED 2026-07-08: gatetest.ai deployed and live from 161 (systemd `gatetest-web` :3000 + Traefik route + LE cert). See /opt/gatetest/docs/deploy/JARVIS-WEB-DEPLOY.md.
