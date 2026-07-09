@@ -31,7 +31,7 @@ tailscale up --ssh=false --accept-dns=false
 ### 2. Expose Vapron health, tailnet-only
 Pick the existing aggregated health endpoint (or add a minimal one) on a loopback port, then:
 ```bash
-tailscale serve --bg https:443 http://127.0.0.1:<vapron-health-port>
+tailscale serve --bg --https=8443 http://127.0.0.1:<vapron-health-port>
 ```
 - This serves it ONLY on the tailscale interface with a valid cert — it must NOT be public.
 - Report back (via Craig or a reply brief): the node's ts.net name and the health path,
@@ -43,7 +43,7 @@ tailscale serve --bg https:443 http://127.0.0.1:<vapron-health-port>
 ### 3. Heartbeat to the Jarvis Gateway (dead-man's switch)
 Every 5 minutes, POST:
 ```bash
-curl -s -X POST https://jarvis.tailbd6217.ts.net/internal/heartbeat \
+curl -s -X POST https://jarvis.tailbd6217.ts.net:8443/internal/heartbeat \
   -H "Authorization: Bearer $JARVIS_GATEWAY_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"source":"vapron-158","status":"ok"}'

@@ -7,7 +7,7 @@ to a durable inbox. Approved full-scope by Craig 2026-07-08 (see ROADMAP decisio
 ## Topology
 
 ```
-Craig's iPad/phone/laptop ──(Tailscale mesh)──► https://jarvis.tailbd6217.ts.net
+Craig's iPad/phone/laptop ──(Tailscale mesh)──► https://jarvis.tailbd6217.ts.net:8443
                                                   │  tailscale serve (LE cert, tailnet-only)
                                                   ▼
                                     jarvis-gateway  127.0.0.1:9208
@@ -22,7 +22,7 @@ Craig's iPad/phone/laptop ──(Tailscale mesh)──► https://jarvis.tailbd6
 Box 158 (Vapron) ──(tailnet)──► POST /internal/heartbeat   (see docs/handoffs/vapron-158-tailnet-brief.md)
 ```
 
-- Gateway binds **loopback only**; `tailscale serve --bg https:443 http://127.0.0.1:9208`
+- Gateway binds **loopback only**; `tailscale serve --bg --https=8443 http://127.0.0.1:9208`
   makes it reachable exclusively on the tailscale interface with a real Let's Encrypt cert.
   No UFW carve-out, no Traefik involvement, nothing public.
 - Auth: tailnet reachability is the perimeter; cookie token (`JARVIS_GATEWAY_TOKEN`, same
@@ -81,6 +81,6 @@ bridge code one month later.
 
 158 joins the tailnet (Craig authenticates; handoff brief has the steps), exposes its health
 endpoint via its own `tailscale serve` (tailnet-only, never public), and POSTs a 5-minute
-heartbeat to `https://jarvis.tailbd6217.ts.net/internal/heartbeat`. Jarvis fleet-check probes
+heartbeat to `https://jarvis.tailbd6217.ts.net:8443/internal/heartbeat`. Jarvis fleet-check probes
 the 158 health URL; a heartbeat stale >15 min raises an inbox alert. **No SSH either
 direction, ever** (estate model).

@@ -107,7 +107,7 @@ If you need browser automation, extend src/screenshot-service.js.
 ## ARCHITECTURE
 
 ```
-Craig (voice/text, iPad/phone — tailnet) ──► https://jarvis.tailbd6217.ts.net
+Craig (voice/text, iPad/phone — tailnet) ──► https://jarvis.tailbd6217.ts.net:8443
         ↓ tailscale serve                        [Slack = frozen legacy sidecar via 9203]
 jarvis-gateway (9208) ── lib/conversation.js ──→ jarvis-orchestrator (9205)
                                                ↓ spawns
@@ -146,7 +146,7 @@ Loopback only:
 - :4100 AlecRae API (bun) · :4200 AlecRae web (next)
 - :5432 Postgres
 - :9200–9205, :9207 Jarvis services
-- :9208 jarvis-gateway — loopback + `tailscale serve https:443` (tailnet-only HTTPS; never expose publicly)
+- :9208 jarvis-gateway — loopback + `tailscale serve --https=8443` (tailnet-only HTTPS; never expose publicly)
 
 The old doctrine said Vapron owns 3000/3001/8090/9099 — **not true on this
 box**. Vapron lives elsewhere; check `config/platforms.json` for servers.
@@ -197,6 +197,16 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
 
 ## GOTCHAS (hard-won — read before debugging)
 
+- **`tailscale serve` CANNOT use port 443 on this box.** Coolify's Traefik
+  (`docker-proxy`) already binds `0.0.0.0:443`, which blocks tailscaled from
+  getting its own listener on the tailscale IP — fails silently with
+  `tailscale serve status` still showing the config as "active" while every
+  real request 503s with "no available server". Confirmed 2026-07-09
+  (`journalctl -u tailscaled` showed repeated `bind: address already in use`).
+  **The Gateway serves on `--https=8443` instead** (`https://jarvis.tailbd6217.ts.net:8443`)
+  — do not fight Traefik for :443 (Rule 4: never touch co-tenant config).
+  **Lesson: `tailscale serve status` reporting a route is not proof it works —
+  always confirm with a real `curl .../health` returning 200, per Rule 2.**
 - **Gateway voice needs the https `.ts.net` name, never a raw IP:** iOS Safari
   grants microphone/speech-recognition only in secure contexts. `tailscale
   serve` provides the cert; `http://100.x.y.z:9208` can never do STT. Also:

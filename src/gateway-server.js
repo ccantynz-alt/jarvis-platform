@@ -3,9 +3,14 @@
  *
  * The Jarvis-native conversational interface: voice/text over the tailnet.
  * Binds 127.0.0.1:9208 ONLY; exposed exclusively via
- *   tailscale serve --bg https:443 http://127.0.0.1:9208
- * which terminates HTTPS with a real cert on vultr.<tailnet>.ts.net (required
+ *   tailscale serve --bg --https=8443 http://127.0.0.1:9208
+ * which terminates HTTPS with a real cert on jarvis.tailbd6217.ts.net (required
  * for iOS microphone access) and is reachable from tailnet devices only.
+ * NOTE: NOT port 443 — Coolify's Traefik (docker-proxy) binds 0.0.0.0:443,
+ * which blocks tailscaled from ever getting its own :443 listener. Confirmed
+ * 2026-07-09: tailscaled logged "bind: address already in use" for both the
+ * v4 and v6 tailscale-IP listeners. Use a free port (8443) instead of fighting
+ * Traefik for :443 — do not touch Traefik's port publishing (Rule 4).
  *
  * Auth model:
  *   - Perimeter = tailnet membership (tailscale serve never faces the internet).
@@ -385,5 +390,5 @@ wss.on('connection', (ws, req) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[jarvis-gateway] listening on http://127.0.0.1:${PORT}`);
   console.log(`[jarvis-gateway] auth token: ${AUTH_TOKEN ? 'configured ✓' : 'MISSING ✗ (all access will 403)'}`);
-  console.log('[jarvis-gateway] expose with: tailscale serve --bg https:443 http://127.0.0.1:9208');
+  console.log('[jarvis-gateway] expose with: tailscale serve --bg --https=8443 http://127.0.0.1:9208');
 });
