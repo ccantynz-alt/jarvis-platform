@@ -27,7 +27,7 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
 import { spawn } from 'child_process';
-import { resolveIntent, runIntent, platformNames } from './lib/conversation.js';
+import { resolveIntent, runIntent, platformNames, loadRoadmap } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
 
 const PORT         = 9208;
@@ -100,6 +100,11 @@ app.get('/', (_req, res) => {
   res.sendFile('/opt/jarvis/public/gateway.html');
 });
 
+app.get('/icon-180.png', (req, res) => {
+  if (!isAuthed(req)) return res.status(403).end();
+  res.sendFile('/opt/jarvis/public/icon-180.png');
+});
+
 // ── Internal endpoints (other Jarvis services / tailnet peers) ───────────────
 
 // POST /internal/notify — live push of a notification to connected clients.
@@ -142,6 +147,18 @@ setInterval(() => {
     }
   }
 }, 60 * 1000);
+
+// ── Roadmap (project-completion checklist, see docs/GATEWAY.md) ─────────────
+// loadRoadmap() lives in lib/conversation.js — shared with the voice handler.
+
+app.get('/api/roadmap', (req, res) => {
+  if (!isAuthed(req)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    res.json(loadRoadmap());
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── Inbox proxy (browser → memory service) ──────────────────────────────────
 

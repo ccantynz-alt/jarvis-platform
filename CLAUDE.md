@@ -59,6 +59,14 @@ wins: probe, then fix this file. A doctrine file that lies is worse than none �
 every future agent starts with false beliefs and wastes its first 20 minutes
 rediscovering the truth.
 
+**Extension (2026-07-09):** `docs/ROADMAP.md`'s "THE 20 MOVES" list and
+`config/roadmap.json` are twins — one prose, one machine-readable (powers the
+Gateway's Roadmap checklist, `GET /api/roadmap`, and the voice "what's left"
+intent). Whenever a move's status changes, update BOTH in the same commit.
+When flipping a move to `done`, also fire a `notify()` (or `POST
+/internal/notify`) announcing it — the whole point is a live, spoken signal
+of progress, not a file nobody reads.
+
 ### Rule 1 — Read memory first
 Every session starts with:
 ```bash

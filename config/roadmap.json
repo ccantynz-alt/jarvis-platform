@@ -1,0 +1,55 @@
+{
+  "updated": "2026-07-09",
+  "phases": [
+    {
+      "name": "STABILIZE",
+      "subtitle": "kill \"everything breaks\"",
+      "moves": [
+        { "id": 1,  "title": "Restart policies — all jarvis-* + gatetest-mcp Restart=always", "status": "done" },
+        { "id": 2,  "title": "Resource guards — per-container memory limits + pre-OOM alerting", "status": "pending" },
+        { "id": 3,  "title": "Off-box watcher extended to the whole public fleet", "status": "done" },
+        { "id": 4,  "title": "Consolidate the proxy layer (4 front doors → 1)", "status": "pending", "note": "endgame is Vapron (#18)" },
+        { "id": 5,  "title": "Restore-drill passed — backup recovers faithfully", "status": "done" }
+      ]
+    },
+    {
+      "name": "ALIGN",
+      "subtitle": "stop the burning",
+      "moves": [
+        { "id": 6,  "title": "This ledger — every agent reads/updates it", "status": "done" },
+        { "id": 7,  "title": "Point all CLAUDE.mds here; enforce Rule 0", "status": "in_progress", "note": "done for jarvis's own CLAUDE.md; other platforms pending" },
+        { "id": 8,  "title": "Fix registry repo mismatches", "status": "pending" },
+        { "id": 9,  "title": "Enforce session protocol — auto-log repairs to memory", "status": "in_progress", "note": "manual discipline in place; not yet enforced automatically" }
+      ]
+    },
+    {
+      "name": "AUTOMATE",
+      "subtitle": "self-running",
+      "moves": [
+        { "id": 10, "title": "Agent runtime → Claude Agent SDK, scoped permissions", "status": "pending" },
+        { "id": 11, "title": "Enable cloud executor (after #8 + creds)", "status": "pending" },
+        { "id": 12, "title": "Turn on self-repair (jarvis → cloud)", "status": "pending" },
+        { "id": 13, "title": "Auto-dispatch + guardrail layer", "status": "pending" },
+        { "id": 14, "title": "Intent routing → HTTP API (~300ms vs ~4-10s CLI)", "status": "pending" }
+      ]
+    },
+    {
+      "name": "CONSOLIDATE",
+      "subtitle": "onto Vapron",
+      "moves": [
+        { "id": 15, "title": "Confirm canonical Vapron repo; clean 3-checkout mess", "status": "pending" },
+        { "id": 16, "title": "Add Jarvis SSH key to 158", "status": "superseded", "note": "estate model 2026-07-08: never SSH between boxes — replaced by tailnet handoff brief" },
+        { "id": 17, "title": "Onboard GateTest to Vapron as pilot tenant #1", "status": "in_progress", "note": "VAPRON_BASE_URL wired; awaiting rotated vpk_ key + dispatch secret" },
+        { "id": 18, "title": "Migrate off Coolify → Vapron proxy", "status": "pending" },
+        { "id": 19, "title": "Roll remaining platforms onto Vapron", "status": "pending" }
+      ]
+    },
+    {
+      "name": "INTERFACE",
+      "subtitle": "the product",
+      "moves": [
+        { "id": 20, "title": "Jarvis Gateway MVP — private mesh, streaming brain, voice in/out", "status": "in_progress", "note": "Tailscale mesh + gateway-server live and voice-tested; iPad/phone shakedown ongoing" }
+      ]
+    }
+  ]
+}

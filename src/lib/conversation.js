@@ -19,6 +19,30 @@
 import { readFileSync } from 'fs';
 import { spawn } from 'child_process';
 
+// ── Roadmap (project-completion checklist — "are we done yet", not health) ──
+// Structured twin of docs/ROADMAP.md's "THE 20 MOVES". Kept in sync manually,
+// same commit, per Rule 0 (see docs/GATEWAY.md).
+
+export function loadRoadmap() {
+  const raw = JSON.parse(readFileSync('/opt/jarvis/config/roadmap.json', 'utf8'));
+  let done = 0, total = 0, current = null;
+  for (const phase of raw.phases) {
+    for (const move of phase.moves) {
+      total++;
+      if (move.status === 'done') done++;
+      if (!current && move.status === 'in_progress') current = { phase: phase.name, title: move.title };
+    }
+  }
+  return {
+    updated: raw.updated,
+    doneCount: done,
+    totalCount: total,
+    percent: Math.round((done / total) * 100),
+    current,
+    phases: raw.phases,
+  };
+}
+
 // ── Service endpoints ────────────────────────────────────────────────────────
 
 export const ORCHESTRATOR = 'http://127.0.0.1:9205';
@@ -108,6 +132,10 @@ export function detectIntent(raw) {
     return { type: 'briefing', confident: isShortCommand };
   }
 
+  if (/\b(roadmap|what'?s left|whats left|how (much|far)|are we done|project (progress|status)|% complete|percent complete)\b/.test(text)) {
+    return { type: 'roadmap', confident: isShortCommand || /what'?s left|whats left|are we done/.test(text) };
+  }
+
   if (/\bjobs?\b|\bwhat'?s running\b|\bwhat are you doing\b|\bqueue\b|\brunning tasks?\b/.test(text)) {
     return { type: 'jobs', confident: isShortCommand };
   }
@@ -163,7 +191,7 @@ export function detectIntent(raw) {
 
 const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
 const CLASSIFY_TIMEOUT_MS = 20000;
-const INTENT_TYPES = ['ask', 'dispatch', 'jobs', 'status', 'platform-status', 'briefing', 'help'];
+const INTENT_TYPES = ['ask', 'dispatch', 'jobs', 'status', 'platform-status', 'briefing', 'help', 'roadmap'];
 
 function buildClassifyPrompt(text) {
   const platforms = platformNames();
@@ -178,6 +206,7 @@ function buildClassifyPrompt(text) {
     '- "platform-status": health/state of one specific platform, incl. "why is X slow/down/broken" diagnostics. Shape: {"type":"platform-status","platform":"<name>"}',
     '- "briefing": a morning/daily summary or rundown of everything. Shape: {"type":"briefing"}',
     '- "help": asking what Jarvis can do, or the message is unparseable/unclear. Shape: {"type":"help"}',
+    '- "roadmap": asking how much of the JARVIS PROJECT ITSELF is built/left to build, or for a completion percentage (not a platform\'s health). Shape: {"type":"roadmap"}',
     '',
     `Known platforms: ${platforms.join(', ')}`,
     'Set "platform" to null if no known platform is mentioned.',
@@ -577,6 +606,34 @@ export async function handleBriefing() {
   return { text: msg, speech };
 }
 
+export async function handleRoadmap() {
+  let roadmap;
+  try {
+    roadmap = loadRoadmap();
+  } catch (e) {
+    return { text: `❌ Roadmap unavailable: ${e.message}`, speech: 'Sorry, the roadmap is unavailable.' };
+  }
+
+  const { doneCount, totalCount, percent, current, phases } = roadmap;
+  let msg = `🗺️ *JARVIS ROADMAP* — ${doneCount}/${totalCount} moves shipped (${percent}%)\n`;
+  if (current) msg += `🔨 Currently: _${current.title}_ (${current.phase})\n`;
+
+  for (const phase of phases) {
+    const icon = (s) => s === 'done' ? '✅' : s === 'in_progress' ? '🔨' : s === 'superseded' ? '➖' : '⬜';
+    msg += `\n*${phase.name}* — ${phase.subtitle || ''}\n`;
+    for (const m of phase.moves) {
+      msg += `${icon(m.status)} ${m.title}\n`;
+    }
+  }
+
+  const nextUp = phases.flatMap(p => p.moves).find(m => m.status === 'pending');
+  const speech = `${doneCount} of ${totalCount} moves done, ${percent} percent.` +
+    (current ? ` Currently building ${current.title}.` : '') +
+    (nextUp ? ` Next up: ${nextUp.title}.` : '');
+
+  return { text: msg, speech, data: roadmap };
+}
+
 export function handleHelp() {
   const platforms = platformNames().join(', ');
   const msg =
@@ -588,6 +645,7 @@ export function handleHelp() {
     `• \`how is zoobicon\` — platform memory state + screenshot\n` +
     `• \`check vapron\` — same\n` +
     `• \`briefing\` or \`morning\` — full morning summary\n` +
+    `• \`what's left\` or \`roadmap\` — Jarvis project completion checklist\n` +
     `• _anything else_ — passed through to orchestrator as a task\n\n` +
     `Platforms: ${platforms}`;
   return {
@@ -608,6 +666,7 @@ export async function runIntent(intent, rawText, onEvent = () => {}) {
     case 'status':          return handleStatus();
     case 'platform-status': return handlePlatformStatus(intent.platform);
     case 'briefing':        return handleBriefing();
+    case 'roadmap':         return handleRoadmap();
     case 'help':            return handleHelp();
     case 'passthrough':
     default:                return handleDispatch(rawText, 'auto', onEvent);
