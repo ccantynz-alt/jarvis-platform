@@ -66,6 +66,7 @@ live (`mcp.gatetest.ai`).
 
 ### Phase 5 — INTERFACE (the product)
 20. 🔨 IN PROGRESS 2026-07-08 — Jarvis Gateway MVP: Tailscale mesh + jarvis-gateway (:9208, `tailscale serve` HTTPS) + browser-native voice. Spec: docs/GATEWAY.md. Un-gated from Voxlen.
+21. ⬜ Embodied Jarvis — lip-synced live avatar + one consistent custom voice (TTS as a Vapron service, per estate model). Added 2026-07-10 after the footage-avatar iterations: pre-recorded video can only ever *pretend* to talk; the real thing needs a rendered avatar driven by the Gateway's existing speech-state events.
 
 ---
 

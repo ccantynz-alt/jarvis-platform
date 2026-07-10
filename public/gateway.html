@@ -154,7 +154,7 @@
 </head>
 <body data-jstate="idle">
 <div id="scene">
-  <video id="bgVideo" autoplay muted loop playsinline poster="/jarvis-bg.jpg">
+  <video id="bgVideo" muted loop playsinline preload="auto" poster="/jarvis-bg.jpg">
     <source src="/jarvis-bg.mp4" type="video/mp4">
   </video>
 </div>
@@ -233,20 +233,17 @@
     if (ttsPrimed || !('speechSynthesis' in window)) return;
     const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
   }
-  // Scene state drives the reactive glow layer AND the video itself:
-  // idle = slow ambient drift (kills the baked-in camera zoom), speaking =
-  // full speed so the background Jarvis visibly talks with the voice.
-  const RATE = { idle: 0.25, listening: 0.45, speaking: 1.0 };
+  // Scene state drives the glow layer AND the video: the man is FROZEN when
+  // idle/listening and plays at normal speed ONLY while the answer is being
+  // spoken — footage motion == voice, which is the only honest "connection"
+  // pre-recorded footage can have. No slow motion, no idle mouthing.
   const vid = $('bgVideo');
-  function applyRate(s) {
-    try { if (vid) vid.playbackRate = RATE[s] ?? RATE.idle; } catch { /* some browsers clamp */ }
+  function syncScene(s) {
+    if (!vid) return;
+    if (s === 'speaking') { vid.playbackRate = 1.0; vid.play().catch(() => {}); }
+    else { vid.pause(); }
   }
-  if (vid) {
-    vid.defaultPlaybackRate = RATE.idle;
-    vid.addEventListener('loadedmetadata', () => applyRate(document.body.dataset.jstate || 'idle'));
-    applyRate('idle');
-  }
-  function setJState(s) { document.body.dataset.jstate = s; applyRate(s); }
+  function setJState(s) { document.body.dataset.jstate = s; syncScene(s); }
 
   function speak(text) {
     if (muted || !text || !('speechSynthesis' in window)) return;

@@ -48,7 +48,8 @@
       "name": "INTERFACE",
       "subtitle": "the product",
       "moves": [
-        { "id": 20, "title": "Jarvis Gateway MVP — private mesh, streaming brain, voice in/out", "status": "in_progress", "note": "Tailscale mesh + gateway-server live and voice-tested; iPad/phone shakedown ongoing" }
+        { "id": 20, "title": "Jarvis Gateway MVP — private mesh, streaming brain, voice in/out", "status": "in_progress", "note": "Tailscale mesh + gateway-server live and voice-tested; iPad/phone shakedown ongoing" },
+        { "id": 21, "title": "Embodied Jarvis — lip-synced live avatar + one custom voice (TTS via Vapron)", "status": "pending", "note": "replaces the footage-based avatar illusion: rendered avatar driven by real speech events (state wiring already built), custom voice served by a Vapron TTS service per estate model" }
       ]
     }
   ]
