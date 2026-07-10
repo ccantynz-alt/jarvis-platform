@@ -218,24 +218,34 @@
   const muteBtn = $('muteBtn');
   const renderMute = () => { muteBtn.textContent = muted ? '🔇' : '🔊'; muteBtn.classList.toggle('active', !muted); };
   renderMute();
-  muteBtn.onclick = () => { muted = !muted; localStorage.setItem('jarvis_muted', muted ? '1' : '0'); renderMute(); if (muted) { speechSynthesis.cancel(); document.body.dataset.jstate = 'idle'; } };
+  muteBtn.onclick = () => {
+    muted = !muted; localStorage.setItem('jarvis_muted', muted ? '1' : '0'); renderMute();
+    if (muted) { speechSynthesis.cancel(); document.body.dataset.jstate = 'idle'; }
+    else { ttsPrimed = true; speak('Jarvis voice is on.'); } // in-gesture speech: unlocks iOS audio + audible device test
+  };
+
+  // iOS quirk: getVoices() is empty until voiceschanged fires — cache when ready.
+  let voiceCache = [];
+  const loadVoices = () => { const v = speechSynthesis.getVoices(); if (v && v.length) voiceCache = v; };
+  if ('speechSynthesis' in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
 
   function primeTTS() { // iOS: speech must be unlocked by a user gesture
     if (ttsPrimed || !('speechSynthesis' in window)) return;
-    const u = new SpeechSynthesisUtterance(''); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
+    const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
   }
   // Scene state drives the reactive glow layer over the Jarvis video
   function setJState(s) { document.body.dataset.jstate = s; }
 
   function speak(text) {
     if (muted || !text || !('speechSynthesis' in window)) return;
+    speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.04; u.pitch = 0.95;
-    const voices = speechSynthesis.getVoices();
-    u.voice = voices.find(v => /en[-_](GB|AU|NZ)/i.test(v.lang) && /male|daniel|arthur/i.test(v.name))
-      || voices.find(v => /^en/i.test(v.lang)) || null;
-    u.onstart = () => setJState('speaking');
-    u.onend = u.onerror = () => { if (!speechSynthesis.speaking && !speechSynthesis.pending) setJState('idle'); };
+    u.rate = 1.04; u.pitch = 0.95; u.volume = 1;
+    u.voice = voiceCache.find(v => /en[-_](GB|AU|NZ)/i.test(v.lang) && /male|daniel|arthur/i.test(v.name))
+      || voiceCache.find(v => /^en/i.test(v.lang)) || null;
+    u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
+    u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; };
+    u.onerror = (e) => { setJState('idle'); hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`; };
     speechSynthesis.speak(u);
   }
 
