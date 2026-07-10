@@ -102,6 +102,9 @@ app.get('/', (req, res, next) => {
 });
 
 app.get('/', (_req, res) => {
+  // iOS home-screen PWAs cache aggressively — force revalidation so UI fixes
+  // actually reach devices without a manual hard-refresh.
+  res.set('Cache-Control', 'no-cache, must-revalidate');
   res.sendFile('/opt/jarvis/public/gateway.html');
 });
 
