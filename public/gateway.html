@@ -24,39 +24,8 @@
     padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
   }
 
-  /* ── Jarvis scene: AI-rendered talking loop + code-driven reactive glow ── */
-  #scene { position: fixed; inset: 0; z-index: -2; overflow: hidden; }
-  #bgVideo {
-    width: 100%; height: 100%; object-fit: cover; object-position: 50% 22%;
-    filter: brightness(.9);
-  }
-  #sceneShade { /* light top/bottom fade only — Jarvis stays visible */
-    position: fixed; inset: 0; z-index: -1;
-    background: linear-gradient(180deg, #06090f80 0%, #06090f26 25%, #06090f1a 55%, #06090fb3 100%);
-  }
-  #voiceGlow { /* the reactive layer — breathes with Jarvis's actual state */
-    position: fixed; inset: 0; z-index: -1; pointer-events: none;
-    background: radial-gradient(ellipse 70% 55% at 50% 30%, #37b7ff2e, transparent 65%);
-    opacity: .25; transition: opacity .6s ease;
-  }
-  body[data-jstate="listening"] #voiceGlow {
-    opacity: .8; animation: glowListen 1.6s ease-in-out infinite;
-    background: radial-gradient(ellipse 70% 55% at 50% 30%, #ff6b7a30, transparent 65%);
-  }
-  body[data-jstate="speaking"] #voiceGlow {
-    opacity: 1; animation: glowSpeak .9s ease-in-out infinite;
-  }
-  @keyframes glowSpeak  { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
-  @keyframes glowListen { 0%,100% { opacity: .4; }  50% { opacity: .85; } }
-  @media (prefers-reduced-motion: reduce) {
-    #voiceGlow { animation: none !important; }
-  }
-  /* Arc-reactor orb — the element that visibly "talks" (reel trick: abstract
-     visuals are in perfect sync by construction). Sits above scene, below chat. */
-  #orb {
-    position: fixed; left: 50%; top: 36%; transform: translate(-50%, -50%);
-    width: min(52vw, 300px); aspect-ratio: 1; z-index: -1; pointer-events: none;
-  }
+  /* Scene experiments (video avatar, orb) removed 2026-07-10 — clean UI won.
+     The embodied Jarvis is roadmap move 21, to be done properly. */
   header {
     display: flex; align-items: center; gap: 10px;
     padding: 12px 16px; border-bottom: 1px solid var(--line);
@@ -159,14 +128,6 @@
 </style>
 </head>
 <body data-jstate="idle">
-<div id="scene">
-  <video id="bgVideo" muted loop playsinline preload="auto" poster="/jarvis-bg.jpg">
-    <source src="/jarvis-bg.mp4" type="video/mp4">
-  </video>
-</div>
-<div id="sceneShade"></div>
-<div id="voiceGlow"></div>
-<canvas id="orb"></canvas>
 <header>
   <span class="dot" id="connDot"></span>
   <span class="logo">JARVIS</span>
@@ -240,96 +201,7 @@
     if (ttsPrimed || !('speechSynthesis' in window)) return;
     const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
   }
-  // Scene state drives the glow layer AND the video: the man is FROZEN when
-  // idle/listening and plays at normal speed ONLY while the answer is being
-  // spoken — footage motion == voice, which is the only honest "connection"
-  // pre-recorded footage can have. No slow motion, no idle mouthing.
-  const vid = $('bgVideo');
-  function syncScene(s) {
-    if (!vid) return;
-    if (s === 'speaking') { vid.playbackRate = 1.0; vid.play().catch(() => {}); }
-    else { vid.pause(); }
-  }
-  function setJState(s) { document.body.dataset.jstate = s; syncScene(s); }
-
-  // ── Arc-reactor orb ────────────────────────────────────────────────────────
-  // Level source is pluggable: today it's synthesized from conversation state
-  // + word/chunk pulses (browser TTS exposes no audio stream to analyse);
-  // when the Vapron TTS service lands (roadmap #21), feed a WebAudio
-  // AnalyserNode into orbLevelSource instead and it becomes truly audio-driven.
-  const orbCanvas = $('orb');
-  const orbCtx = orbCanvas.getContext('2d');
-  let orbSpike = 0, orbLevel = 0.14, orbRot = 0, orbRAF = null;
-  let orbLevelSource = null; // future: () => 0..1 from real audio analyser
-  function pulse(a = 0.35) { orbSpike = Math.min(1, orbSpike + a); }
-
-  function orbBase(t) {
-    const s = document.body.dataset.jstate;
-    if (orbLevelSource) return orbLevelSource();
-    if (s === 'speaking') { // synthesized speech energy: layered sines + jitter
-      const n = 0.5 + 0.28 * Math.sin(t * 7.1) + 0.18 * Math.sin(t * 13.7 + 1.3) + 0.12 * Math.sin(t * 3.3 + 0.6);
-      return 0.35 + 0.5 * Math.max(0, Math.min(1, n)) ;
-    }
-    if (s === 'listening') return 0.32 + 0.06 * Math.sin(t * 2.2);
-    return 0.13 + 0.045 * Math.sin(t * 0.7); // idle breathing
-  }
-
-  function drawOrb(ts) {
-    const t = ts / 1000;
-    const dpr = window.devicePixelRatio || 1;
-    const cw = orbCanvas.clientWidth, ch = orbCanvas.clientHeight;
-    if (orbCanvas.width !== cw * dpr) { orbCanvas.width = cw * dpr; orbCanvas.height = ch * dpr; }
-    const c = orbCtx; c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, cw, ch);
-
-    orbSpike *= 0.90;
-    orbLevel += ((orbBase(t) + orbSpike * 0.55) - orbLevel) * 0.18; // smooth follow
-    const L = Math.max(0, Math.min(1.15, orbLevel));
-    const cx = cw / 2, cy = ch / 2, R = Math.min(cw, ch) / 2;
-    const listening = document.body.dataset.jstate === 'listening';
-    const hue = listening ? '255,107,122' : '55,183,255';   // red-ish vs cyan
-    const hue2 = listening ? '255,160,170' : '126,240,192'; // inner accent
-
-    // core
-    const coreR = R * (0.16 + 0.20 * L);
-    const g = c.createRadialGradient(cx, cy, 0, cx, cy, coreR * 2.2);
-    g.addColorStop(0, `rgba(${hue2},${0.85 * Math.min(1, 0.35 + L)})`);
-    g.addColorStop(0.35, `rgba(${hue},${0.55 * Math.min(1, 0.3 + L)})`);
-    g.addColorStop(1, 'rgba(0,0,0,0)');
-    c.fillStyle = g; c.beginPath(); c.arc(cx, cy, coreR * 2.2, 0, 7); c.fill();
-
-    // rotating arc rings (speed follows level)
-    orbRot += (0.004 + 0.045 * L);
-    const rings = [
-      { r: R * 0.52, w: 2.5, segs: 3, gap: 0.55, dir: 1,  alpha: 0.75 },
-      { r: R * 0.68, w: 1.5, segs: 5, gap: 0.35, dir: -1, alpha: 0.45 },
-      { r: R * 0.86, w: 3.5, segs: 2, gap: 0.9,  dir: 1,  alpha: 0.55 },
-    ];
-    for (const ring of rings) {
-      c.strokeStyle = `rgba(${hue},${ring.alpha * (0.4 + 0.6 * L)})`;
-      c.lineWidth = ring.w;
-      const span = (Math.PI * 2) / ring.segs;
-      for (let i = 0; i < ring.segs; i++) {
-        const a0 = orbRot * ring.dir + i * span;
-        c.beginPath(); c.arc(cx, cy, ring.r, a0, a0 + span * (1 - ring.gap)); c.stroke();
-      }
-    }
-    // tick marks
-    c.strokeStyle = `rgba(${hue},${0.25 + 0.3 * L})`; c.lineWidth = 1;
-    for (let i = 0; i < 24; i++) {
-      const a = (i / 24) * Math.PI * 2 - orbRot * 0.5;
-      const r1 = R * 0.94, r2 = R * (0.94 + (i % 6 === 0 ? 0.05 : 0.025));
-      c.beginPath();
-      c.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
-      c.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
-      c.stroke();
-    }
-    orbRAF = reducedMotion ? null : requestAnimationFrame(drawOrb);
-  }
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  function orbStart() { if (!orbRAF && !reducedMotion) orbRAF = requestAnimationFrame(drawOrb); }
-  function orbStop() { if (orbRAF) { cancelAnimationFrame(orbRAF); orbRAF = null; } }
-  document.addEventListener('visibilitychange', () => document.hidden ? orbStop() : orbStart());
-  if (reducedMotion) drawOrb(0); else orbStart();
+  function setJState(s) { document.body.dataset.jstate = s; }
 
   function speak(text) {
     if (muted || !text || !('speechSynthesis' in window)) return;
@@ -345,7 +217,6 @@
       || voiceCache.find(v => /en[-_](AU|NZ)/i.test(v.lang))
       || voiceCache.find(v => /^en/i.test(v.lang)) || null;
     u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
-    u.onboundary = () => pulse(0.3); // word boundaries spike the orb where the platform provides them
     u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; };
     u.onerror = (e) => { setJState('idle'); hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`; };
     speechSynthesis.speak(u);
@@ -384,7 +255,6 @@
         if (!streamDiv) streamDiv = bubble('jarvis', '');
         streamDiv.textContent += m.text;
         transcript.scrollTop = transcript.scrollHeight;
-        pulse(0.2); // streaming thought pulses the orb
       } else if (m.type === 'reply_done') {
         if (streamDiv) { meta(streamDiv, `converse · ${m.ms}ms`); }
         speak(m.speech); streamDiv = null;
@@ -435,7 +305,6 @@
         let interim = '';
         for (const r of e.results) (r.isFinal ? (finalText += r[0].transcript) : (interim += r[0].transcript));
         hint.textContent = interim || finalText || 'listening…';
-        pulse(0.25); // orb reacts to your words arriving
       };
       rec.onerror = (e) => { hint.textContent = e.error === 'not-allowed' ? '⚠ Mic permission denied — check Safari settings' : `voice error: ${e.error}`; };
       rec.onend = () => {
