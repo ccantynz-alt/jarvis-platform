@@ -83,6 +83,14 @@ Nothing is "done" without a named artifact proving it:
 - A successful build log
 "The code looks right" is not proof.
 
+**Rendered UI is proven by LOOKING at it, nothing else (added 2026-07-10 after
+the Gateway avatar debacle).** Any change to anything a human sees — HTML,
+CSS, frontend JS, layouts — MUST be screenshot-captured
+(`POST http://127.0.0.1:9201/screenshot/capture`) and visually inspected
+BEFORE telling Craig it's done. HTTP 200s, syntax checks, and "the code looks
+right" are not proof for pixels. Five visual iterations shipped unverified
+cost a full day and Craig's trust. Never again.
+
 ### Rule 3 — Write memory at session end
 Every session ends with:
 ```bash
