@@ -110,6 +110,16 @@ app.get('/icon-180.png', (req, res) => {
   res.sendFile('/opt/jarvis/public/icon-180.png');
 });
 
+// Jarvis avatar scene (hybrid visual: AI-rendered loop + code-driven reactive glow)
+app.get('/jarvis-bg.mp4', (req, res) => {
+  if (!isAuthed(req)) return res.status(403).end();
+  res.sendFile('/opt/jarvis/public/jarvis-bg.mp4'); // sendFile handles Range (needed by iOS video)
+});
+app.get('/jarvis-bg.jpg', (req, res) => {
+  if (!isAuthed(req)) return res.status(403).end();
+  res.sendFile('/opt/jarvis/public/jarvis-bg.jpg');
+});
+
 // ── Internal endpoints (other Jarvis services / tailnet peers) ───────────────
 
 // POST /internal/notify — live push of a notification to connected clients.

@@ -23,9 +23,38 @@
     display: flex; flex-direction: column; overflow: hidden;
     padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
   }
+
+  /* ── Jarvis scene: AI-rendered loop + code-driven reactive glow ── */
+  #scene { position: fixed; inset: 0; z-index: -2; overflow: hidden; }
+  #bgVideo {
+    width: 100%; height: 100%; object-fit: cover; object-position: 50% 22%;
+    filter: saturate(.9) brightness(.55);
+  }
+  #sceneShade { /* keeps chat readable over the video */
+    position: fixed; inset: 0; z-index: -1;
+    background: linear-gradient(180deg, #06090fd9 0%, #06090f99 30%, #06090f80 55%, #06090fe6 100%);
+  }
+  #voiceGlow { /* the reactive layer — breathes with Jarvis's actual state */
+    position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background: radial-gradient(ellipse 70% 55% at 50% 30%, #37b7ff2e, transparent 65%);
+    opacity: .25; transition: opacity .6s ease;
+  }
+  body[data-jstate="listening"] #voiceGlow {
+    opacity: .8; animation: glowListen 1.6s ease-in-out infinite;
+    background: radial-gradient(ellipse 70% 55% at 50% 30%, #ff6b7a30, transparent 65%);
+  }
+  body[data-jstate="speaking"] #voiceGlow {
+    opacity: 1; animation: glowSpeak .9s ease-in-out infinite;
+  }
+  @keyframes glowSpeak  { 0%,100% { opacity: .45; } 50% { opacity: 1; } }
+  @keyframes glowListen { 0%,100% { opacity: .4; }  50% { opacity: .85; } }
+  @media (prefers-reduced-motion: reduce) {
+    #voiceGlow { animation: none !important; }
+  }
   header {
     display: flex; align-items: center; gap: 10px;
-    padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+    background: #0b1220cc; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
   }
   .logo { font-weight: 800; letter-spacing: .18em; font-size: 15px; color: var(--accent); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--alert); transition: background .3s; }
@@ -43,14 +72,15 @@
   }
   #transcript { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
   .msg { max-width: 86%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word; }
-  .msg.user { align-self: flex-end; background: var(--user); border: 1px solid #23405f; }
-  .msg.jarvis { align-self: flex-start; background: var(--panel2); border: 1px solid var(--line); }
+  .msg.user { align-self: flex-end; background: #16283fd9; border: 1px solid #23405f; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .msg.jarvis { align-self: flex-start; background: #101a2ed9; border: 1px solid var(--line); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
   .msg.jarvis.interim { opacity: .8; }
   .msg .meta { font-size: 11px; color: var(--dim); margin-top: 6px; }
   .msg.notify { align-self: stretch; max-width: none; background: #101d16; border: 1px solid #1e4635; }
   .msg.notify.warn { background: #201a0e; border-color: #4d3d1a; }
   .msg.notify.alert { background: #241014; border-color: #5c2430; }
-  footer { border-top: 1px solid var(--line); background: var(--panel); padding: 10px 12px 14px; }
+  footer { border-top: 1px solid var(--line); background: #0b1220cc;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); padding: 10px 12px 14px; }
   .inputrow { display: flex; gap: 10px; align-items: center; }
   #textIn {
     flex: 1; background: var(--panel2); border: 1px solid var(--line); border-radius: 12px;
@@ -122,7 +152,14 @@
   .rm-move .body .note { color: var(--dim); font-size: 12px; margin-top: 2px; }
 </style>
 </head>
-<body>
+<body data-jstate="idle">
+<div id="scene">
+  <video id="bgVideo" autoplay muted loop playsinline poster="/jarvis-bg.jpg">
+    <source src="/jarvis-bg.mp4" type="video/mp4">
+  </video>
+</div>
+<div id="sceneShade"></div>
+<div id="voiceGlow"></div>
 <header>
   <span class="dot" id="connDot"></span>
   <span class="logo">JARVIS</span>
@@ -181,12 +218,15 @@
   const muteBtn = $('muteBtn');
   const renderMute = () => { muteBtn.textContent = muted ? '🔇' : '🔊'; muteBtn.classList.toggle('active', !muted); };
   renderMute();
-  muteBtn.onclick = () => { muted = !muted; localStorage.setItem('jarvis_muted', muted ? '1' : '0'); renderMute(); if (muted) speechSynthesis.cancel(); };
+  muteBtn.onclick = () => { muted = !muted; localStorage.setItem('jarvis_muted', muted ? '1' : '0'); renderMute(); if (muted) { speechSynthesis.cancel(); document.body.dataset.jstate = 'idle'; } };
 
   function primeTTS() { // iOS: speech must be unlocked by a user gesture
     if (ttsPrimed || !('speechSynthesis' in window)) return;
     const u = new SpeechSynthesisUtterance(''); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
   }
+  // Scene state drives the reactive glow layer over the Jarvis video
+  function setJState(s) { document.body.dataset.jstate = s; }
+
   function speak(text) {
     if (muted || !text || !('speechSynthesis' in window)) return;
     const u = new SpeechSynthesisUtterance(text);
@@ -194,6 +234,8 @@
     const voices = speechSynthesis.getVoices();
     u.voice = voices.find(v => /en[-_](GB|AU|NZ)/i.test(v.lang) && /male|daniel|arthur/i.test(v.name))
       || voices.find(v => /^en/i.test(v.lang)) || null;
+    u.onstart = () => setJState('speaking');
+    u.onend = u.onerror = () => { if (!speechSynthesis.speaking && !speechSynthesis.pending) setJState('idle'); };
     speechSynthesis.speak(u);
   }
 
@@ -275,7 +317,7 @@
       rec = new SR();
       rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
       let finalText = '';
-      rec.onstart = () => { listening = true; micBtn.classList.add('listening'); hint.textContent = 'listening…'; };
+      rec.onstart = () => { listening = true; micBtn.classList.add('listening'); hint.textContent = 'listening…'; setJState('listening'); };
       rec.onresult = (e) => {
         let interim = '';
         for (const r of e.results) (r.isFinal ? (finalText += r[0].transcript) : (interim += r[0].transcript));
@@ -283,7 +325,7 @@
       };
       rec.onerror = (e) => { hint.textContent = e.error === 'not-allowed' ? '⚠ Mic permission denied — check Safari settings' : `voice error: ${e.error}`; };
       rec.onend = () => {
-        listening = false; micBtn.classList.remove('listening');
+        listening = false; micBtn.classList.remove('listening'); setJState('idle');
         if (finalText.trim()) { hint.textContent = ''; send(finalText); } else if (!hint.textContent.startsWith('⚠')) hint.textContent = '';
       };
       rec.start();
