@@ -233,8 +233,20 @@
     if (ttsPrimed || !('speechSynthesis' in window)) return;
     const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
   }
-  // Scene state drives the reactive glow layer over the Jarvis video
-  function setJState(s) { document.body.dataset.jstate = s; }
+  // Scene state drives the reactive glow layer AND the video itself:
+  // idle = slow ambient drift (kills the baked-in camera zoom), speaking =
+  // full speed so the background Jarvis visibly talks with the voice.
+  const RATE = { idle: 0.25, listening: 0.45, speaking: 1.0 };
+  const vid = $('bgVideo');
+  function applyRate(s) {
+    try { if (vid) vid.playbackRate = RATE[s] ?? RATE.idle; } catch { /* some browsers clamp */ }
+  }
+  if (vid) {
+    vid.defaultPlaybackRate = RATE.idle;
+    vid.addEventListener('loadedmetadata', () => applyRate(document.body.dataset.jstate || 'idle'));
+    applyRate('idle');
+  }
+  function setJState(s) { document.body.dataset.jstate = s; applyRate(s); }
 
   function speak(text) {
     if (muted || !text || !('speechSynthesis' in window)) return;
