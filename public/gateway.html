@@ -24,14 +24,12 @@
     padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
   }
 
-  /* ── Jarvis scene: AI-rendered still + code-driven life (no zoom, ever) ── */
+  /* ── Jarvis scene: AI-rendered talking loop + code-driven reactive glow ── */
   #scene { position: fixed; inset: 0; z-index: -2; overflow: hidden; }
-  #bgStill {
+  #bgVideo {
     width: 100%; height: 100%; object-fit: cover; object-position: 50% 22%;
-    animation: breathe 9s ease-in-out infinite; /* brightness only — geometry never moves */
+    filter: brightness(.9);
   }
-  @keyframes breathe { 0%,100% { filter: brightness(.86); } 50% { filter: brightness(.98); } }
-  @media (prefers-reduced-motion: reduce) { #bgStill { animation: none; filter: brightness(.9); } }
   #sceneShade { /* light top/bottom fade only — Jarvis stays visible */
     position: fixed; inset: 0; z-index: -1;
     background: linear-gradient(180deg, #06090f80 0%, #06090f26 25%, #06090f1a 55%, #06090fb3 100%);
@@ -156,7 +154,9 @@
 </head>
 <body data-jstate="idle">
 <div id="scene">
-  <img id="bgStill" src="/jarvis-bg.jpg" alt="">
+  <video id="bgVideo" autoplay muted loop playsinline poster="/jarvis-bg.jpg">
+    <source src="/jarvis-bg.mp4" type="video/mp4">
+  </video>
 </div>
 <div id="sceneShade"></div>
 <div id="voiceGlow"></div>
@@ -240,8 +240,14 @@
     if (muted || !text || !('speechSynthesis' in window)) return;
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.04; u.pitch = 0.95; u.volume = 1;
-    u.voice = voiceCache.find(v => /en[-_](GB|AU|NZ)/i.test(v.lang) && /male|daniel|arthur/i.test(v.name))
+    u.rate = 1.0; u.pitch = 0.85; u.volume = 1; // measured, slightly deep — closest browser TTS gets to a Jarvis timbre
+    // Prefer iOS's British male voices (Daniel is the classic butler voice); enhanced variants win when installed
+    const prefer = ['daniel', 'arthur', 'oliver', 'jamie'];
+    u.voice = prefer.map(n => voiceCache.find(v => v.name.toLowerCase().includes(n) && /premium|enhanced/i.test(v.name)))
+        .find(Boolean)
+      || prefer.map(n => voiceCache.find(v => v.name.toLowerCase().includes(n))).find(Boolean)
+      || voiceCache.find(v => /en[-_]GB/i.test(v.lang))
+      || voiceCache.find(v => /en[-_](AU|NZ)/i.test(v.lang))
       || voiceCache.find(v => /^en/i.test(v.lang)) || null;
     u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
     u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; };
