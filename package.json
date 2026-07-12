@@ -9,7 +9,8 @@
     "metrics": "node src/metrics-collector.js",
     "slack": "node src/slack-bridge.js",
     "audit": "node src/audit-runner.js",
-    "health": "bash scripts/health-check.sh"
+    "health": "bash scripts/health-check.sh",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@slack/bolt": "^4.7.3",

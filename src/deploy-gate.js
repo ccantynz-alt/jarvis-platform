@@ -90,12 +90,12 @@ function logEvent(category, message) {
   console.log(line.trim());
 }
 
-async function slackSend(text) {
+async function slackSend(text, level = 'warning', key = null) {
   try {
     await fetch(`${SLACK_SVC}/slack/send`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify({ text, level, key }),
     });
   } catch (e) {
     logEvent('SLACK_FAIL', e.message);
@@ -219,7 +219,9 @@ async function processSession(session) {
       `🚨 *DEPLOY GATE — ${platform}*\n` +
       `A deploy just went out (session ${session.id}) and GateTest found ${result.criticalCount} critical issue(s) on ${url}.\n` +
       `${result.summary}\n` +
-      `_Advisory only — this does not block live traffic. Wire the GitHub Actions deploy gate on this repo for hard enforcement._`
+      `_Advisory only — this does not block live traffic. Wire the GitHub Actions deploy gate on this repo for hard enforcement._`,
+      'critical',
+      `deploy-gate-${platform}`,
     );
   } else {
     recordRun(session.id, platform, url, 'passed', 0, null);

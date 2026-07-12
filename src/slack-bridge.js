@@ -4,6 +4,15 @@
  * Receives commands from #jarvis via Socket Mode (preferred) or HTTP Events.
  * Routes to the orchestrator for dispatching Claude Code agents.
  *
+ * Two kinds of outbound traffic, handled differently:
+ *   - SOLICITED replies (Craig sent a command, Jarvis answers) → posted
+ *     directly, always, even while muted.
+ *   - UNSOLICITED notifications (audits, alerts, cron chatter from other
+ *     services) → must pass through the NotifyCenter (src/notify-center.js):
+ *     severity levels, dedupe, rate limiting, digest batching, mute and
+ *     quiet hours. Control it from Slack: `mute`, `mute 2h`, `unmute`,
+ *     `digest`, `notifications`.
+ *
  * Socket Mode setup:
  *   1. api.slack.com/apps → Your App → Socket Mode → Enable
  *   2. Create an App-Level Token with scope: connections:write
@@ -16,16 +25,26 @@ import express from 'express';
 import { App as BoltApp } from '@slack/bolt';
 import { readFileSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
+import { NotifyCenter, parseDuration } from './notify-center.js';
+import { detectIntent, matchPlatform, normalizeText } from './intent.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
 const SLACK_BOT_TOKEN  = process.env.SLACK_BOT_TOKEN;
 const SLACK_APP_TOKEN  = process.env.SLACK_APP_TOKEN; // xapp-... for Socket Mode
 const SLACK_CHANNEL    = process.env.JARVIS_SLACK_CHANNEL || '#jarvis';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const ORCHESTRATOR     = 'http://127.0.0.1:9205';
 const MEMORY           = 'http://127.0.0.1:9200';
 const SCREENSHOT       = 'http://127.0.0.1:9201';
 const METRICS          = 'http://127.0.0.1:9202';
+
+// Notification tuning — all overridable in secrets.env
+const DIGEST_MINUTES    = Number(process.env.JARVIS_DIGEST_MINUTES || 30);
+const NOTIFY_COOLDOWN   = Number(process.env.JARVIS_NOTIFY_COOLDOWN_MINUTES || 30);
+const MAX_PER_HOUR      = Number(process.env.JARVIS_MAX_IMMEDIATE_PER_HOUR || 15);
+// "22-7" = hold non-critical from 10pm to 7am NZ. Set to "off" to disable.
+const QUIET_HOURS_RAW   = process.env.JARVIS_QUIET_HOURS || '22-7';
 
 // Known live URLs for screenshot — derive from platform name when not listed
 const PLATFORM_URLS = {
@@ -52,119 +71,66 @@ function platformNames() {
   return Object.keys(loadPlatforms());
 }
 
-/**
- * Fuzzy-match a platform name from free text.
- * Tries word-boundary, substring, then 4-char prefix.
- */
-function matchPlatform(text) {
-  const lower = text.toLowerCase();
-  const names = platformNames();
+// ── Slack send helper (solicited replies + NotifyCenter's transport) ────────
 
-  for (const p of names) {
-    if (new RegExp(`\\b${p}\\b`).test(lower)) return p;
+async function sendSlack(text, channel = SLACK_CHANNEL) {
+  if (!SLACK_BOT_TOKEN) {
+    console.log(`[slack] No token — would send: ${text.slice(0, 120)}`);
+    return { ok: false, error: 'no_token' };
   }
-  for (const p of names) {
-    if (lower.includes(p)) return p;
+  try {
+    const r = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ channel, text, mrkdwn: true }),
+    });
+    const result = await r.json();
+    if (!result.ok) console.warn('[slack] postMessage error:', result.error);
+    return result;
+  } catch (e) {
+    console.error('[slack] send failed:', e.message);
+    return { ok: false, error: e.message };
   }
-  for (const p of names) {
-    if (p.length >= 4 && lower.includes(p.slice(0, 4))) return p;
-  }
-  return null;
 }
 
-// ── Intent detection ──────────────────────────────────────────────────────────
+// ── Notify Center — the gate for all unsolicited notifications ──────────────
 
-const DISPATCH_VERBS = [
-  'fix', 'upgrade', 'build', 'repair', 'add', 'create', 'update', 'deploy', 'run', 'scan',
-];
-
-const QUESTION_WORDS = ['what', 'how', 'why', 'is', 'are', 'does', 'can'];
-
-/**
- * Classify raw Slack message text into one of:
- *   dispatch | jobs | status | platform-status | briefing | help | passthrough
- *
- * Each result carries `confident: true|false`:
- *   true  → exact/clear command (short direct command, explicit "ask jarvis",
- *           explicit "how is X / check X" phrasing) — safe fast path
- *   false → matched a fallback/default rule (question fallthrough, guessed
- *           dispatch platform, incidental keyword hit in a long sentence) —
- *           handleCommand will consult the Haiku classifier
- */
-function detectIntent(raw) {
-  // Strip Slack formatting tags, normalise whitespace
-  const text = raw.toLowerCase().replace(/<[^>]+>/g, '').trim();
-
-  // Short direct commands ("status", "jobs", "morning briefing") are confident;
-  // long natural sentences that happen to contain a keyword are not.
-  const isShortCommand = text.split(/\s+/).filter(Boolean).length <= 4;
-
-  // "ask jarvis ..." — highest priority, must match before other rules
-  if (/^ask\s+(jarvis\s+)?/.test(text)) {
-    const question = raw.replace(/<[^>]+>/g, '').replace(/^ask\s+(jarvis\s+)?/i, '').trim();
-    return { type: 'ask', question, confident: true };
-  }
-
-  if (/\b(briefing|morning report|daily report|morning|good morning)\b/.test(text)) {
-    return { type: 'briefing', confident: isShortCommand };
-  }
-
-  if (/\bjobs?\b|\bwhat'?s running\b|\bwhat are you doing\b|\bqueue\b|\brunning tasks?\b/.test(text)) {
-    return { type: 'jobs', confident: isShortCommand };
-  }
-
-  if (/\b(help|commands?|what can you do)\b/.test(text)) {
-    return { type: 'help', confident: isShortCommand };
-  }
-
-  const platform = matchPlatform(text);
-
-  // "how is X", "check X", "X status" — explicit status query with platform
-  if (platform && /\b(how is|check|status of|health of|what'?s (wrong|up) with|is .* (up|down|working))\b/.test(text)) {
-    return { type: 'platform-status', platform, confident: true };
-  }
-
-  // General status — no platform name, just "status" / "health"
-  if (!platform && /\b(status|health)\b/.test(text)) {
-    return { type: 'status', confident: isShortCommand };
-  }
-
-  // Questions (what/how/why/is/are/does/can) → status, never dispatch
-  // Fallthrough guess — not confident, let Haiku have a look.
-  const isQuestion = QUESTION_WORDS.some(w => new RegExp(`^${w}\\b`).test(text));
-  if (isQuestion) {
-    return platform
-      ? { type: 'platform-status', platform, confident: false }
-      : { type: 'status', confident: false };
-  }
-
-  // Dispatch — has a recognised action verb. Platform may be guessed/defaulted,
-  // and verb matching is substring-level — not confident.
-  const hasVerb = DISPATCH_VERBS.some(v => new RegExp(`\\b${v}\\b`).test(text));
-  if (hasVerb) {
-    return { type: 'dispatch', platform: platform ?? 'auto', confident: false };
-  }
-
-  // Platform mentioned without a clear verb → treat as status query (guess)
-  if (platform) {
-    return { type: 'platform-status', platform, confident: false };
-  }
-
-  // Nothing matched → passthrough to orchestrator
-  return { type: 'passthrough', confident: false };
+function parseQuietHours(raw) {
+  const m = String(raw).match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+  if (!m) return null;
+  return { start: Number(m[1]) % 24, end: Number(m[2]) % 24 };
 }
 
-// ── LLM intent classification (Claude Haiku via local `claude` CLI) ──────────
+const notifyCenter = new NotifyCenter({
+  send: (text) => sendSlack(text),
+  statePath: '/opt/jarvis/memory/notify-state.json',
+  digestIntervalMs: DIGEST_MINUTES * 60 * 1000,
+  dedupeCooldownMs: NOTIFY_COOLDOWN * 60 * 1000,
+  maxImmediatePerHour: MAX_PER_HOUR,
+  quietHours: parseQuietHours(QUIET_HOURS_RAW),
+  timeZone: 'Pacific/Auckland',
+});
+
+// Digest flusher — checks every minute whether a flush is due
+setInterval(() => {
+  notifyCenter.flushDigest().catch(e => console.error('[notify] digest flush failed:', e.message));
+}, 60_000);
+
+// ── LLM intent classification (Claude Haiku) ─────────────────────────────────
 //
 // Used only when detectIntent() returns a non-confident (fallback/guessed)
-// result. Spawns the locally-authenticated `claude` CLI — no API keys touched.
-// Returns a validated intent object, or null on ANY failure (timeout, non-zero
-// exit, unparseable output, unknown type/platform) so callers can fall back
-// to the keyword result.
+// result. Prefers the HTTP Messages API when ANTHROPIC_API_KEY is set
+// (~300ms); falls back to the locally-authenticated `claude` CLI (~3-10s
+// cold start). Returns a validated intent object, or null on ANY failure
+// so callers can fall back to the keyword result.
 
 const HAIKU_MODEL = 'claude-haiku-4-5-20251001';
 const CLASSIFY_TIMEOUT_MS = 20000;
-const INTENT_TYPES = ['ask', 'dispatch', 'jobs', 'status', 'platform-status', 'briefing', 'help'];
+const API_TIMEOUT_MS = 10000;
+const INTENT_TYPES = ['ask', 'dispatch', 'jobs', 'status', 'platform-status', 'briefing', 'help', 'mute', 'unmute', 'digest'];
 
 function buildClassifyPrompt(text) {
   const platforms = platformNames();
@@ -178,14 +144,46 @@ function buildClassifyPrompt(text) {
     '- "status": general system/server health overview, not about one specific platform. Shape: {"type":"status"}',
     '- "platform-status": health/state of one specific platform, incl. "why is X slow/down/broken" diagnostics. Shape: {"type":"platform-status","platform":"<name>"}',
     '- "briefing": a morning/daily summary or rundown of everything. Shape: {"type":"briefing"}',
+    '- "mute": user wants fewer or no notifications, is complaining about notification spam, or asks Jarvis to quiet down. Shape: {"type":"mute","duration_minutes":<number or null>}',
+    '- "unmute": user wants notifications back on. Shape: {"type":"unmute"}',
+    '- "digest": user asks what has been queued/batched, or for the pending digest. Shape: {"type":"digest"}',
     '- "help": asking what Jarvis can do, or the message is unparseable/unclear. Shape: {"type":"help"}',
     '',
     `Known platforms: ${platforms.join(', ')}`,
     'Set "platform" to null if no known platform is mentioned.',
+    'Note: the user often addresses the bot as "jarvis" — that is the bot\'s name, not the "jarvis" platform, unless they are clearly asking about the jarvis platform itself.',
     'Respond with STRICT JSON only — a single object, no prose, no markdown fences.',
     '',
     `Message: ${JSON.stringify(text)}`,
   ].join('\n');
+}
+
+async function runClaudeApi(prompt) {
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: HAIKU_MODEL,
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+    if (!r.ok) {
+      console.warn(`[slack] haiku API HTTP ${r.status}`);
+      return null;
+    }
+    const data = await r.json();
+    return data?.content?.[0]?.text || null;
+  } catch (e) {
+    console.warn('[slack] haiku API error:', e.message);
+    return null;
+  }
 }
 
 function runClaudeCli(prompt) {
@@ -225,7 +223,10 @@ function runClaudeCli(prompt) {
 }
 
 async function classifyIntent(text) {
-  const output = await runClaudeCli(buildClassifyPrompt(text));
+  const prompt = buildClassifyPrompt(text);
+  // HTTP API first (fast), CLI as fallback (slow but works without a key)
+  let output = ANTHROPIC_API_KEY ? await runClaudeApi(prompt) : null;
+  if (!output) output = await runClaudeCli(prompt);
   if (!output) return null;
 
   // Defensive parse: strip markdown fences, isolate the first {...} object
@@ -261,6 +262,8 @@ async function classifyIntent(text) {
     intent.platform = platform;
   } else if (parsed.type === 'ask') {
     intent.question = (typeof parsed.question === 'string' && parsed.question.trim()) || text;
+  } else if (parsed.type === 'mute') {
+    if (Number(parsed.duration_minutes) > 0) intent.durationMs = Number(parsed.duration_minutes) * 60 * 1000;
   }
   return intent;
 }
@@ -277,31 +280,6 @@ async function fetchJSON(url, opts) {
     return JSON.parse(trimmed);
   } catch {
     throw new Error('Memory service unavailable');
-  }
-}
-
-// ── Slack send helper ────────────────────────────────────────────────────────
-
-async function sendSlack(text, channel = SLACK_CHANNEL) {
-  if (!SLACK_BOT_TOKEN) {
-    console.log(`[slack] No token — would send: ${text.slice(0, 120)}`);
-    return { ok: false, error: 'no_token' };
-  }
-  try {
-    const r = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ channel, text, mrkdwn: true }),
-    });
-    const result = await r.json();
-    if (!result.ok) console.warn('[slack] postMessage error:', result.error);
-    return result;
-  } catch (e) {
-    console.error('[slack] send failed:', e.message);
-    return { ok: false, error: e.message };
   }
 }
 
@@ -323,23 +301,19 @@ async function handleAsk(question, channel) {
   }
 }
 
-async function handleDispatch(rawText, platform, channel) {
-  const task = rawText.replace(/<[^>]+>/g, '').trim();
+async function handleDispatch(task, platform, channel) {
   let resolvedPlatform = platform;
 
-  if (platform === 'auto') {
-    resolvedPlatform = matchPlatform(task);
+  if (!platform || platform === 'auto') {
+    resolvedPlatform = matchPlatform(task.toLowerCase(), platformNames());
     if (!resolvedPlatform) {
       const known = platformNames().join(', ');
-      return sendSlack(`Which platform? Known: ${known}`, channel);
+      return sendSlack(`Which platform is that for? Known: ${known}\n_(say e.g. "fix the signup flow on vapron")_`, channel);
     }
   }
 
-  await sendSlack(
-    `🤖 Dispatching to *${resolvedPlatform}*...\nTask: _${task.slice(0, 200)}_`,
-    channel,
-  );
-
+  // One message per dispatch — posted after the orchestrator answers,
+  // not a play-by-play.
   try {
     const r = await fetch(`${ORCHESTRATOR}/dispatch`, {
       method: 'POST',
@@ -350,15 +324,14 @@ async function handleDispatch(rawText, platform, channel) {
 
     if (data.error) {
       const known = data.known?.length ? `\nKnown platforms: ${data.known.join(', ')}` : '';
-      await sendSlack(`❌ Dispatch failed: ${data.error}${known}`, channel);
-    } else {
-      await sendSlack(
-        `✅ Job started — ID: \`${data.jobId}\`\nPlatform: *${resolvedPlatform}* | Claude agent is running...`,
-        channel,
-      );
+      return sendSlack(`❌ Dispatch failed: ${data.error}${known}`, channel);
     }
+    return sendSlack(
+      `🤖 On it — *${resolvedPlatform}* agent running (job \`${data.jobId?.slice(0, 8)}\`)\n_${task.slice(0, 200)}_`,
+      channel,
+    );
   } catch (e) {
-    await sendSlack(`❌ Orchestrator unreachable: ${e.message}`, channel);
+    return sendSlack(`❌ Orchestrator unreachable: ${e.message}`, channel);
   }
 }
 
@@ -545,16 +518,75 @@ function handleHelp(channel) {
   const platforms = platformNames().join(', ');
   const msg =
     `*Jarvis commands:*\n` +
-    `• \`fix zoobicon dashboard\` — dispatch a task to a platform\n` +
-    `• \`upgrade vapron login flow\` — same, different verb\n` +
+    `• \`fix the signup flow on vapron\` — dispatch a task to a platform\n` +
     `• \`jobs\` or \`what's running\` — show job queue\n` +
     `• \`status\` — server metrics + all platform health\n` +
-    `• \`how is zoobicon\` — platform memory state + screenshot\n` +
-    `• \`check vapron\` — same\n` +
+    `• \`how is zoobicon\` / \`check vapron\` — platform state + screenshot\n` +
     `• \`briefing\` or \`morning\` — full morning summary\n` +
-    `• _anything else_ — passed through to orchestrator as a task\n\n` +
-    `Platforms: ${platforms}`;
+    `• \`ask jarvis what broke on vapron this week\` — query memory\n` +
+    `\n*Notification controls:*\n` +
+    `• \`mute\` / \`mute 2h\` / \`mute all\` — silence non-critical (or all) notifications\n` +
+    `• \`unmute\` — notifications back on\n` +
+    `• \`digest\` — post everything that's been batched, right now\n` +
+    `• \`notifications\` — show mute state, queue size, rate-limit status\n` +
+    `\nPlatforms: ${platforms}`;
   return sendSlack(msg, channel);
+}
+
+// ── Notification-control handlers (solicited — always reply directly) ───────
+
+async function handleMute(intent, channel) {
+  const durationMs = intent.durationMs ?? parseDuration(intent.rawText || '');
+  notifyCenter.mute(durationMs, { all: !!intent.all });
+  const scope = intent.all ? 'ALL notifications (including critical)' : 'non-critical notifications';
+  const until = durationMs
+    ? `for ${Math.round(durationMs / 60000)} minutes`
+    : 'until you say `unmute`';
+  return sendSlack(
+    `🔕 Muted ${scope} ${until}. ` +
+    `${intent.all ? '' : 'Critical alerts still come through. '}` +
+    `Everything else batches into the digest — say \`digest\` anytime to see it.`,
+    channel,
+  );
+}
+
+async function handleUnmute(channel) {
+  notifyCenter.unmute();
+  const queued = notifyCenter.digestQueue.length;
+  await sendSlack(`🔔 Notifications back on.${queued ? ` ${queued} update(s) queued — posting digest now.` : ''}`, channel);
+  if (queued) await notifyCenter.flushDigest({ force: true });
+  return null;
+}
+
+async function handleDigestNow(channel) {
+  const flushed = await notifyCenter.flushDigest({ force: true });
+  if (!flushed) return sendSlack('🗞 Nothing queued — you\'re all caught up.', channel);
+  return null;
+}
+
+async function handleNotifStatus(channel) {
+  const s = notifyCenter.status();
+  const quiet = s.quietHours ? `${s.quietHours.start}:00–${s.quietHours.end}:00 NZ` : 'off';
+  return sendSlack(
+    `🔔 *Notification settings*\n` +
+    `• Mute: ${s.muteDesc}\n` +
+    `• Queued for digest: ${s.queued}\n` +
+    `• Immediate posts last hour: ${s.immediateLastHour}/${s.maxImmediatePerHour}\n` +
+    `• Digest interval: every ${s.digestIntervalMin} min\n` +
+    `• Quiet hours (non-critical held): ${quiet}\n` +
+    `_Commands: \`mute\`, \`mute 2h\`, \`mute all\`, \`unmute\`, \`digest\`_`,
+    channel,
+  );
+}
+
+async function handleUnclear(rawText, channel) {
+  const cleaned = normalizeText(rawText);
+  return sendSlack(
+    `🤔 I didn't catch that: _"${cleaned.slice(0, 120)}"_\n` +
+    `Try something like \`fix the signup flow on vapron\`, \`status\`, \`how is zoobicon\`, or \`help\` for the full list.\n` +
+    `_(I no longer guess — an unclear message won't launch an agent anymore.)_`,
+    channel,
+  );
 }
 
 /**
@@ -563,12 +595,12 @@ function handleHelp(channel) {
  */
 async function handleCommand(rawText, channel) {
   const t0 = Date.now();
-  let intent = detectIntent(rawText);
+  let intent = detectIntent(rawText, platformNames());
   let via = 'keyword';
 
   // Keyword result was a fallback/guess — ask Haiku, prefer its answer if valid
   if (!intent.confident) {
-    const haiku = await classifyIntent(rawText);
+    const haiku = await classifyIntent(normalizeText(rawText));
     if (haiku) {
       intent = haiku;
       via = 'haiku';
@@ -580,14 +612,18 @@ async function handleCommand(rawText, channel) {
 
   switch (intent.type) {
     case 'ask':            return handleAsk(intent.question, channel);
-    case 'dispatch':       return handleDispatch(rawText, intent.platform, channel);
+    case 'dispatch':       return handleDispatch(intent.task || normalizeText(rawText), intent.platform, channel);
     case 'jobs':           return handleJobs(channel);
     case 'status':         return handleStatus(channel);
     case 'platform-status':return handlePlatformStatus(intent.platform, channel);
     case 'briefing':       return handleBriefing(channel);
     case 'help':           return handleHelp(channel);
-    case 'passthrough':
-    default:               return handleDispatch(rawText, 'auto', channel);
+    case 'mute':           return handleMute(intent, channel);
+    case 'unmute':         return handleUnmute(channel);
+    case 'digest':         return handleDigestNow(channel);
+    case 'notif-status':   return handleNotifStatus(channel);
+    case 'unclear':
+    default:               return handleUnclear(rawText, channel);
   }
 }
 
@@ -635,19 +671,28 @@ if (SLACK_APP_TOKEN && SLACK_BOT_TOKEN) {
 // ── Express HTTP API (port 9203) ─────────────────────────────────────────────
 // These endpoints are called by other Jarvis services (audit-runner, metrics, etc.)
 // and serve as a fallback HTTP events handler when Socket Mode is unavailable.
+// Everything arriving here is UNSOLICITED → it goes through the NotifyCenter.
 
 const app = express();
 app.use(express.json());
 
 // POST /slack/send — generic message from any Jarvis service
+// Body: { text, channel?, level? (critical|warning|info), key? }
+// Default level is "warning": immediate but deduped and rate-limited.
 app.post('/slack/send', async (req, res) => {
-  const { text, channel } = req.body;
+  const { text, channel, level = 'warning', key = null } = req.body;
   if (!text) return res.status(400).json({ error: 'text required' });
-  const result = await sendSlack(text, channel);
-  res.json(result);
+  // Explicit non-default channel = a targeted message, post directly
+  if (channel && channel !== SLACK_CHANNEL) {
+    return res.json(await sendSlack(text, channel));
+  }
+  const result = await notifyCenter.notify({ text, level, key });
+  res.json({ ok: true, ...result });
 });
 
 // POST /slack/report — structured audit report
+// Healthy reports batch into the digest; warnings post immediately (deduped);
+// critical always posts. This alone kills the daily per-platform spam.
 app.post('/slack/report', async (req, res) => {
   const { platform, status, issues = [], fixed = [], health_score } = req.body;
   const emoji = status === 'healthy' ? '✅' : status === 'warning' ? '⚠️' : '🔴';
@@ -667,8 +712,9 @@ app.post('/slack/report', async (req, res) => {
     text += fixed.slice(0, 5).map(f => `✓ ${String(f).slice(0, 120)}`).join('\n');
   }
 
-  const result = await sendSlack(text);
-  res.json(result);
+  const level = status === 'healthy' ? 'info' : status === 'warning' ? 'warning' : 'critical';
+  const result = await notifyCenter.notify({ text, level, key: `audit-${platform}` });
+  res.json({ ok: true, ...result });
 });
 
 // POST /slack/alert — urgent platform alert
@@ -676,17 +722,39 @@ app.post('/slack/alert', async (req, res) => {
   const { platform, message, level = 'warning' } = req.body;
   const emoji = level === 'critical' ? '🚨' : '⚠️';
   const text  = `${emoji} *JARVIS ALERT — ${(platform || '').toUpperCase()}*\n${message}`;
-  const result = await sendSlack(text);
-  res.json(result);
+  const result = await notifyCenter.notify({
+    text,
+    level: level === 'critical' ? 'critical' : 'warning',
+    key: `alert-${platform || 'general'}`,
+  });
+  res.json({ ok: true, ...result });
 });
 
 // POST /slack/image-alert — upload an image file to Slack and post with a message
+// Gated by the NotifyCenter first: if a visual-change alert for this platform
+// fired recently (or we're muted/rate-limited), the text note goes to the
+// digest and the upload is skipped entirely.
 // Uses Slack's current upload flow: getUploadURLExternal → PUT → completeUploadExternal
 app.post('/slack/image-alert', async (req, res) => {
   const { platform, message, filepath, filename } = req.body;
   if (!filepath || !filename) return res.status(400).json({ error: 'filepath and filename required' });
   if (!existsSync(filepath)) return res.status(400).json({ error: `File not found: ${filepath}` });
   if (!SLACK_BOT_TOKEN) return res.status(503).json({ error: 'no_token' });
+
+  // Would this even be allowed out right now? Do a dry-run via a sentinel send.
+  let gateAction = null;
+  const gate = await notifyCenter.notify({
+    text: message || `📸 Visual change on *${platform || 'unknown'}*`,
+    level: 'warning',
+    key: `visual-${platform || filename}`,
+  });
+  gateAction = gate.action;
+  if (gateAction !== 'sent') {
+    // Text note is queued in the digest; skip the noisy image upload.
+    return res.json({ ok: true, action: gateAction, reason: gate.reason, image_skipped: true });
+  }
+  // NOTE: the gate already posted the text message (that's the dedupe record);
+  // now attach the image via the upload flow.
 
   try {
     const fileData = readFileSync(filepath);
@@ -718,22 +786,29 @@ app.post('/slack/image-alert', async (req, res) => {
       body: JSON.stringify({
         files: [{ id: urlRes.file_id }],
         channel_id: channel,
-        initial_comment: message || `📸 Screenshot from *${platform || 'unknown'}*`,
       }),
     }).then(r => r.json());
 
     if (!completeRes.ok) {
       console.error('[slack] completeUpload failed:', completeRes.error);
-      // Fall back to text-only alert
-      await sendSlack(`${message || '📸 Screenshot'} _(image upload failed: ${completeRes.error})_`);
     }
 
     res.json({ ok: completeRes.ok, file_id: urlRes.file_id });
   } catch (e) {
     console.error('[slack] image-alert error:', e.message);
-    await sendSlack(`📸 Visual regression detected on *${platform}* — image upload failed: ${e.message}`);
     res.status(500).json({ error: e.message });
   }
+});
+
+// POST /slack/digest — force-flush the digest (used by cron or manually)
+app.post('/slack/digest', async (_req, res) => {
+  const flushed = await notifyCenter.flushDigest({ force: true });
+  res.json({ ok: true, flushed: !!flushed });
+});
+
+// GET /slack/notify-status — NotifyCenter state for dashboards/debugging
+app.get('/slack/notify-status', (_req, res) => {
+  res.json(notifyCenter.status());
 });
 
 // POST /slack/events — legacy Slack HTTP Events API fallback
@@ -764,19 +839,19 @@ app.get('/slack/test', async (req, res) => {
   const text = (req.query.text || '').toString();
   if (!text) return res.status(400).json({ error: 'text query param required' });
 
-  const keyword = detectIntent(text);
+  const keyword = detectIntent(text, platformNames());
   let haiku = null;
   let haiku_ms = null;
   let chosen = keyword;
 
   if (!keyword.confident) {
     const t0 = Date.now();
-    haiku = await classifyIntent(text);
+    haiku = await classifyIntent(normalizeText(text));
     haiku_ms = Date.now() - t0;
     if (haiku) chosen = haiku;
   }
 
-  res.json({ text, keyword, haiku, chosen, haiku_ms, platforms: platformNames() });
+  res.json({ text, normalized: normalizeText(text), keyword, haiku, chosen, haiku_ms, platforms: platformNames() });
 });
 
 // GET /slack/health
@@ -785,7 +860,9 @@ app.get('/slack/health', (req, res) => {
     status: 'ok',
     token_configured: !!SLACK_BOT_TOKEN,
     socket_mode_enabled: !!(SLACK_APP_TOKEN && SLACK_BOT_TOKEN),
+    classifier: ANTHROPIC_API_KEY ? 'http-api' : 'cli',
     channel: SLACK_CHANNEL,
+    notify: notifyCenter.status(),
   });
 });
 
@@ -794,4 +871,6 @@ app.listen(PORT, '127.0.0.1', () => {
   console.log(`[jarvis-slack] HTTP API on http://127.0.0.1:${PORT}`);
   console.log(`[jarvis-slack] Bot token: ${SLACK_BOT_TOKEN ? 'configured ✓' : 'MISSING ✗'}`);
   console.log(`[jarvis-slack] Socket Mode: ${SLACK_APP_TOKEN ? 'ENABLED ✓' : 'disabled (no SLACK_APP_TOKEN)'}`);
+  console.log(`[jarvis-slack] Haiku classifier: ${ANTHROPIC_API_KEY ? 'HTTP API (~300ms) ✓' : 'CLI fallback (~3-10s) — add ANTHROPIC_API_KEY to speed up'}`);
+  console.log(`[jarvis-slack] Notifications: digest every ${DIGEST_MINUTES}m, max ${MAX_PER_HOUR} immediate/hr, quiet hours ${QUIET_HOURS_RAW}`);
 });
