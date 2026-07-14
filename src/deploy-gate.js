@@ -63,7 +63,7 @@ const PLATFORM_URLS = {
   alecrae:   'https://alecrae.com',
   gatetest:  'https://gatetest.ai',
   voxlen:    'https://voxlen.com',
-  bookaride: 'https://bookaride.com',
+  bookaride: 'https://www.bookaride.co.nz',
 };
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });

@@ -519,7 +519,7 @@ async function cronDailyScreenshots() {
     alecrae:  'https://alecrae.com',
     gatetest: 'https://gatetest.ai',
     voxlen:   'https://voxlen.com',
-    bookaride:'https://bookaride.com',
+    bookaride:'https://www.bookaride.co.nz',
   };
 
   for (const [platform, url] of Object.entries(PLATFORM_URLS)) {

@@ -19,7 +19,7 @@ gluecron|https://gluecron.com
 alecrae|https://alecrae.com
 marcoreid|https://www.marcoreid.com
 davenroe|https://www.davenroe.com
-bookaride|https://bookaride.com
+bookaride|https://www.bookaride.co.nz
 voxlen|https://voxlen.com
 gatetest|https://gatetest.ai
 gatetest-mcp|https://mcp.gatetest.ai/healthz
