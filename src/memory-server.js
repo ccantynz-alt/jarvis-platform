@@ -90,6 +90,18 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
   CREATE INDEX IF NOT EXISTS idx_jobs_agent ON jobs(agent, created_at);
 
+  CREATE TABLE IF NOT EXISTS agent_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT,
+    agent TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    summary TEXT NOT NULL,
+    details TEXT,
+    routed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent, ts);
+
   CREATE TABLE IF NOT EXISTS job_transitions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id TEXT NOT NULL,
@@ -100,6 +112,9 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_job_transitions_job ON job_transitions(job_id);
 `);
+
+// Additive migrations for columns added after a table first shipped.
+try { db.exec('ALTER TABLE jobs ADD COLUMN model TEXT'); } catch { /* already present */ }
 
 const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
 PLATFORMS.forEach(p => {
@@ -291,13 +306,13 @@ app.post('/memory/jobs', (req, res) => {
   try {
     db.prepare(`
       INSERT INTO jobs (id, platform, agent, parent_job_id, enqueued_by, task, prompt,
-                        status, executor, runtime, server, path, priority, max_attempts,
+                        status, executor, runtime, model, server, path, priority, max_attempts,
                         timeout_min, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       b.id, b.platform || null, b.agent || null, b.parent_job_id || null,
       b.enqueued_by || 'api', b.task, b.prompt || null,
-      b.executor || null, b.runtime || 'claude', b.server || null, b.path || null,
+      b.executor || null, b.runtime || 'claude', b.model || null, b.server || null, b.path || null,
       b.priority ?? 5, b.max_attempts ?? 1, b.timeout_min ?? 30,
       new Date().toISOString()
     );
@@ -359,6 +374,45 @@ app.post('/memory/jobs/:id/transition', (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ── Agent reports (role agents file these as their mandatory last step) ────
+
+// POST /memory/agent-report — { agent, job_id, status, summary, details }
+app.post('/memory/agent-report', (req, res) => {
+  const { agent, job_id, status = 'ok', summary, details } = req.body || {};
+  if (!agent || !summary) return res.status(400).json({ error: 'agent and summary required' });
+  if (!['ok', 'action_needed', 'escalate'].includes(status)) {
+    return res.status(400).json({ error: 'status must be ok|action_needed|escalate' });
+  }
+  const result = db.prepare(`
+    INSERT INTO agent_reports (job_id, agent, ts, status, summary, details)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(job_id || null, agent, new Date().toISOString(), status, summary, details || null);
+  res.json({ id: result.lastInsertRowid });
+});
+
+// GET /memory/agent-reports?agent=&status=&since=&unrouted=1&limit=
+app.get('/memory/agent-reports', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const where = [];
+  const vals = [];
+  if (req.query.agent)  { where.push('agent = ?');  vals.push(req.query.agent); }
+  if (req.query.status) { where.push('status = ?'); vals.push(req.query.status); }
+  if (req.query.since)  { where.push('ts >= ?');    vals.push(req.query.since); }
+  if (req.query.unrouted) where.push('routed_at IS NULL');
+  const rows = db.prepare(`
+    SELECT * FROM agent_reports ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY id DESC LIMIT ?
+  `).all(...vals, limit);
+  res.json(rows);
+});
+
+// POST /memory/agent-reports/:id/routed — scheduler marks a report as handled
+app.post('/memory/agent-reports/:id/routed', (req, res) => {
+  const r = db.prepare('UPDATE agent_reports SET routed_at = ? WHERE id = ? AND routed_at IS NULL')
+    .run(new Date().toISOString(), req.params.id);
+  res.json({ ok: true, marked: r.changes });
 });
 
 // ── agent_context key/value API (canary gate state, etc.) ──────────────────

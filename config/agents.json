@@ -1,0 +1,48 @@
+{
+  "_comment": "Jarvis agent-org registry. Roles are rows, not processes: an entry costs nothing until its cron fires, then one bounded worker spawns, files a report, and dies. Hot-reloaded on every read like platforms.json. Kill any agent instantly with status:'inactive' or 'held'. Schedules are UTC (server time); 18:00 UTC = 6am NZST.",
+  "defaults": {
+    "kind": "role",
+    "runtime": "claude",
+    "model": "sonnet",
+    "reports_to": "ceo",
+    "priority": 5,
+    "concurrency": 1,
+    "budget": { "max_jobs_per_day": 2, "timeout_min": 20 },
+    "permissions": { "cwd": "/opt/jarvis/reports/agents", "may_dispatch": false, "may_push": false },
+    "escalation": "reports_to",
+    "status": "active"
+  },
+  "agents": {
+    "ceo": {
+      "display_name": "Jarvis (CEO)",
+      "kind": "resident",
+      "runtime": "api",
+      "reports_to": null,
+      "persona": "config/personas/ceo.md",
+      "escalation": "craig",
+      "_note": "The always-on gateway brain (src/lib/agent.js, Messages API). Never spawned by the scheduler."
+    },
+
+    "social-media-zoobicon":  { "display_name": "Social Media — Zoobicon",  "platform": "zoobicon",  "persona": "config/personas/social-media.md", "schedule": "0 18 * * *" },
+    "social-media-vapron":    { "display_name": "Social Media — Vapron",    "platform": "vapron",    "persona": "config/personas/social-media.md", "schedule": "10 18 * * *" },
+    "social-media-bookaride": { "display_name": "Social Media — BookARide", "platform": "bookaride", "persona": "config/personas/social-media.md", "schedule": "20 18 * * *" },
+    "social-media-gatetest":  { "display_name": "Social Media — GateTest",  "platform": "gatetest",  "persona": "config/personas/social-media.md", "schedule": "30 18 * * *" },
+    "social-media-alecrae":   { "display_name": "Social Media — AlecRae",   "platform": "alecrae",   "persona": "config/personas/social-media.md", "schedule": "40 18 * * *" },
+    "social-media-voxlen":    { "display_name": "Social Media — Voxlen",    "platform": "voxlen",    "persona": "config/personas/social-media.md", "schedule": "50 18 * * *" },
+    "social-media-gluecron":  { "display_name": "Social Media — Gluecron",  "platform": "gluecron",  "persona": "config/personas/social-media.md", "schedule": "0 19 * * *" },
+    "social-media-marcoreid": { "display_name": "Social Media — MarcoReid", "platform": "marcoreid", "persona": "config/personas/social-media.md", "schedule": "10 19 * * *" },
+    "social-media-davenroe":  { "display_name": "Social Media — DavenRoe",  "platform": "davenroe",  "persona": "config/personas/social-media.md", "schedule": "20 19 * * *" },
+
+    "accountant-nz": { "display_name": "Accountant — New Zealand", "jurisdiction": "NZ", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-nz", "schedule": "0 17 * * 1",  "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "accountant-au": { "display_name": "Accountant — Australia",   "jurisdiction": "AU", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-au", "schedule": "10 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "accountant-us": { "display_name": "Accountant — United States", "jurisdiction": "US", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-us", "schedule": "20 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "accountant-uk": { "display_name": "Accountant — United Kingdom", "jurisdiction": "UK", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-uk", "schedule": "30 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "accountant-sg": { "display_name": "Accountant — Singapore",    "jurisdiction": "SG", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-sg", "schedule": "40 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+
+    "legal-nz": { "display_name": "Legal — New Zealand", "jurisdiction": "NZ", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-nz", "schedule": "0 17 * * 2",  "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "legal-au": { "display_name": "Legal — Australia",   "jurisdiction": "AU", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-au", "schedule": "10 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "legal-us": { "display_name": "Legal — United States", "jurisdiction": "US", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-us", "schedule": "20 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "legal-uk": { "display_name": "Legal — United Kingdom", "jurisdiction": "UK", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-uk", "schedule": "30 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" },
+    "legal-sg": { "display_name": "Legal — Singapore",    "jurisdiction": "SG", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-sg", "schedule": "40 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig" }
+  }
+}

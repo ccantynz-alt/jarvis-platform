@@ -45,13 +45,13 @@ function stripAnsi(text) {
   return String(text || '').replace(ANSI_RE, '');
 }
 import Database from 'better-sqlite3';
+import { notify } from './lib/notify.js';
 
 const PORT = 9207;
 const POLL_INTERVAL_MS = 60_000;
 const SCAN_TIMEOUT_MS = 180_000;
 const GATETEST_PATH = process.env.GATETEST_PATH || '/opt/gatetest';
 const MEMORY_SVC = 'http://127.0.0.1:9200';
-const SLACK_SVC = 'http://127.0.0.1:9203';
 
 // Same platform → live-URL map orchestrator.js's cronDailyScreenshots
 // already uses — single source of truth would need a shared config file,
@@ -90,15 +90,19 @@ function logEvent(category, message) {
   console.log(line.trim());
 }
 
+// Kept name for the call site; now fans out via lib/notify.js (durable inbox
+// + gateway push; Slack only while NOTIFY_SLACK_LEGACY=1). Slack retirement
+// 2026-07-15: this was the last hard-coded :9203 caller.
 async function slackSend(text) {
   try {
-    await fetch(`${SLACK_SVC}/slack/send`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+    await notify({
+      source: 'deploy-gate',
+      level: 'warn',
+      title: text.split('\n')[0].replace(/\*/g, '').slice(0, 120),
+      body: text,
     });
   } catch (e) {
-    logEvent('SLACK_FAIL', e.message);
+    logEvent('NOTIFY_FAIL', e.message);
   }
 }
 

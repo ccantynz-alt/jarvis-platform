@@ -57,6 +57,7 @@ live (`mcp.gatetest.ai`).
 13. Auto-dispatch + guardrail layer (allowlist, spend caps, confidence thresholds).
 14. Intent routing → HTTP API (~300ms vs ~4-10s CLI).
 22. ✅ **DONE 2026-07-15** — Durable job queue + CLI canary gate (agent-org Phase 1): jobs survive restarts in SQLite (`jobs`/`job_transitions` via :9200), scheduler tick with `MAX_CONCURRENT_JOBS` + timeouts, boot recovery re-queues interrupted jobs, and `spawn-agent.js` holds all dispatch behind a CANARY-OK probe whenever the claude CLI version changes (kills the 2.1.207-class silent-failure mode).
+23. 🔄 **IN PROGRESS 2026-07-15** — Agent-org roster + scheduler + Slack retirement (Phase 2): 19 role agents registered (social-media × 9 platforms; accountant + legal × NZ/AU/US/UK/SG with DRAFT-only honesty framing), `jarvis-agents` (:9209) cron-dispatches them budget-capped and routes reports up the escalation ladder into the Gateway inbox. Verified end-to-end. jarvis-slack disabled; deploy-gate repointed to notify(). Remaining: flip `AGENTS_MODE` dry-run→live (Craig's call) and the 158 watchdog alert cutover.
 
 ### Phase 4 — CONSOLIDATE onto Vapron
 15. Confirm canonical Vapron repo; clean the 3-checkout mess.

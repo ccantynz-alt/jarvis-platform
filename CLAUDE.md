@@ -29,19 +29,20 @@ Notes:
 
 ---
 
-## THE NINE SERVICES
+## THE TEN SERVICES
 
 | Service | File | Port | Bind | Purpose |
 |---------|------|------|------|---------|
-| jarvis-memory | src/memory-server.js | 9200 | loopback | Cross-session SQLite memory + notifications inbox |
+| jarvis-memory | src/memory-server.js | 9200 | loopback | Cross-session SQLite memory + notifications inbox + durable job queue + agent reports |
 | jarvis-screenshot | src/screenshot-service.js | 9201 | loopback | CDP screenshot capture |
 | jarvis-metrics | src/metrics-collector.js | 9202 | loopback | Real server metrics + WebSocket |
-| jarvis-slack | src/slack-bridge.js | 9203 | loopback | **FROZEN LEGACY** (decision 2026-07-08) — zero new features; dual-write until Gateway proven, then retire. Do NOT build on or recommend Slack. |
+| jarvis-slack | src/slack-bridge.js | 9203 | loopback | **RETIRED 2026-07-15** — unit disabled, NOTIFY_SLACK_LEGACY=0, deploy-gate repointed to notify(). Code stays in git ~30 days then delete. The Gateway inbox is the only notification channel. |
 | jarvis-audit | src/audit-runner.js | 9204 | loopback | Build + test audit runner |
 | jarvis-orchestrator | src/orchestrator.js | 9205 | loopback | Dispatch engine — durable job queue (SQLite `jobs` table via :9200) + scheduler tick; spawns Claude agents (local + SSH) via src/lib/spawn-agent.js |
 | jarvis-dashboard | src/dashboard-server.js | 9206 | 0.0.0.0 + token auth | Status panel + screenshot browser; token = JARVIS_DASHBOARD_TOKEN in secrets.env, login once per device via `?token=` |
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | loopback | GateTest scan gating platform deploys |
 | jarvis-gateway | src/gateway-server.js | 9208 | loopback, exposed ONLY via `tailscale serve` (tailnet HTTPS) | **THE interface** — conversational voice/text control channel + notification inbox. Spec: docs/GATEWAY.md. Token = JARVIS_GATEWAY_TOKEN. |
+| jarvis-agents | src/agent-scheduler.js | 9209 | loopback | **Agent-org scheduler** — dispatches role agents from config/agents.json on cron (budget-capped), routes agent reports up the escalation ladder (ok→inbox, action_needed→warn, escalate→alert). Kill switch: `AGENTS_MODE=off|dry-run|live` in the unit file. Registry + personas: config/agents.json, config/personas/, config/knowledge/. |
 
 All are managed by systemd (`systemctl status 'jarvis-*'`) and survive reboots.
 All have a `/health` endpoint Claude must probe before assuming they are running.

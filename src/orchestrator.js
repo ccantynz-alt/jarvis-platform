@@ -6,6 +6,7 @@ import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
 import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { getAgent, buildAgentPrompt } from './lib/agents.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -186,11 +187,15 @@ async function finishJob(row, result) {
   console.log(`[orchestrator] job ${row.id} (${row.platform}) finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
   logEvent(success ? 'JOB' : 'ERR',
     `Agent ${success ? 'completed' : 'failed'} — ${row.id.slice(0, 8)} on ${row.platform} (exit ${result.code}${result.timedOut ? ', timeout' : ''})`);
-  logToMemory({
-    platform: row.platform,
-    status: success ? 'healthy' : 'error',
-    notes: `Orchestrator job ${row.id}: ${success ? 'completed' : 'failed (exit ' + result.code + ')'}`,
-  });
+  // Role-agent jobs must not flip platform health state — a social-media
+  // draft succeeding says nothing about the platform being healthy.
+  if (!row.agent) {
+    logToMemory({
+      platform: row.platform,
+      status: success ? 'healthy' : 'error',
+      notes: `Orchestrator job ${row.id}: ${success ? 'completed' : 'failed (exit ' + result.code + ')'}`,
+    });
+  }
   if (!success) {
     notify({
       source: 'orchestrator',
@@ -205,6 +210,7 @@ async function runLocalJob(row) {
   const result = await spawnClaude({
     prompt: row.prompt,
     cwd: row.path,
+    model: row.model || undefined,
     extraEnv: platformEnv(row.platform),
     timeoutMin: row.timeout_min,
   });
@@ -452,7 +458,55 @@ async function recoverInterruptedJobs() {
 // POST /dispatch  { platform, task }
 // platform="auto" → scan task text for a known platform name, fall back to "vapron"
 app.post('/dispatch', async (req, res) => {
-  let { platform, task, executor: requestedExecutor } = req.body || {};
+  let { platform, task, agent, executor: requestedExecutor } = req.body || {};
+
+  // ── Role-agent dispatch: prompt comes from the agent registry, not the
+  // platform boilerplate (no session scripts, no commit/push, cwd sandboxed).
+  if (agent) {
+    let role;
+    try {
+      role = getAgent(agent);
+    } catch (e) {
+      return res.status(500).json({ error: 'failed to load agent registry: ' + e.message });
+    }
+    if (!role) return res.status(404).json({ error: `Unknown agent: ${agent}` });
+    if (role.kind !== 'role') return res.status(400).json({ error: `Agent "${agent}" is ${role.kind}, not a dispatchable role` });
+    if (role.status !== 'active') return res.status(409).json({ error: `Agent "${agent}" is ${role.status}` });
+
+    const jobId = randomUUID();
+    let prompt;
+    try {
+      prompt = buildAgentPrompt(role, task, jobId);
+    } catch (e) {
+      return res.status(500).json({ error: 'failed to build agent prompt: ' + e.message });
+    }
+
+    try {
+      await dbPost('/memory/jobs', {
+        id: jobId,
+        platform: role.platform || null,
+        agent: role.name,
+        task: task || `Scheduled run: ${role.display_name}`,
+        prompt,
+        executor: 'local',
+        runtime: role.runtime || 'claude',
+        model: role.model || null,
+        server: OWN_IP,
+        path: role.permissions.cwd,
+        enqueued_by: (req.body && req.body.enqueued_by) || 'api',
+        parent_job_id: (req.body && req.body.parent_job_id) || null,
+        priority: role.priority ?? 5,
+        timeout_min: role.budget?.timeout_min ?? 20,
+        max_attempts: 2,
+      });
+    } catch (e) {
+      return res.status(500).json({ error: 'failed to enqueue agent job: ' + e.message });
+    }
+
+    logEvent('DISPATCH', `Agent job ${jobId.slice(0, 8)} queued → ${role.name}`);
+    console.log(`[orchestrator] enqueued agent job ${jobId} → ${role.name}`);
+    return res.json({ jobId, status: 'queued', agent: role.name, executor: 'local' });
+  }
 
   if (!platform || !task) {
     return res.status(400).json({ error: 'platform and task are required' });
