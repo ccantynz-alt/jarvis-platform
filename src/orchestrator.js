@@ -1,11 +1,11 @@
 import express from 'express';
-import { spawn } from 'child_process';
 import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
+import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -40,9 +40,59 @@ const CLOUD_API_URL = process.env.JARVIS_CLOUD_API_URL
   || 'https://api.anthropic.com/v1/routines';   // <-- NEEDS HUMAN CONFIRMATION
 const CLOUD_MODEL = 'claude-sonnet-5';
 
-// In-memory job store — survives process lifetime only, which is enough for
-// the async dispatch use case. Jobs are also recorded in Jarvis memory.
-const jobs = new Map();
+// ── Durable job queue (memory-server :9200 is the system of record) ──────────
+// Jobs live in the SQLite `jobs` table, not in this process, so they survive
+// restarts (previously an in-memory Map — every restart silently dropped the
+// whole job list). The orchestrator is the single scheduler: it enqueues on
+// /dispatch and a tick loop starts queued jobs up to MAX_CONCURRENT_JOBS.
+
+const MAX_CONCURRENT_JOBS = parseInt(process.env.MAX_CONCURRENT_JOBS, 10) || 3;
+const SCHEDULER_TICK_MS = 4000;
+const CANARY_RETRY_MS = 30 * 60_000;
+
+async function dbGet(path) {
+  const r = await fetch(`${MEMORY_URL}${path}`);
+  if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
+  return r.json();
+}
+
+async function dbPost(path, body) {
+  const r = await fetch(`${MEMORY_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`POST ${path} → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return r.json();
+}
+
+function jobTransition(id, to, detail, fields = {}) {
+  return dbPost(`/memory/jobs/${id}/transition`, { to, detail, fields });
+}
+
+// Map a DB row to the camelCase shape /jobs and /status/:id always returned,
+// so the dashboard and conversation.js need zero changes. startedAt falls back
+// to createdAt because queued jobs haven't started and old consumers sort on it.
+function toApiJob(row) {
+  return {
+    id: row.id,
+    platform: row.platform,
+    agent: row.agent,
+    task: row.task,
+    status: row.status,
+    isLocal: row.server === OWN_IP,
+    server: row.server,
+    path: row.path,
+    executor: row.executor,
+    enqueuedBy: row.enqueued_by,
+    attempts: row.attempts,
+    startedAt: row.started_at || row.created_at,
+    finishedAt: row.finished_at,
+    exitCode: row.exit_code,
+    output: row.output,
+    error: row.error,
+  };
+}
 
 // Event log for dashboard consumption (circular buffer, last 200 events)
 const eventLog = [];
@@ -117,110 +167,81 @@ function platformEnv(platform) {
   return extra;
 }
 
-function runLocal(platform, path, prompt, job) {
-  const proc = spawn(
-    'claude',
-    ['--dangerously-skip-permissions', '--print', prompt],
-    {
-      cwd: path,
-      env: { ...process.env, HOME: '/root', ...platformEnv(platform) },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }
-  );
+// Record a completed spawn result against the job row. Same notify/memory
+// behavior the old in-process handlers had.
+async function finishJob(row, result) {
+  const success = result.code === 0 && !result.timedOut;
+  const error = result.timedOut
+    ? `timed out after ${row.timeout_min} min\n${result.stderr}`
+    : result.stderr;
 
-  let stdout = '';
-  let stderr = '';
-  proc.stdout.on('data', (d) => { stdout += d.toString(); });
-  proc.stderr.on('data', (d) => { stderr += d.toString(); });
-
-  proc.on('close', (code) => {
-    const success = code === 0;
-    job.status = success ? 'completed' : 'failed';
-    job.exitCode = code;
-    job.output = stdout.slice(-4000);  // keep last 4k chars
-    job.error = stderr.slice(-2000);
-    job.finishedAt = new Date().toISOString();
-
-    console.log(`[orchestrator] job ${job.id} (${platform}) finished — exit ${code}`);
-    logToMemory({
-      platform,
-      status: success ? 'healthy' : 'error',
-      notes: `Orchestrator job ${job.id}: ${success ? 'completed' : 'failed (exit ' + code + ')'}`,
+  await jobTransition(row.id, success ? 'completed' : 'failed',
+    result.timedOut ? 'timeout' : `exit ${result.code}`, {
+      finished_at: new Date().toISOString(),
+      exit_code: result.code,
+      output: result.stdout,
+      error: String(error || '').slice(-2000),
     });
-  });
 
-  proc.on('error', (err) => {
-    job.status = 'failed';
-    job.error = err.message;
-    job.finishedAt = new Date().toISOString();
-    console.error(`[orchestrator] job ${job.id} spawn error:`, err.message);
+  console.log(`[orchestrator] job ${row.id} (${row.platform}) finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
+  logEvent(success ? 'JOB' : 'ERR',
+    `Agent ${success ? 'completed' : 'failed'} — ${row.id.slice(0, 8)} on ${row.platform} (exit ${result.code}${result.timedOut ? ', timeout' : ''})`);
+  logToMemory({
+    platform: row.platform,
+    status: success ? 'healthy' : 'error',
+    notes: `Orchestrator job ${row.id}: ${success ? 'completed' : 'failed (exit ' + result.code + ')'}`,
   });
+  if (!success) {
+    notify({
+      source: 'orchestrator',
+      level: 'error',
+      title: `❌ Job failed on ${row.platform} (exit ${result.code}${result.timedOut ? ', timeout' : ''})`,
+      body: `Job ${row.id.slice(0, 8)}: ${(error || result.stdout || 'no output').slice(0, 500)}`,
+    }).catch((e) => console.error('[orchestrator] failure notify failed:', e.message));
+  }
 }
 
-function runRemote(platform, server, path, prompt, job) {
+async function runLocalJob(row) {
+  const result = await spawnClaude({
+    prompt: row.prompt,
+    cwd: row.path,
+    extraEnv: platformEnv(row.platform),
+    timeoutMin: row.timeout_min,
+  });
+  await finishJob(row, result);
+}
+
+async function runRemoteJob(row) {
   // Escape single quotes in the prompt for shell safety
-  const safePrompt = prompt.replace(/'/g, "'\\''");
-  const extraEnvStr = Object.entries(platformEnv(platform))
+  const safePrompt = row.prompt.replace(/'/g, "'\\''");
+  const extraEnvStr = Object.entries(platformEnv(row.platform))
     .map(([k, v]) => `${k}=${v}`)
     .join(' ');
-  const sshCmd = `cd ${path} && ${extraEnvStr ? extraEnvStr + ' ' : ''}claude --dangerously-skip-permissions --print '${safePrompt}'`;
+  const sshCmd = `cd ${row.path} && IS_SANDBOX=1 DISABLE_AUTOUPDATER=1 ${extraEnvStr ? extraEnvStr + ' ' : ''}claude --dangerously-skip-permissions --print '${safePrompt}'`;
 
-  const proc = spawn(
-    'ssh',
-    [
-      '-o', 'StrictHostKeyChecking=no',
-      '-o', 'ConnectTimeout=10',
-      '-i', '/opt/jarvis/.ssh/orchestrator',
-      `root@${server}`,
-      sshCmd,
-    ],
-    { stdio: ['ignore', 'pipe', 'pipe'] }
-  );
-
-  let stdout = '';
-  let stderr = '';
-  proc.stdout.on('data', (d) => { stdout += d.toString(); });
-  proc.stderr.on('data', (d) => { stderr += d.toString(); });
-
-  proc.on('close', (code) => {
-    const success = code === 0;
-    job.status = success ? 'completed' : 'failed';
-    job.exitCode = code;
-    job.output = stdout.slice(-4000);
-    job.error = stderr.slice(-2000);
-    job.finishedAt = new Date().toISOString();
-    console.log(`[orchestrator] job ${job.id} (${platform}@${server}) finished — exit ${code}`);
-    logEvent(success ? 'JOB' : 'ERR',
-      `Agent ${success ? 'completed' : 'failed'} — ${job.id.slice(0,8)} on ${platform} (exit ${code})`);
-    logToMemory({
-      platform,
-      status: success ? 'healthy' : 'error',
-      notes: `Orchestrator job ${job.id} (remote ${server}): ${success ? 'completed' : 'failed (exit ' + code + ')'}`,
-    });
-  });
-
-  proc.on('error', (err) => {
-    job.status = 'failed';
-    job.error = err.message;
-    job.finishedAt = new Date().toISOString();
-    logEvent('ERR', `Agent spawn error — ${job.id.slice(0,8)} on ${platform}: ${err.message}`);
-    console.error(`[orchestrator] job ${job.id} ssh error:`, err.message);
-  });
+  const result = await spawnProcess('ssh', [
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'ConnectTimeout=10',
+    '-i', '/opt/jarvis/.ssh/orchestrator',
+    `root@${row.server}`,
+    sshCmd,
+  ], { env: process.env, timeoutMin: row.timeout_min });
+  await finishJob(row, result);
 }
 
-// Resolve a job to a clean failure without crashing the process. Sets the
-// SAME fields runLocal/runRemote set on failure (status/error/exitCode/finishedAt).
-function failJob(job, message) {
-  job.status = 'failed';
-  job.error = String(message).slice(-2000);
-  job.exitCode = job.exitCode == null ? 1 : job.exitCode;
-  job.finishedAt = new Date().toISOString();
-  logEvent('ERR', `Job ${job.id.slice(0, 8)} failed: ${String(message).slice(0, 100)}`);
-  console.error(`[orchestrator] job ${job.id} failed:`, message);
+// Resolve a job row to a clean failure without crashing the process.
+async function failJobRow(row, message) {
+  logEvent('ERR', `Job ${row.id.slice(0, 8)} failed: ${String(message).slice(0, 100)}`);
+  console.error(`[orchestrator] job ${row.id} failed:`, message);
+  await jobTransition(row.id, 'failed', 'error', {
+    finished_at: new Date().toISOString(),
+    exit_code: 1,
+    error: String(message).slice(-2000),
+  }).catch((e) => console.error('[orchestrator] fail transition failed:', e.message));
   logToMemory({
-    platform: job.platform,
+    platform: row.platform,
     status: 'error',
-    notes: `Orchestrator job ${job.id} (cloud): failed — ${String(message).slice(0, 120)}`,
+    notes: `Orchestrator job ${row.id}: failed — ${String(message).slice(0, 120)}`,
   });
 }
 
@@ -229,17 +250,24 @@ function failJob(job, message) {
 // its result back to /dispatch/callback. Resolves the SAME job fields runLocal
 // sets. On any misconfiguration or API error it fails the job cleanly (never
 // crashes). Reached only when JARVIS_CLOUD_ENABLED==='1' routes here.
-async function runCloud(platform, entry, prompt, job) {
+async function runCloud(row) {
+  const platform = row.platform;
   const token = process.env.JARVIS_CLOUD_TOKEN;
   const environmentId = process.env.JARVIS_CLOUD_ENV;
 
   // Fail cleanly (do NOT crash) when cloud creds are missing.
   if (!token || !environmentId) {
     const missing = !token ? 'JARVIS_CLOUD_TOKEN' : 'JARVIS_CLOUD_ENV';
-    return failJob(job, `cloud dispatch unavailable: ${missing} is not set`);
+    return failJobRow(row, `cloud dispatch unavailable: ${missing} is not set`);
   }
-  if (!entry.repo) {
-    return failJob(job, `cloud dispatch requires a git repo for platform "${platform}" (entry.repo is empty)`);
+  let entry;
+  try {
+    entry = loadRegistry()[platform];
+  } catch (e) {
+    return failJobRow(row, `cloud dispatch: registry load failed — ${e.message}`);
+  }
+  if (!entry?.repo) {
+    return failJobRow(row, `cloud dispatch requires a git repo for platform "${platform}" (entry.repo is empty)`);
   }
 
   // The cloud agent runs off-box, so it cannot reach the loopback orchestrator.
@@ -254,16 +282,16 @@ async function runCloud(platform, entry, prompt, job) {
     `FINAL STEP (required): after all work is complete, report back to Jarvis by`,
     `sending an HTTP POST to ${callbackUrl}`,
     `with header "X-Jarvis-Token: ${token}" and a JSON body:`,
-    `{"jobId":"${job.id}","ok":true,"summary":"<one-paragraph summary of what you did>"}`,
+    `{"jobId":"${row.id}","ok":true,"summary":"<one-paragraph summary of what you did>"}`,
     `Set "ok" to false if the task could not be completed.`,
   ].join('\n');
 
-  const content = prompt + finalStep;
+  const content = row.prompt + finalStep;
 
   // Request shape per the reference (routines/trigger create+run). Endpoint and
   // auth scheme are BEST-GUESS — see CLOUD_API_URL note. Needs human confirmation.
   const body = {
-    name: `jarvis-${platform}-${job.id.slice(0, 8)}`,
+    name: `jarvis-${platform}-${row.id.slice(0, 8)}`,
     run_once_at: new Date().toISOString(),
     job_config: {
       ccr: {
@@ -293,21 +321,131 @@ async function runCloud(platform, entry, prompt, job) {
     const text = await r.text();
 
     if (!r.ok) {
-      return failJob(job, `cloud API ${r.status}: ${text.slice(0, 500)}`);
+      return failJobRow(row, `cloud API ${r.status}: ${text.slice(0, 500)}`);
     }
 
     // Dispatched OK. The job stays 'running' until the agent POSTs the callback,
-    // at which point /dispatch/callback resolves status/output/finishedAt.
-    job.status = 'running';
-    job.output = `Cloud agent dispatched (CCR ${CLOUD_MODEL}). Awaiting callback for job ${job.id}. API response: ${text.slice(0, 500)}`;
-    logEvent('CLOUD', `Cloud agent dispatched — ${job.id.slice(0, 8)} on ${platform}`);
+    // at which point /dispatch/callback resolves status/output/finished_at.
+    await jobTransition(row.id, 'running', 'cloud agent dispatched, awaiting callback', {
+      output: `Cloud agent dispatched (CCR ${CLOUD_MODEL}). Awaiting callback for job ${row.id}. API response: ${text.slice(0, 500)}`,
+    });
+    logEvent('CLOUD', `Cloud agent dispatched — ${row.id.slice(0, 8)} on ${platform}`);
     logToMemory({
       platform,
       status: 'working',
-      notes: `Orchestrator job ${job.id} dispatched to cloud (${platform}); awaiting callback`,
+      notes: `Orchestrator job ${row.id} dispatched to cloud (${platform}); awaiting callback`,
     });
   } catch (e) {
-    return failJob(job, `cloud dispatch error: ${e.message}`);
+    return failJobRow(row, `cloud dispatch error: ${e.message}`);
+  }
+}
+
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+
+let gateHeld = false;
+let lastCanaryAt = 0;
+let tickInFlight = false;
+
+async function executeJob(row) {
+  try {
+    if (row.executor === 'cloud') return await runCloud(row);
+    if (row.executor === 'local') return await runLocalJob(row);
+    return await runRemoteJob(row);
+  } catch (e) {
+    await failJobRow(row, e.message);
+  }
+}
+
+async function schedulerTick() {
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+    const queued = await dbGet('/memory/jobs?status=queued&limit=100');
+    if (!queued.length) return;
+
+    const running = await dbGet('/memory/jobs?status=running&limit=100');
+    const slots = MAX_CONCURRENT_JOBS - running.length;
+    if (slots <= 0) return;
+
+    // Canary gate: a changed claude CLI must pass a probe before ANY job
+    // starts. While held, jobs stay queued (nothing is lost) and the gate
+    // retries every CANARY_RETRY_MS.
+    if (gateHeld && Date.now() - lastCanaryAt < CANARY_RETRY_MS) return;
+    const gate = await ensureClaudeVerified();
+    lastCanaryAt = Date.now();
+    if (!gate.ok) {
+      if (!gateHeld) {
+        gateHeld = true;
+        logEvent('ERR', `Canary FAILED — claude dispatch HELD (${gate.version || 'no version'})`);
+        notify({
+          source: 'orchestrator',
+          level: 'alert',
+          title: `🛑 Claude CLI ${gate.version || '(unknown)'} failed canary — dispatch HELD`,
+          body: `${gate.detail}\nQueued jobs are safe and will run once the canary passes. Retrying every 30 min.`,
+          speech: 'Warning. The Claude command line failed its canary check. Agent dispatch is held until it passes.',
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (gateHeld) {
+      gateHeld = false;
+      logEvent('SYS', `Canary passed — dispatch resumed (${gate.version})`);
+      notify({
+        source: 'orchestrator',
+        title: `✅ Claude CLI canary passed — dispatch resumed (${gate.version})`,
+      }).catch(() => {});
+    }
+
+    const toStart = queued
+      .sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at))
+      .slice(0, slots);
+
+    for (const row of toStart) {
+      await jobTransition(row.id, 'running', 'scheduler start', {
+        started_at: new Date().toISOString(),
+        attempts: row.attempts + 1,
+      });
+      logEvent('DISPATCH', `Job ${row.id.slice(0, 8)} started → ${row.platform} (${row.executor})`);
+      console.log(`[orchestrator] starting job ${row.id} → ${row.platform} (${row.executor})`);
+      executeJob({ ...row, attempts: row.attempts + 1 });  // async — not awaited
+    }
+  } catch (e) {
+    console.error('[scheduler] tick error:', e.message);
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+// Boot recovery: anything left 'running' by a previous process is transitioned
+// to 'interrupted', then re-queued if it has attempts left, else failed.
+async function recoverInterruptedJobs() {
+  try {
+    const running = await dbGet('/memory/jobs?status=running&limit=500');
+    if (!running.length) return;
+    let requeued = 0;
+    let failed = 0;
+    for (const row of running) {
+      await jobTransition(row.id, 'interrupted', 'orchestrator restarted mid-run');
+      if (row.attempts < row.max_attempts) {
+        await jobTransition(row.id, 'queued', `re-queued (attempt ${row.attempts}/${row.max_attempts})`);
+        requeued++;
+      } else {
+        await jobTransition(row.id, 'failed', 'interrupted, attempts exhausted', {
+          finished_at: new Date().toISOString(),
+          error: 'interrupted by orchestrator restart, no attempts left',
+        });
+        failed++;
+      }
+    }
+    logEvent('SYS', `Recovery: ${running.length} interrupted job(s) — ${requeued} re-queued, ${failed} failed`);
+    notify({
+      source: 'orchestrator',
+      level: failed ? 'warn' : 'info',
+      title: `♻️ Orchestrator restarted — recovered ${running.length} job(s)`,
+      body: `${requeued} re-queued and will resume shortly; ${failed} failed (attempts exhausted).`,
+    }).catch(() => {});
+  } catch (e) {
+    console.error('[orchestrator] boot recovery failed:', e.message);
   }
 }
 
@@ -352,69 +490,67 @@ app.post('/dispatch', async (req, res) => {
   }
 
   const jobId = randomUUID();
-  const job = {
-    id: jobId,
-    platform,
-    task,
-    status: 'running',
-    isLocal: entry.server === OWN_IP,
-    server: entry.server,
-    path: entry.path,
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    exitCode: null,
-    output: null,
-    error: null,
-  };
-  jobs.set(jobId, job);
+  const isLocal = entry.server === OWN_IP;
+  const prompt = buildPrompt(platform, task, isLocal ? entry.path : null);
 
-  const prompt = buildPrompt(platform, task, job.isLocal ? entry.path : null);
-  const designRefs = job.isLocal ? loadDesignRefs(entry.path) : [];
+  const designRefs = isLocal ? loadDesignRefs(entry.path) : [];
   if (designRefs.length > 0) {
     console.log(`[orchestrator] design-refs for ${platform}: ${designRefs.length} file(s)`);
     logEvent('DESIGN', `Found ${designRefs.length} design ref(s) for ${platform}`);
   }
+
+  // Choose the executor. With JARVIS_CLOUD_ENABLED unset, pickExecutor returns
+  // exactly the legacy result: 'local' for OWN_IP, 'remote' otherwise.
+  const executor = pickExecutor(platform, entry, task, requestedExecutor);
+
+  // Enqueue durably; the scheduler tick starts it within a few seconds.
+  // max_attempts 2 = one automatic retry if a restart interrupts the job.
+  try {
+    await dbPost('/memory/jobs', {
+      id: jobId,
+      platform,
+      task,
+      prompt,
+      executor,
+      server: entry.server,
+      path: entry.path,
+      enqueued_by: (req.body && req.body.enqueued_by) || 'api',
+      parent_job_id: (req.body && req.body.parent_job_id) || null,
+      priority: (req.body && req.body.priority) ?? 5,
+      timeout_min: (req.body && req.body.timeout_min) ?? 30,
+      max_attempts: 2,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'failed to enqueue job: ' + e.message });
+  }
+
   logEvent('DISPATCH', `Job ${jobId.slice(0,8)} queued → ${platform}: ${task.slice(0,80)}`);
-  console.log(`[orchestrator] dispatching job ${jobId} → ${platform} (${entry.server})`);
+  console.log(`[orchestrator] enqueued job ${jobId} → ${platform} (${entry.server}, ${executor})`);
 
   await logToMemory({
     platform,
     status: 'working',
-    notes: `Orchestrator job ${jobId} started: ${task.slice(0, 100)}`,
+    notes: `Orchestrator job ${jobId} queued: ${task.slice(0, 100)}`,
   });
 
-  // Choose the executor. With JARVIS_CLOUD_ENABLED unset, pickExecutor returns
-  // exactly the legacy result: 'local' for OWN_IP, 'remote' otherwise — so the
-  // branch below resolves to today's runLocal/runRemote, byte-identical.
-  const executor = pickExecutor(platform, entry, task, requestedExecutor);
-  job.executor = executor;
-
-  // Dispatch async — response returns immediately with the job ID
-  if (executor === 'cloud') {
-    runCloud(platform, entry, prompt, job);
-  } else if (executor === 'local') {
-    runLocal(platform, entry.path, prompt, job);
-  } else {
-    runRemote(platform, entry.server, entry.path, prompt, job);
-  }
-
-  res.json({ jobId, status: 'running', platform, isLocal: job.isLocal, executor });
+  res.json({ jobId, status: 'queued', platform, isLocal, executor });
 });
 
 // GET /status/:jobId
-app.get('/status/:jobId', (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
+app.get('/status/:jobId', async (req, res) => {
+  try {
+    const row = await dbGet(`/memory/jobs/${req.params.jobId}`);
+    res.json(toApiJob(row));
+  } catch {
+    res.status(404).json({ error: 'Job not found' });
   }
-  res.json(job);
 });
 
 // POST /dispatch/callback  { jobId, ok, summary }
 // Cloud CCR agents POST here when they finish. Authenticated by the shared
 // X-Jarvis-Token header (must equal JARVIS_CLOUD_TOKEN). Harmless when unused:
 // if JARVIS_CLOUD_TOKEN is not set, every request is rejected with 401.
-app.post('/dispatch/callback', (req, res) => {
+app.post('/dispatch/callback', async (req, res) => {
   const expected = process.env.JARVIS_CLOUD_TOKEN;
   const provided = req.header('X-Jarvis-Token');
   if (!expected || !provided || provided !== expected) {
@@ -424,21 +560,26 @@ app.post('/dispatch/callback', (req, res) => {
   const { jobId, ok, summary } = req.body || {};
   if (!jobId) return res.status(400).json({ error: 'jobId is required' });
 
-  const job = jobs.get(jobId);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
+  let row;
+  try {
+    row = await dbGet(`/memory/jobs/${jobId}`);
+  } catch {
+    return res.status(404).json({ error: 'Job not found' });
+  }
 
   const success = ok === true || ok === 'true';
-  job.status = success ? 'completed' : 'failed';
-  job.exitCode = success ? 0 : 1;
-  job.output = String(summary || '').slice(-4000);
-  if (!success) job.error = String(summary || 'cloud agent reported failure').slice(-2000);
-  job.finishedAt = new Date().toISOString();
+  await jobTransition(jobId, success ? 'completed' : 'failed', 'cloud callback', {
+    finished_at: new Date().toISOString(),
+    exit_code: success ? 0 : 1,
+    output: String(summary || '').slice(-4000),
+    ...(success ? {} : { error: String(summary || 'cloud agent reported failure').slice(-2000) }),
+  }).catch((e) => console.error('[orchestrator] callback transition failed:', e.message));
 
   logEvent(success ? 'JOB' : 'ERR',
-    `Cloud callback — ${jobId.slice(0, 8)} on ${job.platform} ${success ? 'completed' : 'failed'}`);
+    `Cloud callback — ${jobId.slice(0, 8)} on ${row.platform} ${success ? 'completed' : 'failed'}`);
   console.log(`[orchestrator] cloud callback for job ${jobId} — ${success ? 'completed' : 'failed'}`);
   logToMemory({
-    platform: job.platform,
+    platform: row.platform,
     status: success ? 'healthy' : 'error',
     notes: `Orchestrator cloud job ${jobId}: ${success ? 'completed' : 'failed'} (via callback)`,
   });
@@ -446,12 +587,14 @@ app.post('/dispatch/callback', (req, res) => {
   res.json({ ok: true });
 });
 
-// GET /jobs  — list all jobs (most recent first)
-app.get('/jobs', (req, res) => {
-  const list = Array.from(jobs.values())
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-    .slice(0, 50);
-  res.json(list);
+// GET /jobs  — list recent jobs (most recent first)
+app.get('/jobs', async (_req, res) => {
+  try {
+    const rows = await dbGet('/memory/jobs?limit=50');
+    res.json(rows.map(toApiJob));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /platforms  — dump the registry
@@ -470,8 +613,20 @@ app.get('/events', (req, res) => {
 });
 
 // GET /health
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', port: PORT, jobs: jobs.size, events: eventLog.length });
+app.get('/health', async (_req, res) => {
+  let queue = null;
+  try {
+    const counts = await dbGet('/memory/jobs/counts?window=today');
+    queue = Object.fromEntries(counts.by_status.map((r) => [r.status, r.count]));
+  } catch {}
+  res.json({
+    status: 'ok',
+    port: PORT,
+    queue,
+    canaryHeld: gateHeld,
+    maxConcurrent: MAX_CONCURRENT_JOBS,
+    events: eventLog.length,
+  });
 });
 
 // ── Cron helpers ─────────────────────────────────────────────────────────────
@@ -568,7 +723,7 @@ async function cronWeeklySummary() {
     if (unknown.length)  msg += `\n*Not yet audited:* ${unknown.map(p => `❓ ${p.name}`).join('  ')}\n`;
     if (mem.open_issues > 0) msg += `\n⚠️ *${mem.open_issues} open issues across all platforms*\n`;
 
-    const runningJobs = Array.from(jobs.values()).filter(j => j.status === 'running');
+    const runningJobs = await dbGet('/memory/jobs?status=running&limit=100').catch(() => []);
     if (runningJobs.length) msg += `\n⏳ *${runningJobs.length} agent job(s) currently running*`;
 
     await slackSend(msg);
@@ -604,6 +759,9 @@ app.post('/cron/weekly',    (_req, res) => { cronWeeklySummary();    res.json({ 
 
 logEvent('SYS', 'Orchestrator initialized — ready to dispatch agents');
 
-app.listen(PORT, '127.0.0.1', () => {
+app.listen(PORT, '127.0.0.1', async () => {
   console.log(`[orchestrator] listening on http://127.0.0.1:${PORT}`);
+  await recoverInterruptedJobs();
+  setInterval(schedulerTick, SCHEDULER_TICK_MS);
+  console.log(`[orchestrator] scheduler running (tick ${SCHEDULER_TICK_MS}ms, max ${MAX_CONCURRENT_JOBS} concurrent)`);
 });

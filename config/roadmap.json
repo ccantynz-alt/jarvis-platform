@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-09",
+  "updated": "2026-07-15",
   "phases": [
     {
       "name": "STABILIZE",
@@ -27,6 +27,7 @@
       "subtitle": "self-running",
       "moves": [
         { "id": 10, "title": "Agent runtime → Claude Agent SDK, scoped permissions", "status": "pending" },
+        { "id": 22, "title": "Durable job queue + CLI canary gate (agent-org Phase 1)", "status": "done", "note": "2026-07-15: jobs/job_transitions in SQLite via :9200, scheduler tick + boot recovery in orchestrator, spawn-agent.js canary holds dispatch on CLI regression. Approved plan: vectorized-skipping-puzzle.md" },
         { "id": 11, "title": "Enable cloud executor (after #8 + creds)", "status": "pending" },
         { "id": 12, "title": "Turn on self-repair (jarvis → cloud)", "status": "pending" },
         { "id": 13, "title": "Auto-dispatch + guardrail layer", "status": "pending" },

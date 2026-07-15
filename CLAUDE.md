@@ -38,7 +38,7 @@ Notes:
 | jarvis-metrics | src/metrics-collector.js | 9202 | loopback | Real server metrics + WebSocket |
 | jarvis-slack | src/slack-bridge.js | 9203 | loopback | **FROZEN LEGACY** (decision 2026-07-08) — zero new features; dual-write until Gateway proven, then retire. Do NOT build on or recommend Slack. |
 | jarvis-audit | src/audit-runner.js | 9204 | loopback | Build + test audit runner |
-| jarvis-orchestrator | src/orchestrator.js | 9205 | loopback | Dispatch engine — spawns Claude agents (local + SSH) |
+| jarvis-orchestrator | src/orchestrator.js | 9205 | loopback | Dispatch engine — durable job queue (SQLite `jobs` table via :9200) + scheduler tick; spawns Claude agents (local + SSH) via src/lib/spawn-agent.js |
 | jarvis-dashboard | src/dashboard-server.js | 9206 | 0.0.0.0 + token auth | Status panel + screenshot browser; token = JARVIS_DASHBOARD_TOKEN in secrets.env, login once per device via `?token=` |
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | loopback | GateTest scan gating platform deploys |
 | jarvis-gateway | src/gateway-server.js | 9208 | loopback, exposed ONLY via `tailscale serve` (tailnet HTTPS) | **THE interface** — conversational voice/text control channel + notification inbox. Spec: docs/GATEWAY.md. Token = JARVIS_GATEWAY_TOKEN. |
@@ -239,9 +239,27 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   `curl 'http://127.0.0.1:9203/slack/test?text=...'` — it returns
   {keyword, haiku, chosen, haiku_ms}. Haiku can only route to platforms
   present in platforms.json.
-- **Memory hygiene:** `repair_log` and `agent_context` tables exist but are
-  empty — sessions skip the mid-session logging in the protocol below. The
-  memory is only as smart as what gets written to it.
+- **Memory hygiene:** `repair_log` table exists but is mostly empty — sessions
+  skip the mid-session logging in the protocol below. The memory is only as
+  smart as what gets written to it.
+- **Jobs are durable (2026-07-15):** orchestrator jobs live in the SQLite
+  `jobs` + `job_transitions` tables (memory :9200 `/memory/jobs*`), NOT in
+  process memory. A restart re-queues interrupted jobs automatically (one
+  retry, `max_attempts=2`). Debug a "silent" job with
+  `curl -s http://127.0.0.1:9200/memory/jobs/<id> | jq .transitions`.
+- **Worker spawns go through `src/lib/spawn-agent.js` ONLY.** It centralizes
+  `IS_SANDBOX=1` (claude ≥2.1.207 refuses skip-permissions as root without
+  it), `DISABLE_AUTOUPDATER=1`, timeout kill timers, and it STRIPS
+  `ANTHROPIC_API_KEY` from worker envs — CLI workers must bill the flat-rate
+  claude.ai subscription, never the metered key (that key is only for the
+  gateway's Messages-API brain). Never add a raw `spawn('claude', ...)`
+  anywhere else.
+- **Canary gate:** when the installed claude CLI version differs from
+  `agent_context.claude_verified_version`, the scheduler runs a CANARY-OK
+  probe before starting ANY job. If it fails, dispatch is HELD (jobs stay
+  queued, alert notification fires, retry every 30 min) — a CLI regression
+  can no longer silently kill the fleet. Check `curl :9205/health | jq
+  .canaryHeld`.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 

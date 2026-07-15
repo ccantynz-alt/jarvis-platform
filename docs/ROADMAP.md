@@ -56,6 +56,7 @@ live (`mcp.gatetest.ai`).
 12. Turn on self-repair (jarvis → cloud).
 13. Auto-dispatch + guardrail layer (allowlist, spend caps, confidence thresholds).
 14. Intent routing → HTTP API (~300ms vs ~4-10s CLI).
+22. ✅ **DONE 2026-07-15** — Durable job queue + CLI canary gate (agent-org Phase 1): jobs survive restarts in SQLite (`jobs`/`job_transitions` via :9200), scheduler tick with `MAX_CONCURRENT_JOBS` + timeouts, boot recovery re-queues interrupted jobs, and `spawn-agent.js` holds all dispatch behind a CANARY-OK probe whenever the claude CLI version changes (kills the 2.1.207-class silent-failure mode).
 
 ### Phase 4 — CONSOLIDATE onto Vapron
 15. Confirm canonical Vapron repo; clean the 3-checkout mess.
