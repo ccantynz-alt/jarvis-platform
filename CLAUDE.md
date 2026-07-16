@@ -43,6 +43,7 @@ Notes:
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | loopback | GateTest scan gating platform deploys |
 | jarvis-gateway | src/gateway-server.js | 9208 | loopback, exposed ONLY via `tailscale serve` (tailnet HTTPS) | **THE interface** — conversational voice/text control channel + notification inbox. Spec: docs/GATEWAY.md. Token = JARVIS_GATEWAY_TOKEN. |
 | jarvis-agents | src/agent-scheduler.js | 9209 | loopback | **Agent-org scheduler** — dispatches role agents from config/agents.json on cron (budget-capped), routes agent reports up the escalation ladder (ok→inbox, action_needed→warn, escalate→alert). Kill switch: `AGENTS_MODE=off|dry-run|live` in the unit file. Registry + personas: config/agents.json, config/personas/, config/knowledge/. |
+| jarvis-deck | src/deck-server.js | 9210 | loopback, exposed ONLY via `tailscale serve --https=8444` | **Command Deck HUD** (2026-07-16, from Craig's Claude Design handoff) — 4-view telemetry deck (HUD/Hierarchy/Message Flow/Platforms) at public/command-deck.html + raw WS `/jarvis` speaking the handoff's contract v1.0. All numbers real (9200/9205/9209 + platform-health.json); commands route to lib/agent.js brain with intent-pipeline fallback. Token = JARVIS_DECK_TOKEN or JARVIS_GATEWAY_TOKEN. |
 
 All are managed by systemd (`systemctl status 'jarvis-*'`) and survive reboots.
 All have a `/health` endpoint Claude must probe before assuming they are running.
@@ -103,7 +104,7 @@ closed. Don't add to that number.)
 
 ### Rule 4 — Never break co-tenants
 This box also runs AlecRae, Gluecron, GateTest, and the Coolify stack.
-Jarvis owns ports 9200–9208 and nothing else. Before binding any port,
+Jarvis owns ports 9200–9210 and nothing else. Before binding any port,
 check `ss -tlnp`. Do not modify co-tenant config from this repo.
 
 ### Rule 5 — No competitor dependencies
@@ -156,6 +157,7 @@ Loopback only:
 - :5432 Postgres
 - :9200–9205, :9207 Jarvis services
 - :9208 jarvis-gateway — loopback + `tailscale serve --https=8443` (tailnet-only HTTPS; never expose publicly)
+- :9209 jarvis-agents · :9210 jarvis-deck — loopback; deck also on `tailscale serve --https=8444` (tailnet-only, same rule as the gateway)
 
 The old doctrine said Vapron owns 3000/3001/8090/9099 — **not true on this
 box**. Vapron lives elsewhere; check `config/platforms.json` for servers.

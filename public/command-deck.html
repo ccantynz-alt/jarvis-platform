@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS Command Deck</title>
+<!--
+  JARVIS Command Deck — implemented from Craig's Claude Design handoff
+  (design_handoff_jarvis_command_deck / JARVIS Command Deck.dc.html).
+  Vanilla JS recreation. Talks the deck WebSocket contract v1.0 to
+  src/deck-server.js at same-origin /jarvis (design's ws://…:8080 default is
+  impossible on this box — Traefik owns 8080; see CLAUDE.md Rule 4).
+  Falls back to the design's built-in simulation when the socket is down.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Michroma&family=Rajdhani:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0;background:#04060c;overflow:hidden}
+*{box-sizing:border-box}
+a{color:#00e5ff;text-decoration:none}
+a:hover{color:#7df4ff}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-thumb{background:rgba(0,229,255,.25);border-radius:3px}
+::-webkit-scrollbar-track{background:transparent}
+input::placeholder{color:#3d5566}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes packet{0%{left:0%;opacity:0}8%{opacity:1}92%{opacity:1}100%{left:calc(100% - 8px);opacity:0}}
+@keyframes scanline{0%{top:-10%}100%{top:110%}}
+@keyframes riseIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulseRing{0%{box-shadow:0 0 0 0 rgba(0,229,255,.35)}70%{box-shadow:0 0 0 10px rgba(0,229,255,0)}100%{box-shadow:0 0 0 0 rgba(0,229,255,0)}}
+
+body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
+.mono{font-family:'IBM Plex Mono',monospace}
+#app{height:100vh;display:grid;grid-template-rows:auto 1fr auto;position:relative;
+  background:radial-gradient(1200px 700px at 50% -10%, rgba(0,90,120,.22), transparent 60%),
+             radial-gradient(900px 600px at 85% 110%, rgba(60,0,120,.18), transparent 55%), #04060c}
+.scan1{pointer-events:none;position:absolute;inset:0;z-index:9;
+  background:repeating-linear-gradient(0deg, rgba(255,255,255,.015) 0px, rgba(255,255,255,.015) 1px, transparent 1px, transparent 3px)}
+.scan2{pointer-events:none;position:absolute;left:0;right:0;height:80px;z-index:9;
+  background:linear-gradient(180deg,transparent,rgba(0,229,255,.03),transparent);animation:scanline 9s linear infinite}
+
+.topbar{display:flex;align-items:center;gap:18px;padding:12px 18px;border-bottom:1px solid rgba(0,229,255,.14);
+  background:rgba(6,10,18,.72);backdrop-filter:blur(8px);flex-wrap:wrap}
+.brand-dot{width:12px;height:12px;border-radius:50%;background:#00e5ff;animation:pulseRing 2.4s ease-out infinite}
+.tab{cursor:pointer;padding:8px 12px;font-weight:600;font-size:13px;letter-spacing:1.5px;text-transform:uppercase;
+  white-space:nowrap;color:#5f7a8c;border-bottom:2px solid transparent;transition:color .2s}
+.tab:hover{color:#9fefff}
+.tab.active{color:#00e5ff;border-bottom-color:#00e5ff}
+
+.section-label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:3px;color:#5f7a8c}
+.agent-tile{border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.72);border-radius:4px;
+  padding:10px 12px;display:flex;flex-direction:column;gap:4px;animation:riseIn .4s ease both}
+.btn{cursor:pointer;background:rgba(8,14,24,.8);padding:7px 18px;border-radius:3px;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px}
+#btn-mic{border:1px solid rgba(0,229,255,.4);color:#00e5ff}
+#btn-mic:hover{background:rgba(0,229,255,.08)}
+#btn-mic.live{border-color:#ff4d6a;color:#ff4d6a}
+#btn-demo{border:1px solid rgba(255,181,71,.4);color:#ffb547}
+#btn-demo:hover{background:rgba(255,181,71,.08)}
+
+.chat-msg{max-width:85%;border-radius:4px;padding:8px 12px;animation:riseIn .3s ease both}
+.chat-msg.jarvis{align-self:flex-start;border:1px solid rgba(0,229,255,.25);background:rgba(6,18,26,.7)}
+.chat-msg.you{align-self:flex-end;border:1px solid rgba(255,181,71,.3);background:rgba(30,22,8,.6)}
+.chat-who{font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:2px;margin-bottom:3px}
+.chat-msg.jarvis .chat-who{color:#00e5ff}
+.chat-msg.you .chat-who{color:#ffb547}
+.chat-text{font-size:14px;line-height:1.45;color:#dcedf6}
+
+.feed-line{display:flex;gap:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.5;animation:riseIn .3s ease both}
+.feed-t{color:#40606f;flex-shrink:0}
+.statbox{border:1px solid rgba(0,229,255,.1);background:rgba(8,14,24,.6);border-radius:4px;padding:10px;
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;font-family:'IBM Plex Mono',monospace;font-size:11px}
+.statbox .lbl{color:#5f7a8c}
+
+.queue-card{border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.72);border-radius:4px;padding:12px 14px}
+.qtrack{position:relative;height:8px;margin-top:10px;background:rgba(255,255,255,.05);border-radius:4px}
+.qpacket{position:absolute;top:1px;width:8px;height:6px;border-radius:3px;background:#00e5ff;
+  box-shadow:0 0 8px #00e5ff;animation:packet linear infinite}
+.wire-line{animation:riseIn .25s ease both}
+
+.node-card{border:1px solid rgba(255,255,255,.1);background:rgba(8,14,24,.75);border-radius:4px;
+  padding:10px 14px;min-width:150px;box-shadow:0 0 18px rgba(0,0,0,.4)}
+.plat-card{border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.72);border-radius:4px;
+  padding:14px;display:flex;flex-direction:column;gap:8px}
+
+.cmdbar{display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid rgba(0,229,255,.14);background:rgba(6,10,18,.85)}
+.cmd-prompt{font-family:'IBM Plex Mono',monospace;color:#00e5ff;font-size:14px;animation:blink 1.6s infinite}
+#cmd{flex:1;background:transparent;border:none;outline:none;color:#dcedf6;
+  font-family:'IBM Plex Mono',monospace;font-size:14px;min-width:0}
+.view{height:100%}
+.hidden{display:none !important}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="scan1" id="scan1"></div>
+  <div class="scan2" id="scan2"></div>
+
+  <!-- TOP BAR -->
+  <div class="topbar">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="brand-dot"></div>
+      <div style="font-family:'Michroma',sans-serif;font-size:16px;letter-spacing:5px;color:#eaffff">JARVIS</div>
+      <div class="mono" style="font-size:10px;color:#5f7a8c;letter-spacing:2px;padding-top:2px">COMMAND&nbsp;DECK&nbsp;v2.1</div>
+    </div>
+    <div id="tabs" style="display:flex;gap:2px;flex:1;justify-content:center;flex-wrap:wrap"></div>
+    <div style="display:flex;align-items:center;gap:16px;font-family:'IBM Plex Mono',monospace;font-size:12px">
+      <div style="color:#3dffa0">◉ <span id="online-count">0</span> AGENTS ONLINE</div>
+      <div style="color:#8fb3c4" id="clock"></div>
+      <div id="link-badge" style="color:#ffb547;border:1px solid #ffb547;border-radius:3px;padding:2px 8px;font-size:10px;letter-spacing:1px">⬡ SIMULATION</div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div style="overflow:hidden;position:relative">
+
+    <!-- HUD VIEW -->
+    <div id="view-hud" class="view" style="display:grid;gap:14px;padding:14px;overflow:auto">
+      <div id="hud-left" style="display:flex;flex-direction:column;gap:10px;min-width:0">
+        <div class="section-label">EXECUTIVE AGENTS · C-SUITE</div>
+        <div id="csuite" style="display:flex;flex-direction:column;gap:10px"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;min-width:0;min-height:420px">
+        <div id="orb-wrap" style="position:relative;width:280px;height:280px;max-width:100%;flex-shrink:0">
+          <canvas id="orb" width="560" height="560" style="width:100%;height:100%"></canvas>
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none">
+            <div id="orb-label" style="font-family:'Michroma',sans-serif;font-size:11px;letter-spacing:4px;color:#9feaff;text-shadow:0 0 12px rgba(0,229,255,.6)">STANDBY</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px">
+          <div id="btn-mic" class="btn">🎙 ENABLE MIC</div>
+          <div id="btn-demo" class="btn">▶ RUN BRIEFING</div>
+        </div>
+        <div id="chat" style="flex:1;width:100%;max-width:720px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:6px 4px;min-height:120px"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+        <div class="section-label">LIVE OPERATIONS FEED</div>
+        <div id="feed" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;border:1px solid rgba(0,229,255,.1);background:rgba(8,14,24,.6);border-radius:4px;padding:10px;min-height:200px"></div>
+        <div class="statbox">
+          <div><span class="lbl">MSG/MIN</span><div style="font-size:20px;color:#00e5ff" id="stat-msg">0</div></div>
+          <div><span class="lbl">QUEUE DEPTH</span><div style="font-size:20px;color:#ffb547" id="stat-queue">0</div></div>
+          <div><span class="lbl">TASKS DONE</span><div style="font-size:20px;color:#3dffa0" id="stat-tasks">0</div></div>
+          <div><span class="lbl">UPTIME</span><div style="font-size:20px;color:#dcedf6" id="stat-uptime">—</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ORG VIEW -->
+    <div id="view-org" class="view hidden" style="overflow:auto;padding:20px;flex-direction:column;gap:6px;align-items:center">
+      <div id="org-tiers" style="display:flex;flex-direction:column;gap:6px;align-items:center;width:100%"></div>
+      <div style="max-width:760px;margin:0 auto;text-align:center;font-size:13px;color:#5f7a8c;padding:10px 0 24px">
+        Strict chain of command — workers never talk to the CEO. Results flow up through Directors and QA before JARVIS reports to you.</div>
+    </div>
+
+    <!-- FLOW VIEW -->
+    <div id="view-flow" class="view hidden" style="overflow:auto;padding:18px;display:grid;gap:16px">
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div class="section-label">MESSAGE BROKER · TOPIC QUEUES</div>
+        <div id="queues" style="display:flex;flex-direction:column;gap:10px"></div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:10px;min-height:300px">
+        <div class="section-label">WIRE TAP · LIVE MESSAGES</div>
+        <div id="wire" style="flex:1;overflow-y:auto;border:1px solid rgba(0,229,255,.1);background:rgba(4,8,14,.85);border-radius:4px;padding:10px;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.7"></div>
+      </div>
+    </div>
+
+    <!-- PLATFORMS VIEW -->
+    <div id="view-plat" class="view hidden" style="overflow:auto;padding:18px">
+      <div class="section-label" style="margin-bottom:12px">PLATFORM FLEET · <span id="plat-count">0</span> PROPERTIES UNDER MANAGEMENT</div>
+      <div id="platforms" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px"></div>
+      <div style="margin-top:14px;font-size:13px;color:#5f7a8c">Fleet is adaptive — new platforms register themselves with JARVIS and inherit a full agent squad automatically.</div>
+    </div>
+  </div>
+
+  <!-- COMMAND LINE -->
+  <div class="cmdbar">
+    <div class="cmd-prompt">❯</div>
+    <input id="cmd" placeholder="Speak or type a command… try: status · deploy zoobicon · approve ad budget · scan contracts">
+    <div class="mono" style="font-size:10px;color:#40606f;letter-spacing:1px">ENTER ⏎ TO EXECUTE</div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const qs = new URLSearchParams(location.search);
+
+// ── State ────────────────────────────────────────────────────────────────────
+const S = {
+  view: 'hud', link: 'SIM', mic: false, speaking: false,
+  agents: [], queues: [], platforms: [], org: null,
+  msgRate: 84, queueDepth: 12, tasksDone: 3412, uptime: '—',
+  bootTs: Date.now(),
+};
+const dotFor = (st) => st === 'ACTIVE' ? '#3dffa0' : (st === 'REVIEW' ? '#ffb547' : '#5f7a8c');
+const ts = () => new Date().toLocaleTimeString('en-GB');
+
+if (qs.get('scanlines') === '0') { $('scan1').remove(); $('scan2').remove(); }
+
+// ── Tabs / views ─────────────────────────────────────────────────────────────
+const TABS = [['hud','HUD'],['org','HIERARCHY'],['flow','MESSAGE FLOW'],['plat','PLATFORMS']];
+for (const [id, label] of TABS) {
+  const el = document.createElement('div');
+  el.className = 'tab' + (id === S.view ? ' active' : '');
+  el.textContent = label;
+  el.onclick = () => {
+    S.view = id;
+    document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', TABS[i][0] === id));
+    for (const [vid] of TABS) $('view-' + vid).classList.toggle('hidden', vid !== id);
+    if (id === 'org') renderOrg();
+  };
+  $('tabs').appendChild(el);
+}
+
+// Deep-link a view for screenshots / bookmarks: ?view=hud|org|flow|plat
+const wantView = qs.get('view');
+if (wantView && TABS.some(([id]) => id === wantView) && wantView !== S.view) {
+  [...$('tabs').children][TABS.findIndex(([id]) => id === wantView)].click();
+}
+
+// ── Clock ────────────────────────────────────────────────────────────────────
+setInterval(() => { $('clock').textContent = ts(); }, 1000);
+$('clock').textContent = ts();
+
+// ── Responsive layout (design: narrow <1180, mid <1400) ─────────────────────
+function layout() {
+  const w = window.innerWidth;
+  const narrow = w < 1180, mid = w >= 1180 && w < 1400;
+  $('view-hud').style.gridTemplateColumns = narrow ? '1fr'
+    : (mid ? 'minmax(240px,280px) minmax(360px,1fr) minmax(260px,320px)'
+           : 'minmax(280px,340px) minmax(420px,1fr) minmax(300px,380px)');
+  $('hud-left').style.order = narrow ? 2 : 0;
+  const orb = narrow ? Math.min(240, Math.max(160, w - 80)) : (mid ? 220 : 280);
+  $('orb-wrap').style.width = orb + 'px';
+  $('orb-wrap').style.height = orb + 'px';
+  $('view-flow').style.gridTemplateColumns = w < 900 ? '1fr' : '1.2fr 1fr';
+}
+window.addEventListener('resize', layout);
+layout();
+
+// ── C-suite tiles (keyed, update-in-place so riseIn doesn't replay) ─────────
+const tileEls = new Map();
+function renderAgents() {
+  const seen = new Set();
+  for (const ag of S.agents) {
+    seen.add(ag.name);
+    let t = tileEls.get(ag.name);
+    if (!t) {
+      const el = document.createElement('div');
+      el.className = 'agent-tile';
+      el.innerHTML =
+        '<div style="display:flex;align-items:center;gap:8px">' +
+          '<div class="dot" style="width:7px;height:7px;border-radius:50%"></div>' +
+          '<div style="font-weight:700;font-size:15px;letter-spacing:1px;color:#eaffff" class="nm"></div>' +
+          '<div class="mono st" style="margin-left:auto;font-size:10px"></div>' +
+        '</div>' +
+        '<div class="rl" style="font-size:12px;color:#7d99aa"></div>' +
+        '<div class="tk mono" style="font-size:11px;color:#b8d4e2"></div>' +
+        '<div style="height:3px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden">' +
+          '<div class="ld" style="height:100%;width:0%;transition:width 1s"></div></div>';
+      $('csuite').appendChild(el);
+      t = { el, dot: el.querySelector('.dot'), nm: el.querySelector('.nm'), st: el.querySelector('.st'),
+            rl: el.querySelector('.rl'), tk: el.querySelector('.tk'), ld: el.querySelector('.ld') };
+      tileEls.set(ag.name, t);
+    }
+    const dot = ag.dot || dotFor(ag.state);
+    t.dot.style.background = dot; t.dot.style.boxShadow = '0 0 8px ' + dot;
+    t.nm.textContent = ag.name;
+    t.st.textContent = ag.state; t.st.style.color = dot;
+    t.rl.textContent = ag.role || '';
+    t.tk.textContent = '▸ ' + (ag.task || '');
+    t.ld.style.width = Math.max(0, Math.min(100, ag.load || 0)) + '%';
+    t.ld.style.background = 'linear-gradient(90deg,#0a6a80,' + dot + ')';
+  }
+  for (const [name, t] of tileEls) if (!seen.has(name)) { t.el.remove(); tileEls.delete(name); }
+  $('online-count').textContent = S.agents.filter(a => a.state !== 'OFFLINE').length + (S.org ? Math.max(0, (S.org.total || 0) - S.agents.length) : 15);
+}
+
+// ── Chat ─────────────────────────────────────────────────────────────────────
+function addChat(who, text) {
+  const el = document.createElement('div');
+  el.className = 'chat-msg ' + (who === 'YOU' ? 'you' : 'jarvis');
+  const w = document.createElement('div'); w.className = 'chat-who'; w.textContent = who;
+  const t = document.createElement('div'); t.className = 'chat-text'; t.textContent = text;
+  el.appendChild(w); el.appendChild(t);
+  const box = $('chat');
+  box.appendChild(el);
+  while (box.children.length > 50) box.firstChild.remove();
+  box.scrollTop = box.scrollHeight;
+  if (who === 'JARVIS') speak(text);
+}
+
+// ── Feed / wire ──────────────────────────────────────────────────────────────
+function pushFeedLine(color, text, when) {
+  const el = document.createElement('div');
+  el.className = 'feed-line';
+  el.innerHTML = '<span class="feed-t"></span><span></span>';
+  el.children[0].textContent = when || ts();
+  el.children[1].textContent = text;
+  el.children[1].style.color = color;
+  const box = $('feed');
+  box.insertBefore(el, box.firstChild);
+  while (box.children.length > 30) box.lastChild.remove();
+}
+function pushWireLine(topic, body, when) {
+  const el = document.createElement('div');
+  el.className = 'wire-line';
+  el.innerHTML = '<span style="color:#40606f"></span> <span style="color:#9feaff"></span> <span style="color:#7d99aa"></span>';
+  const sp = el.querySelectorAll('span');
+  sp[0].textContent = when || ts(); sp[1].textContent = topic; sp[2].textContent = body;
+  const box = $('wire');
+  box.insertBefore(el, box.firstChild);
+  while (box.children.length > 40) box.lastChild.remove();
+}
+
+// ── Stats ────────────────────────────────────────────────────────────────────
+function renderStats() {
+  $('stat-msg').textContent = S.msgRate;
+  $('stat-queue').textContent = S.queueDepth;
+  $('stat-tasks').textContent = Number(S.tasksDone).toLocaleString();
+  $('stat-uptime').textContent = S.uptime;
+}
+
+// ── Queues (keyed; packet animations must not restart on update) ────────────
+const queueEls = new Map();
+function renderQueues() {
+  const seen = new Set();
+  for (const q of S.queues) {
+    seen.add(q.name);
+    let e = queueEls.get(q.name);
+    if (!e) {
+      const el = document.createElement('div');
+      el.className = 'queue-card';
+      el.innerHTML =
+        '<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">' +
+          '<div class="mono qn" style="font-size:13px;color:#9feaff"></div>' +
+          '<div class="mono qpc" style="font-size:10px;color:#5f7a8c"></div>' +
+          '<div class="mono qd" style="margin-left:auto;font-size:11px"></div>' +
+        '</div>' +
+        '<div class="qtrack"><div class="qpacket p1"></div><div class="qpacket p2"></div></div>' +
+        '<div style="display:flex;gap:16px;margin-top:8px;font-family:\'IBM Plex Mono\',monospace;font-size:10px;color:#7d99aa">' +
+          '<span class="qr"></span><span class="ql"></span><span class="qst" style="color:#3dffa0"></span></div>';
+      $('queues').appendChild(el);
+      e = { el, qn: el.querySelector('.qn'), qpc: el.querySelector('.qpc'), qd: el.querySelector('.qd'),
+            qr: el.querySelector('.qr'), ql: el.querySelector('.ql'), qst: el.querySelector('.qst'),
+            p1: el.querySelector('.p1'), p2: el.querySelector('.p2'), speed: null };
+      queueEls.set(q.name, e);
+    }
+    e.qn.textContent = q.name;
+    e.qpc.textContent = q.producer + ' → ' + q.consumer;
+    e.qd.textContent = 'depth ' + q.depth;
+    e.qd.style.color = q.depth > 10 ? '#ffb547' : '#3dffa0';
+    e.qr.textContent = 'throughput ' + q.rate + ' msg/s';
+    e.ql.textContent = 'lag ' + q.lag + ' ms';
+    e.qst.textContent = q.status;
+    e.qst.style.color = q.status === 'HEALTHY' ? '#3dffa0' : '#ffb547';
+    if (e.speed !== q.speed) { // only touch animation when pace actually changes
+      e.speed = q.speed;
+      e.p1.style.animationDuration = q.speed + 's';
+      e.p2.style.animationDuration = q.speed + 's';
+      e.p2.style.animationDelay = (q.delay || q.speed / 2) + 's';
+    }
+  }
+  for (const [name, e] of queueEls) if (!seen.has(name)) { e.el.remove(); queueEls.delete(name); }
+}
+
+// ── Platforms ────────────────────────────────────────────────────────────────
+const sparkCache = new Map();
+function sparkFor(name) {
+  if (!sparkCache.has(name)) {
+    let v = 10 + Math.random() * 8; const pts = [];
+    for (let i = 0; i <= 20; i++) { v += (Math.random() - 0.5) * 5; v = Math.max(3, Math.min(23, v)); pts.push((i * 5) + ',' + v.toFixed(1)); }
+    sparkCache.set(name, pts.join(' '));
+  }
+  return sparkCache.get(name);
+}
+function renderPlatforms() {
+  $('plat-count').textContent = S.platforms.length;
+  const box = $('platforms');
+  box.innerHTML = '';
+  for (const p of S.platforms) {
+    const dot = p.dot || (p.status === 'OPERATIONAL' ? '#3dffa0' : (p.status === 'DEPLOYING' ? '#00e5ff' : '#ff4d6a'));
+    const el = document.createElement('div');
+    el.className = 'plat-card';
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<div style="width:8px;height:8px;border-radius:50%;background:' + dot + ';box-shadow:0 0 8px ' + dot + ';animation:blink 3s infinite"></div>' +
+        '<div class="pn" style="font-weight:700;font-size:17px;letter-spacing:1px;color:#eaffff"></div>' +
+        '<div class="mono pst" style="margin-left:auto;font-size:10px;color:' + dot + '"></div>' +
+      '</div>' +
+      '<div class="pd" style="font-size:12px;color:#7d99aa"></div>' +
+      '<svg viewBox="0 0 100 26" style="width:100%;height:30px" preserveAspectRatio="none">' +
+        '<polyline points="' + (p.spark || sparkFor(p.name)) + '" fill="none" stroke="#00e5ff" stroke-width="1.4" opacity="0.85"></polyline></svg>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-family:\'IBM Plex Mono\',monospace;font-size:10px;color:#7d99aa">' +
+        '<div>UPTIME<div class="pu" style="font-size:14px;color:#3dffa0"></div></div>' +
+        '<div>LATENCY<div class="pl" style="font-size:14px;color:#dcedf6"></div></div>' +
+        '<div>BUILD<div class="pb" style="font-size:14px;color:#ffb547"></div></div>' +
+      '</div>' +
+      '<div class="mono pa" style="font-size:10px;color:#5f7a8c"></div>';
+    el.querySelector('.pn').textContent = p.name;
+    el.querySelector('.pst').textContent = p.status;
+    el.querySelector('.pd').textContent = p.desc || '';
+    el.querySelector('.pu').textContent = p.uptime ?? '—';
+    el.querySelector('.pl').textContent = (p.latency ?? '—') + 'ms';
+    el.querySelector('.pb').textContent = p.build ?? '—';
+    el.querySelector('.pa').textContent = '⬡ ' + (p.agents ?? 0) + ' agents assigned · last deploy ' + (p.deploy ?? '—');
+    box.appendChild(el);
+  }
+}
+
+// ── Org chart ────────────────────────────────────────────────────────────────
+function defaultTiers() {
+  return [
+    { label: 'CEO · ORCHESTRATOR', color: '#00e5ff', border: 'rgba(0,229,255,.5)', line: true,
+      nodes: [{ name: 'JARVIS CORE', role: 'Routes objectives · never executes', dot: '#00e5ff', state: 'ORCHESTRATING' }] },
+    { label: 'C-SUITE · DOMAIN MANAGERS', color: '#9feaff', border: 'rgba(0,229,255,.25)', line: true,
+      nodes: S.agents.map(a => ({ name: a.name, role: (a.role || '').split('·')[1] || a.role, dot: a.dot || dotFor(a.state), state: a.state })) },
+    { label: 'QA · AUDITORS', color: '#ffb547', border: 'rgba(255,181,71,.3)', line: false,
+      nodes: [{ name: 'OUTPUT AUDITOR', role: 'Verifies all work upward', dot: '#3dffa0', state: 'AUDITING' }] },
+  ];
+}
+function renderOrg() {
+  const tiers = (S.org && S.org.tiers) || defaultTiers();
+  const box = $('org-tiers');
+  box.innerHTML = '';
+  for (const tier of tiers) {
+    const t = document.createElement('div');
+    t.style.cssText = 'width:100%;max-width:1200px;display:flex;flex-direction:column;align-items:center;gap:8px;margin:0 auto';
+    const lbl = document.createElement('div');
+    lbl.className = 'mono';
+    lbl.style.cssText = 'font-size:10px;letter-spacing:4px;color:' + tier.color;
+    lbl.textContent = tier.label;
+    t.appendChild(lbl);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:10px;flex-wrap:wrap;justify-content:center';
+    for (const n of tier.nodes) {
+      const c = document.createElement('div');
+      c.className = 'node-card';
+      c.style.borderColor = tier.border;
+      c.innerHTML =
+        '<div style="display:flex;align-items:center;gap:7px">' +
+          '<div style="width:6px;height:6px;border-radius:50%;background:' + n.dot + ';box-shadow:0 0 6px ' + n.dot + '"></div>' +
+          '<div class="nn" style="font-weight:700;font-size:14px;letter-spacing:1px;color:#eaffff"></div></div>' +
+        '<div class="nr" style="font-size:11.5px;color:#7d99aa;margin-top:2px"></div>' +
+        '<div class="ns mono" style="font-size:10px;color:' + n.dot + ';margin-top:5px"></div>';
+      c.querySelector('.nn').textContent = n.name;
+      c.querySelector('.nr').textContent = n.role || '';
+      c.querySelector('.ns').textContent = n.state || '';
+      row.appendChild(c);
+    }
+    t.appendChild(row);
+    if (tier.line) {
+      const ln = document.createElement('div');
+      ln.style.cssText = 'width:1px;height:26px;background:linear-gradient(180deg,rgba(0,229,255,.5),rgba(0,229,255,.08))';
+      t.appendChild(ln);
+    }
+    box.appendChild(t);
+  }
+}
+
+// ── Voice output ─────────────────────────────────────────────────────────────
+function speak(text) {
+  if (qs.get('voice') === '0' || !window.speechSynthesis) return;
+  const u = new SpeechSynthesisUtterance(text);
+  const vs = speechSynthesis.getVoices();
+  const v = vs.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur/i.test(v.name)) || vs.find(v => /en-GB/i.test(v.lang)) || vs[0];
+  if (v) u.voice = v;
+  u.rate = 1.02; u.pitch = 0.9;
+  u.onstart = () => { S.speaking = true; updateOrbLabel(); };
+  u.onend = () => { S.speaking = false; updateOrbLabel(); };
+  speechSynthesis.speak(u);
+}
+function updateOrbLabel() {
+  $('orb-label').textContent = S.speaking ? 'SPEAKING' : (S.mic ? 'LISTENING' : 'STANDBY');
+}
+
+// ── Microphone ───────────────────────────────────────────────────────────────
+let stream = null, analyser = null, audioData = null;
+$('btn-mic').onclick = async () => {
+  if (S.mic) {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null; analyser = null;
+    S.mic = false;
+    $('btn-mic').classList.remove('live');
+    $('btn-mic').textContent = '🎙 ENABLE MIC';
+    updateOrbLabel();
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    analyser = ctx.createAnalyser(); analyser.fftSize = 256;
+    src.connect(analyser);
+    audioData = new Uint8Array(analyser.frequencyBinCount);
+    S.mic = true;
+    $('btn-mic').classList.add('live');
+    $('btn-mic').textContent = '◼ MIC LIVE';
+    updateOrbLabel();
+  } catch (e) {
+    addChat('JARVIS', 'Microphone access was denied, sir. Grant it in the browser and try again — I shall hear you perfectly.');
+  }
+};
+
+// ── Demo briefing ────────────────────────────────────────────────────────────
+let demoRunning = false;
+$('btn-demo').onclick = () => {
+  if (demoRunning) return; demoRunning = true;
+  const seq = [
+    ['YOU', 'Jarvis, give me the morning briefing.', 0],
+    ['JARVIS', 'Certainly, sir. Overnight: zoobicon build 413 passed all tests and is ready to deploy. The CFO matched 96 percent of June invoices. One legal flag — clause 14 in the vendor MSA. And gatetest.ai launch posts are queued.', 1200],
+    ['YOU', 'Deploy zoobicon and approve the marketing budget.', 9000],
+    ['JARVIS', 'Deploying build 413 via canary now. Marketing budget of 420 dollars approved and logged with the CFO. Anything else, sir?', 10800],
+    ['YOU', 'No, that will be all.', 16500],
+    ['JARVIS', 'Very good, sir. I shall keep watch.', 17600],
+  ];
+  seq.forEach(([who, text, d]) => setTimeout(() => addChat(who, text), d));
+  setTimeout(() => { demoRunning = false; }, 20000);
+};
+
+// ── Orb canvas ───────────────────────────────────────────────────────────────
+let level = 0;
+(function drawLoop() {
+  const cv = $('orb');
+  const draw = (t) => {
+    requestAnimationFrame(draw);
+    const ctx = cv.getContext('2d');
+    const Ssz = cv.width, cx = Ssz / 2, cy = Ssz / 2;
+    let lvl = 0;
+    if (analyser) { analyser.getByteFrequencyData(audioData); lvl = audioData.reduce((a, b) => a + b, 0) / audioData.length / 255; }
+    if (S.speaking) lvl = Math.max(lvl, 0.25 + 0.2 * Math.abs(Math.sin(t / 90)) + 0.1 * Math.random());
+    level += (lvl - level) * 0.15;
+    const L = level;
+    ctx.clearRect(0, 0, Ssz, Ssz);
+    const base = Ssz * 0.26;
+    const g = ctx.createRadialGradient(cx, cy, base * 0.2, cx, cy, base * (1.5 + L));
+    g.addColorStop(0, 'rgba(0,229,255,' + (0.30 + L * 0.5) + ')');
+    g.addColorStop(0.5, 'rgba(0,120,180,0.12)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, base * (1.6 + L), 0, 7); ctx.fill();
+    ctx.beginPath();
+    for (let i = 0; i <= 120; i++) {
+      const a = (i / 120) * Math.PI * 2;
+      const wob = Math.sin(a * 7 + t / 300) * 3 + Math.sin(a * 13 - t / 200) * 2;
+      const r = base + wob * (0.5 + L * 4) + L * Ssz * 0.05;
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(0,229,255,' + (0.7 + L * 0.3) + ')'; ctx.lineWidth = 1.6; ctx.stroke();
+    for (let k = 0; k < 3; k++) {
+      const r2 = base * (1.18 + k * 0.16);
+      const off = t / (1400 + k * 600) * (k % 2 ? 1 : -1);
+      ctx.beginPath(); ctx.arc(cx, cy, r2, off, off + Math.PI * (0.5 + k * 0.3));
+      ctx.strokeStyle = 'rgba(0,229,255,' + (0.28 - k * 0.07) + ')'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    for (let i = 0; i < 60; i++) {
+      const a = (i / 60) * Math.PI * 2 + t / 9000;
+      const r1 = base * 1.62, r2b = base * 1.62 + (i % 5 === 0 ? 7 : 3);
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
+      ctx.lineTo(cx + Math.cos(a) * r2b, cy + Math.sin(a) * r2b);
+      ctx.strokeStyle = 'rgba(0,229,255,0.18)'; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.beginPath(); ctx.arc(cx, cy, base * 0.24 + L * 10, 0, 7);
+    ctx.fillStyle = 'rgba(180,250,255,' + (0.75 + L * 0.25) + ')';
+    ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 24 + L * 40;
+    ctx.fill(); ctx.shadowBlur = 0;
+  };
+  requestAnimationFrame(draw);
+})();
+
+// ── Simulation (design's fallback — runs whenever the live link is down) ────
+const sim = { feed: null, stats: null, task: null };
+const SIM_AGENTS = [
+  { name: 'CTO', role: 'Engineering · code, builds, architecture', task: 'Reviewing zoobicon build #413', state: 'ACTIVE', load: 72 },
+  { name: 'COO', role: 'Operations · files, databases, execution', task: 'Nightly database vacuum on voxlen.ai', state: 'ACTIVE', load: 41 },
+  { name: 'CFO', role: 'Accountancy · ledgers, budgets, Stripe feeds', task: 'Reconciling June invoices', state: 'ACTIVE', load: 55 },
+  { name: 'CLO', role: 'Legal · contracts, compliance, filings', task: 'Scanning vendor MSA — clause 14 flagged', state: 'REVIEW', load: 63 },
+  { name: 'CMO', role: 'Marketing · social, campaigns, outreach', task: 'Scheduling 6 posts for gatetest.ai launch', state: 'ACTIVE', load: 48 },
+  { name: 'CRO', role: 'Research · intel, digests, monitoring', task: 'Compiling competitor digest', state: 'IDLE', load: 12 },
+];
+const SIM_QUEUES = [
+  { name: 'budget.approvals', producer: 'CMO', consumer: 'CFO', depth: 3, rate: 1.2, lag: 40, speed: 3.2, delay: 1.6, status: 'HEALTHY' },
+  { name: 'legal.review', producer: 'CEO', consumer: 'CLO', depth: 7, rate: 0.8, lag: 210, speed: 4.1, delay: 2.0, status: 'HEALTHY' },
+  { name: 'deploy.zoobicon', producer: 'CTO', consumer: 'Build Runner', depth: 1, rate: 4.6, lag: 12, speed: 1.6, delay: 0.8, status: 'HEALTHY' },
+  { name: 'social.outbound', producer: 'CMO', consumer: 'Post Scheduler', depth: 12, rate: 2.3, lag: 95, speed: 2.4, delay: 1.2, status: 'HEALTHY' },
+  { name: 'qa.audit', producer: 'Workers', consumer: 'Output Auditor', depth: 5, rate: 3.1, lag: 60, speed: 2.0, delay: 1.0, status: 'HEALTHY' },
+  { name: 'intel.digest', producer: 'CRO', consumer: 'Summarizer', depth: 2, rate: 0.4, lag: 300, speed: 5.0, delay: 2.4, status: 'HEALTHY' },
+];
+const SIM_PLATFORMS = [
+  { name: 'zoobicon.com', desc: 'AI website-builder platform (your Lovable)', status: 'OPERATIONAL', uptime: '99.98%', latency: 142, build: '#413 ✓', agents: 6, deploy: '2h ago' },
+  { name: 'vapron.ai', desc: 'AI product platform', status: 'OPERATIONAL', uptime: '99.95%', latency: 98, build: '#188 ✓', agents: 4, deploy: '6h ago' },
+  { name: 'gluecron.com', desc: 'Automation & scheduling', status: 'OPERATIONAL', uptime: '99.99%', latency: 61, build: '#77 ✓', agents: 3, deploy: '1d ago' },
+  { name: 'davenroe.com', desc: 'Brand & content site', status: 'OPERATIONAL', uptime: '100%', latency: 54, build: '#31 ✓', agents: 2, deploy: '3d ago' },
+  { name: 'gatetest.ai', desc: 'Testing & QA platform', status: 'DEPLOYING', uptime: '99.91%', latency: 120, build: '#59 ⟳', agents: 4, deploy: 'now' },
+  { name: 'voxlen.ai', desc: 'Voice & audio AI', status: 'OPERATIONAL', uptime: '99.97%', latency: 88, build: '#142 ✓', agents: 4, deploy: '9h ago' },
+  { name: 'alecrae.com', desc: 'Personal / portfolio', status: 'OPERATIONAL', uptime: '100%', latency: 47, build: '#12 ✓', agents: 1, deploy: '5d ago' },
+];
+const SIM_FEED = [
+  ['#3dffa0', 'QA Auditor approved CFO reconciliation batch 22'],
+  ['#00e5ff', 'CTO → Build Runner: deploy.zoobicon triggered'],
+  ['#ffb547', 'CLO flagged clause 14 · escalated to you'],
+  ['#00e5ff', 'Uptime Sentinel: all 7 platforms responding < 200ms'],
+  ['#3dffa0', 'Post Scheduler published 2 posts · gatetest.ai'],
+  ['#00e5ff', 'CRO digest ready · 14 sources summarized'],
+  ['#3dffa0', 'Ledger Reconciler matched 96 transactions'],
+  ['#00e5ff', 'Frontend Director assigned ticket ZB-1042'],
+  ['#ffb547', 'gatetest.ai build #59 in progress · 71%'],
+  ['#00e5ff', 'Contract Scanner parsed 3 PDFs · no risks'],
+  ['#3dffa0', 'Regression Tester: 412/412 passing'],
+  ['#00e5ff', 'COO snapshot complete · voxlen.ai db'],
+];
+const SIM_WIRE = [
+  ['budget.approvals', '{"from":"CMO","amount":420,"campaign":"gatetest-launch"}'],
+  ['deploy.zoobicon', '{"build":413,"stage":"canary","ok":true}'],
+  ['legal.review', '{"doc":"vendor-msa.pdf","risk":"clause-14"}'],
+  ['social.outbound', '{"platform":"x","post":"scheduled","t":"+2h"}'],
+  ['qa.audit', '{"worker":"script-writer","verdict":"pass"}'],
+  ['intel.digest', '{"sources":14,"tokens":9120,"status":"done"}'],
+  ['deploy.zoobicon', '{"build":413,"tests":"412/412"}'],
+  ['budget.approvals', '{"from":"CFO","approved":true,"ref":"#8812"}'],
+];
+const SIM_TASKS = {
+  CTO: ['Reviewing zoobicon build #413', 'Refactoring deploy pipeline', 'Merging voxlen.ai hotfix', 'Profiling gatetest.ai API'],
+  COO: ['Nightly database vacuum on voxlen.ai', 'Rotating access keys', 'Syncing backups to cold storage', 'Pruning stale sessions'],
+  CFO: ['Reconciling June invoices', 'Auditing Stripe payouts', 'Forecasting Q3 spend', 'Flagging duplicate charge — $240'],
+  CLO: ['Scanning vendor MSA — clause 14 flagged', 'Reviewing gatetest.ai ToS update', 'GDPR audit: gluecron.com', 'Drafting NDA for contractor'],
+  CMO: ['Scheduling 6 posts for gatetest.ai launch', 'A/B testing landing copy', 'Compiling engagement report', 'Queuing newsletter #47'],
+  CRO: ['Compiling competitor digest', 'Monitoring AI framework releases', 'Summarizing user feedback', 'Indexing new documentation'],
+};
+function startSim() {
+  stopSim();
+  if (!S.agents.length) { S.agents = SIM_AGENTS.map(a => ({ ...a })); renderAgents(); }
+  if (!S.queues.length) { S.queues = SIM_QUEUES.map(q => ({ ...q })); renderQueues(); }
+  if (!S.platforms.length) { S.platforms = SIM_PLATFORMS.map(p => ({ ...p })); renderPlatforms(); }
+  S.uptime = '99.98%';
+  sim.feed = setInterval(() => {
+    const f = SIM_FEED[Math.floor(Math.random() * SIM_FEED.length)];
+    pushFeedLine(f[0], f[1]);
+    const w = SIM_WIRE[Math.floor(Math.random() * SIM_WIRE.length)];
+    pushWireLine(w[0], w[1]);
+  }, 2400);
+  sim.stats = setInterval(() => {
+    S.msgRate = Math.max(20, Math.round(S.msgRate + (Math.random() - 0.5) * 14));
+    S.queueDepth = Math.max(0, S.queueDepth + Math.round((Math.random() - 0.5) * 4));
+    S.tasksDone += Math.round(Math.random() * 2);
+    S.queues.forEach(q => {
+      q.depth = Math.max(0, q.depth + Math.round((Math.random() - 0.5) * 3));
+      q.rate = +(Math.max(0.2, q.rate + (Math.random() - 0.5) * 0.6)).toFixed(1);
+      q.lag = Math.max(5, Math.round(q.lag + (Math.random() - 0.5) * 30));
+    });
+    renderStats(); renderQueues();
+  }, 3000);
+  sim.task = setInterval(() => {
+    const i = Math.floor(Math.random() * S.agents.length);
+    const ag = S.agents[i]; const opts = SIM_TASKS[ag.name];
+    if (!opts) return;
+    ag.task = opts[Math.floor(Math.random() * opts.length)];
+    ag.load = 10 + Math.round(Math.random() * 80);
+    ag.state = Math.random() < 0.12 ? 'IDLE' : (Math.random() < 0.15 ? 'REVIEW' : 'ACTIVE');
+    renderAgents();
+  }, 4200);
+}
+function stopSim() {
+  clearInterval(sim.feed); clearInterval(sim.stats); clearInterval(sim.task);
+  sim.feed = sim.stats = sim.task = null;
+}
+function simReply(cmd) {
+  const c = cmd.toLowerCase();
+  let r;
+  if (/status|report|brief/.test(c)) r = 'All systems nominal, sir. Seven platforms online, six executives active, twelve messages in queue. The only item needing your eye is a flagged clause in the vendor MSA — the CLO rates it moderate risk.';
+  else if (/deploy/.test(c) && /zoobicon/.test(c)) r = 'Understood. Routing to the CTO — build 413 will roll out via canary. The Build Runner reports all 412 tests green. Estimated completion: four minutes. I will notify you the moment it lands.';
+  else if (/budget|spend|money|invoice|account/.test(c)) r = 'The CFO reports June reconciliation is 96 percent matched. Marketing has requested a 420-dollar budget for the gatetest launch campaign — shall I approve it on your behalf?';
+  else if (/legal|contract|scan/.test(c)) r = 'The CLO has scanned three contracts today. One flag: clause 14 in the vendor MSA grants unlimited liability. I recommend renegotiation — I can draft the redline now.';
+  else if (/social|post|market/.test(c)) r = 'The CMO has six posts queued for the gatetest.ai launch and engagement is up 12 percent week over week. The Post Scheduler will publish the next one in two hours.';
+  else if (/approve/.test(c)) r = 'Approved and logged, sir. The CFO has released the funds and the audit trail is recorded in ledger reference 8812.';
+  else if (/hello|hi|hey|jarvis/.test(c)) r = 'At your service, sir. Always.';
+  else r = 'Acknowledged. I have decomposed that into objectives and delegated to the appropriate department heads. QA will verify before anything reaches your desk — I will report back shortly.';
+  setTimeout(() => addChat('JARVIS', r), 700);
+}
+
+// ── Live link ────────────────────────────────────────────────────────────────
+let ws = null, retryTimer = null;
+const WS_URL = qs.get('ws') ||
+  ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/jarvis');
+
+function setLink(mode) {
+  S.link = mode;
+  const b = $('link-badge');
+  if (mode === 'LIVE') { b.textContent = '⬢ LIVE LINK'; b.style.color = '#3dffa0'; b.style.borderColor = '#3dffa0'; }
+  else { b.textContent = '⬡ SIMULATION'; b.style.color = '#ffb547'; b.style.borderColor = '#ffb547'; }
+}
+function connectWS() {
+  try { ws = new WebSocket(WS_URL); } catch (e) { scheduleReconnect(); return; }
+  ws.onopen = () => {
+    stopSim();
+    setLink('LIVE');
+    addChat('JARVIS', 'Live link established, sir. Simulation disengaged — you are seeing real telemetry.');
+  };
+  ws.onmessage = (ev) => { try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
+  ws.onclose = () => {
+    if (S.link === 'LIVE') { setLink('SIM'); startSim(); }
+    scheduleReconnect();
+  };
+  ws.onerror = () => {};
+}
+function scheduleReconnect() { clearTimeout(retryTimer); retryTimer = setTimeout(connectWS, 8000); }
+
+function handleMsg(m) {
+  if (m.type === 'agents' && Array.isArray(m.agents)) { S.agents = m.agents; renderAgents(); if (S.view === 'org' && !S.org) renderOrg(); }
+  else if (m.type === 'feed') pushFeedLine(m.color || '#00e5ff', m.text, m.t);
+  else if (m.type === 'wire') pushWireLine(m.topic, m.body, m.t);
+  else if (m.type === 'stats') {
+    if (m.msgRate != null) S.msgRate = m.msgRate;
+    if (m.queueDepth != null) S.queueDepth = m.queueDepth;
+    if (m.tasksDone != null) S.tasksDone = m.tasksDone;
+    if (m.uptime != null) S.uptime = m.uptime;
+    renderStats();
+  }
+  else if (m.type === 'queues' && Array.isArray(m.queues)) { S.queues = m.queues; renderQueues(); }
+  else if (m.type === 'platforms' && Array.isArray(m.platforms)) { S.platforms = m.platforms; renderPlatforms(); }
+  else if (m.type === 'org' && Array.isArray(m.tiers)) { S.org = { tiers: m.tiers, total: m.total }; if (S.view === 'org') renderOrg(); renderAgents(); }
+  else if (m.type === 'chat') addChat('JARVIS', m.text);
+}
+
+// ── Command line ─────────────────────────────────────────────────────────────
+$('cmd').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  const c = $('cmd').value.trim();
+  if (!c) return;
+  $('cmd').value = '';
+  addChat('YOU', c);
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'command', text: c }));
+  else simReply(c);
+});
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+addChat('JARVIS', 'Good evening, sir. Command Deck online. Establishing live link…');
+startSim();
+renderStats();
+connectWS();
+</script>
+</body>
+</html>
