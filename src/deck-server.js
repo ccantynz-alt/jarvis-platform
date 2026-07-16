@@ -65,7 +65,11 @@ function parseCookies(header) {
 function requestToken(req) {
   const header = String(req.headers.authorization || '');
   if (header.startsWith('Bearer ')) return header.slice(7).trim();
-  return parseCookies(req.headers.cookie)[AUTH_COOKIE] || null;
+  const cookies = parseCookies(req.headers.cookie);
+  // Accept the Gateway's cookie too: browsers share cookies across ports on
+  // the same host, so a device already signed in to the Gateway (:8443) is
+  // automatically signed in to the Deck (:8444) — no second token dance.
+  return cookies[AUTH_COOKIE] || cookies['jarvis_gw_auth'] || null;
 }
 
 // Direct loopback call (screenshot service, health checks) — no proxy hop.
@@ -123,7 +127,13 @@ app.get('/', (req, res) => {
     return res.redirect('/');
   }
   if (!isAuthed(req) && !isLocalDirect(req)) {
-    return res.status(403).send('Forbidden — open /?token=<JARVIS_GATEWAY_TOKEN> once on this device');
+    console.log(`[deck] 403 for ${req.headers['x-forwarded-for'] || req.socket.remoteAddress} (${req.headers['tailscale-user-login'] || 'unknown user'})`);
+    return res.status(403).send(`<!DOCTYPE html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>JARVIS — locked</title></head>
+<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#04060c;color:#d7e7f0;font-family:monospace;text-align:center">
+<div><div style="font-size:22px;letter-spacing:6px;color:#00e5ff">JARVIS</div>
+<p style="color:#8fb3c4;max-width:34em;line-height:1.6">This device isn't signed in yet.<br>
+Open the Gateway once on this device (its login also unlocks the Deck),<br>
+or append <b style="color:#00e5ff">/?token=&lt;your token&gt;</b> to this address one time.</p></div></body></html>`);
   }
   res.set('Cache-Control', 'no-cache, must-revalidate');
   res.sendFile('/opt/jarvis/public/command-deck.html');
@@ -477,7 +487,8 @@ const server = createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
-  const authed = tokenMatches(parseCookies(req.headers.cookie)[AUTH_COOKIE]);
+  const cookies = parseCookies(req.headers.cookie);
+  const authed = tokenMatches(cookies[AUTH_COOKIE] || cookies['jarvis_gw_auth']);
   if (!authed && !(req.socket.remoteAddress?.includes('127.0.0.1') && !req.headers['x-forwarded-for'])) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();
