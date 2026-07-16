@@ -214,6 +214,9 @@ const LEVEL_COLOR = { info: '#00e5ff', warn: '#ffb547', alert: '#ff4d6a', error:
 async function pollActivity() {
   const notif = await jget(`${MEMORY}/memory/notifications?limit=20`);
   if (notif?.notifications) {
+    // After a restart the caches are empty but the diff cursor is persisted —
+    // backfill recent history so the feed never boots blank.
+    if (!state.feedCache.length && state.lastNotifId) state.lastNotifId = Math.max(0, state.lastNotifId - 12);
     const fresh = notif.notifications.filter(n => n.id > state.lastNotifId).reverse();
     for (const n of fresh) {
       state.lastNotifId = Math.max(state.lastNotifId, n.id);
@@ -222,6 +225,9 @@ async function pollActivity() {
   }
   const events = await jget(`${ORCHESTRATOR}/events`);
   if (Array.isArray(events)) {
+    if (!state.wireCache.length && state.lastEventTs) {
+      state.lastEventTs = new Date(Date.parse(state.lastEventTs) - 6 * 3600 * 1000).toISOString();
+    }
     const fresh = events.filter(e => e.ts > state.lastEventTs);
     for (const e of fresh.slice(-15)) {
       state.lastEventTs = e.ts > state.lastEventTs ? e.ts : state.lastEventTs;
@@ -432,6 +438,30 @@ const PLATFORM_DESC = {
   voxlen: 'Voice & audio AI', alecrae: 'Personal / portfolio',
   bookaride: 'Ride booking service', jarvis: 'This platform — agent infra',
 };
+// The metrics collector only probes 5 hardcoded sites — the deck probes every
+// registered platform that has a URL so no live site ever shows as unknown.
+const EXTRA_URLS = {
+  gluecron: 'https://gluecron.com',
+  davenroe: 'https://davenroe.com',
+  marcoreid: 'https://marcoreid.com',
+  jarvis: 'http://127.0.0.1:9206/health', // this box — dashboard health
+};
+const platURL = (name) => PLATFORM_URLS[name] || EXTRA_URLS[name] || null;
+
+async function probe(url) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 8000);
+  const start = Date.now();
+  try {
+    const r = await fetch(url, { method: 'HEAD', signal: ctl.signal });
+    return { status: r.ok ? 'ONLINE' : 'WARN', latencyMs: Date.now() - start };
+  } catch {
+    return { status: 'OFFLINE' };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 async function pollPlatforms() {
   const registry = readJSON('/opt/jarvis/config/platforms.json')?.platforms || {};
   const health = readJSON('/opt/jarvis/memory/platform-health.json') || [];
@@ -439,6 +469,10 @@ async function pollPlatforms() {
   const memJobs = await jget(`${MEMORY}/memory/jobs?limit=200`);
   const byName = {};
   for (const h of health) byName[h.name.toLowerCase()] = h;
+  // Probe registered platforms the collector doesn't cover
+  const missing = Object.values(registry).filter(p => !byName[p.name] && platURL(p.name));
+  const probed = await Promise.all(missing.map(p => probe(platURL(p.name))));
+  missing.forEach((p, i) => { byName[p.name] = probed[i]; });
 
   state.platforms = Object.values(registry).map(p => {
     const h = byName[p.name];
@@ -449,7 +483,8 @@ async function pollPlatforms() {
       .filter(j => j.platform === p.name && j.finished_at);
     const done = platJobs.filter(j => j.status === 'completed').length;
     const lastJob = platJobs.sort((a, b) => (b.finished_at || '').localeCompare(a.finished_at || ''))[0];
-    const status = !h ? 'REGISTERED'
+    // No URL to probe (repo-only platform) → say so plainly, not "down"-looking
+    const status = !h ? 'NO PUBLIC SITE'
       : h.status === 'ONLINE' ? 'OPERATIONAL'
       : h.status === 'WARN' ? 'DEGRADED' : 'DOWN';
     // rolling uptime + latency samples (persisted in deck-state.json)

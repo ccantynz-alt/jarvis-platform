@@ -501,34 +501,108 @@ function renderOrg() {
   }
 }
 
-// ── Voice output ─────────────────────────────────────────────────────────────
+// ── Voice output (gateway.html patterns — iOS needs priming + fresh queue) ──
+let voiceCache = [];
+if ('speechSynthesis' in window) {
+  const loadVoices = () => { const v = speechSynthesis.getVoices(); if (v && v.length) voiceCache = v; };
+  loadVoices();
+  speechSynthesis.onvoiceschanged = loadVoices;
+}
+let ttsPrimed = false;
+function primeTTS() { // iOS: speech must be unlocked by a user gesture
+  if (ttsPrimed || !('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
+}
+// Any first real interaction unlocks speech for every later reply.
+document.addEventListener('pointerdown', primeTTS, true);
+document.addEventListener('keydown', primeTTS, true);
+
 function speak(text) {
   if (qs.get('voice') === '0' || !window.speechSynthesis) return;
+  speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
   const u = new SpeechSynthesisUtterance(text);
-  const vs = speechSynthesis.getVoices();
-  const v = vs.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur/i.test(v.name)) || vs.find(v => /en-GB/i.test(v.lang)) || vs[0];
+  const v = voiceCache.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur/i.test(v.name)) || voiceCache.find(v => /en-GB/i.test(v.lang)) || voiceCache[0];
   if (v) u.voice = v;
   u.rate = 1.02; u.pitch = 0.9;
   u.onstart = () => { S.speaking = true; updateOrbLabel(); };
-  u.onend = () => { S.speaking = false; updateOrbLabel(); };
+  u.onend = () => { S.speaking = false; updateOrbLabel(); scheduleRelisten(); };
   speechSynthesis.speak(u);
 }
 function updateOrbLabel() {
   $('orb-label').textContent = S.speaking ? 'SPEAKING' : (S.mic ? 'LISTENING' : 'STANDBY');
 }
 
-// ── Microphone ───────────────────────────────────────────────────────────────
+// ── Command routing (shared by keyboard, voice, briefing button) ────────────
+function sendCommand(c) {
+  addChat('YOU', c);
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'command', text: c }));
+  else simReply(c);
+}
+
+// ── Microphone: real speech recognition + orb level visualization ───────────
+// Mic ON = hands-free conversation: speak → Jarvis answers aloud → mic
+// re-opens for your next sentence, until you toggle it off. (gateway.html
+// conversation-mode pattern; SR is one-shot per utterance on iOS.)
+const SRCls = window.SpeechRecognition || window.webkitSpeechRecognition;
 let stream = null, analyser = null, audioData = null;
-$('btn-mic').onclick = async () => {
-  if (S.mic) {
+let rec = null, listening = false, relistenTimer = null;
+
+function startListening() {
+  if (!SRCls || listening || !S.mic) return;
+  speechSynthesis.cancel();
+  rec = new SRCls();
+  rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
+  let finalText = '';
+  rec.onstart = () => { listening = true; updateOrbLabel(); };
+  rec.onresult = (e) => {
+    for (const r of e.results) if (r.isFinal) finalText += r[0].transcript;
+  };
+  rec.onerror = (e) => {
+    if (e.error === 'no-speech') return; // onend relistens
+    if (e.error === 'not-allowed') {
+      addChat('JARVIS', 'Microphone permission is blocked, sir — allow it for this site in browser settings and toggle the mic again.');
+      setMic(false);
+    }
+  };
+  rec.onend = () => {
+    listening = false; updateOrbLabel();
+    const said = finalText.trim();
+    if (said) sendCommand(said); // relisten happens after the spoken reply ends
+    else scheduleRelisten();     // heard nothing — quietly reopen the mic
+  };
+  try { rec.start(); } catch { /* rapid restart race — ignore */ }
+}
+
+function scheduleRelisten() {
+  if (!S.mic) return;
+  clearTimeout(relistenTimer);
+  relistenTimer = setTimeout(() => { if (S.mic && !listening) startListening(); }, 400);
+}
+
+function setMic(on) {
+  S.mic = on;
+  $('btn-mic').classList.toggle('live', on);
+  $('btn-mic').textContent = on ? '◼ MIC LIVE' : '🎙 ENABLE MIC';
+  updateOrbLabel();
+  if (!on) {
+    clearTimeout(relistenTimer);
+    if (rec) try { rec.stop(); } catch {}
     if (stream) stream.getTracks().forEach(t => t.stop());
     stream = null; analyser = null;
-    S.mic = false;
-    $('btn-mic').classList.remove('live');
-    $('btn-mic').textContent = '🎙 ENABLE MIC';
-    updateOrbLabel();
-    return;
   }
+}
+
+$('btn-mic').onclick = async () => {
+  primeTTS();
+  if (S.mic) return setMic(false);
+  if (!SRCls) {
+    addChat('JARVIS', location.protocol === 'https:'
+      ? 'This browser has no speech recognition, sir — Safari or Chrome will hear you. You can always type below.'
+      : 'Voice needs the secure https address, sir — open the deck via the tailnet URL.');
+  }
+  setMic(true);
+  startListening();
+  // Orb level visualization — best effort; voice works without it.
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -536,24 +610,14 @@ $('btn-mic').onclick = async () => {
     analyser = ctx.createAnalyser(); analyser.fftSize = 256;
     src.connect(analyser);
     audioData = new Uint8Array(analyser.frequencyBinCount);
-    S.mic = true;
-    $('btn-mic').classList.add('live');
-    $('btn-mic').textContent = '◼ MIC LIVE';
-    updateOrbLabel();
-  } catch (e) {
-    addChat('JARVIS', 'Microphone access was denied, sir. Grant it in the browser and try again — I shall hear you perfectly.');
-  }
+  } catch { /* SR may still work; iOS grants it its own capture */ }
 };
 
 // ── Demo briefing ────────────────────────────────────────────────────────────
 let demoRunning = false;
 $('btn-demo').onclick = () => {
   // Live link → ask the real brain for the real briefing; canned demo is SIM-only.
-  if (ws && ws.readyState === 1) {
-    addChat('YOU', 'Jarvis, give me the briefing.');
-    ws.send(JSON.stringify({ type: 'command', text: 'morning briefing' }));
-    return;
-  }
+  if (ws && ws.readyState === 1) { sendCommand('morning briefing'); return; }
   if (demoRunning) return; demoRunning = true;
   const seq = [
     ['YOU', 'Jarvis, give me the morning briefing.', 0],
@@ -779,9 +843,7 @@ $('cmd').addEventListener('keydown', (e) => {
   const c = $('cmd').value.trim();
   if (!c) return;
   $('cmd').value = '';
-  addChat('YOU', c);
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'command', text: c }));
-  else simReply(c);
+  sendCommand(c);
 });
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
