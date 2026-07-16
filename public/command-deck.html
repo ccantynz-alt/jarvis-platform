@@ -90,6 +90,12 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .view{height:100%}
 .hidden{display:none !important}
 
+#alerts{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:20;
+  display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none}
+.alert-banner{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:1px;color:#dcedf6;
+  background:rgba(6,10,18,.92);border:1px solid #ffb547;border-radius:4px;padding:8px 16px;
+  max-width:70vw;box-shadow:0 0 24px rgba(0,0,0,.6);animation:riseIn .3s ease both;transition:opacity .4s}
+
 /* Keyboard a11y: visible only via :focus-visible, so mouse/touch look is untouched */
 .tab:focus-visible,.btn:focus-visible,#cmd:focus-visible{outline:2px solid rgba(0,229,255,.7);outline-offset:2px;border-radius:3px}
 .tab,.btn{touch-action:manipulation;user-select:none}
@@ -124,6 +130,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 
   <!-- MAIN -->
   <div style="overflow:hidden;position:relative">
+    <div id="alerts" aria-live="assertive"></div>
 
     <!-- HUD VIEW -->
     <div id="view-hud" class="view" style="display:grid;grid-template-rows:minmax(0,1fr);gap:14px;padding:14px;overflow:auto">
@@ -303,7 +310,7 @@ function renderAgents() {
 }
 
 // ── Chat ─────────────────────────────────────────────────────────────────────
-function addChat(who, text) {
+function addChat(who, text, speechText) {
   const el = document.createElement('div');
   el.className = 'chat-msg ' + (who === 'YOU' ? 'you' : 'jarvis');
   const w = document.createElement('div'); w.className = 'chat-who'; w.textContent = who;
@@ -313,7 +320,29 @@ function addChat(who, text) {
   box.appendChild(el);
   while (box.children.length > 50) box.firstChild.remove();
   box.scrollTop = box.scrollHeight;
-  if (who === 'JARVIS') speak(text);
+  if (who === 'JARVIS' && speechText !== null) speak(speechText || text);
+  return t;
+}
+
+// Streaming reply bubble — text appears as the brain thinks, spoken when done.
+let streamEl = null;
+function onChatChunk(chunk) {
+  S.thinking = false;
+  if (!streamEl) streamEl = addChat('JARVIS', '', null);
+  streamEl.textContent += chunk;
+  $('chat').scrollTop = $('chat').scrollHeight;
+  updateOrbLabel();
+}
+function onChatFinal(m) {
+  S.thinking = false;
+  if (streamEl) {
+    streamEl.textContent = m.text;
+    streamEl = null;
+    speak(m.speech || m.text);
+  } else {
+    addChat('JARVIS', m.text, m.speech);
+  }
+  updateOrbLabel();
 }
 
 // ── Feed / wire ──────────────────────────────────────────────────────────────
@@ -509,16 +538,35 @@ if ('speechSynthesis' in window) {
   speechSynthesis.onvoiceschanged = loadVoices;
 }
 let ttsPrimed = false;
-function primeTTS() { // iOS: speech must be unlocked by a user gesture
-  if (ttsPrimed || !('speechSynthesis' in window)) return;
-  const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
+// One reusable element for the neural voice; iOS unlocks it on first gesture.
+const jarvisAudio = new Audio();
+jarvisAudio.preload = 'auto';
+function primeTTS() { // iOS: audio + speech must be unlocked by a user gesture
+  if (!ttsPrimed) {
+    ttsPrimed = true;
+    if ('speechSynthesis' in window) {
+      const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u);
+    }
+    // 0.1s of silence unlocks the Audio element for later programmatic play
+    jarvisAudio.src = 'data:audio/mpeg;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA' +
+      'gICAgICAgICAgICAgICAgICAgICAgP//////////////////////////AAAAAExhdmM1OC4xMwAAAAAAAAAAAAAAACQCgAAAAAAAAAJx' +
+      'ZuVs3wAAAAAAAAAAAAAAAAAAAAD/+5BkAA/wAABpAAAACAAADSAAAAEAAAGkAAAAIAAANIAAAAQAAAAAAAAAAAAAAAAAAAAA';
+    jarvisAudio.play().catch(() => {});
+  }
+  armVoice(); // first tap also arms the wake-word mic (iOS gesture requirement)
 }
-// Any first real interaction unlocks speech for every later reply.
 document.addEventListener('pointerdown', primeTTS, true);
 document.addEventListener('keydown', primeTTS, true);
 
-function speak(text) {
-  if (qs.get('voice') === '0' || !window.speechSynthesis) return;
+function stopAllAudio() {
+  try { jarvisAudio.pause(); jarvisAudio.currentTime = 0; } catch {}
+  if (window.speechSynthesis) speechSynthesis.cancel();
+  S.speaking = false;
+  updateOrbLabel();
+}
+
+function speakBrowser(text) {
+  if (!window.speechSynthesis) return;
   speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
   const u = new SpeechSynthesisUtterance(text);
   const v = voiceCache.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur/i.test(v.name)) || voiceCache.find(v => /en-GB/i.test(v.lang)) || voiceCache[0];
@@ -528,81 +576,77 @@ function speak(text) {
   u.onend = () => { S.speaking = false; updateOrbLabel(); scheduleRelisten(); };
   speechSynthesis.speak(u);
 }
+
+// The Jarvis voice: neural TTS from the server, browser voice as fallback.
+// The mic is suspended while he talks (self-hearing guard) and reopens after.
+async function speak(text) {
+  if (qs.get('voice') === '0' || voiceMode === 'off') return;
+  if (listening && rec) try { rec.abort(); } catch {} // never transcribe himself
+  if (ttsPrimed) {
+    try {
+      const r = await fetch('/tts?text=' + encodeURIComponent(String(text).slice(0, 1200)));
+      if (r.ok) {
+        const url = URL.createObjectURL(await r.blob());
+        jarvisAudio.src = url;
+        jarvisAudio.onplay = () => { S.speaking = true; updateOrbLabel(); };
+        jarvisAudio.onended = jarvisAudio.onerror = () => {
+          S.speaking = false; updateOrbLabel();
+          URL.revokeObjectURL(url);
+          scheduleRelisten();
+        };
+        await jarvisAudio.play();
+        return;
+      }
+    } catch { /* fall through to browser voice */ }
+  }
+  speakBrowser(text);
+}
 function updateOrbLabel() {
-  $('orb-label').textContent = S.speaking ? 'SPEAKING' : (S.mic ? 'LISTENING' : 'STANDBY');
+  $('orb-label').textContent =
+    S.speaking ? 'SPEAKING'
+    : S.thinking ? 'THINKING'
+    : (voiceMode !== 'off' && !armed) ? 'TAP TO ARM VOICE'
+    : (voiceMode === 'live' && listening) ? 'LISTENING'
+    : (voiceMode === 'wake' && listening) ? (Date.now() < awaitingCommand ? 'LISTENING' : 'SAY “JARVIS…”')
+    : 'STANDBY';
 }
 
 // ── Command routing (shared by keyboard, voice, briefing button) ────────────
 function sendCommand(c) {
   addChat('YOU', c);
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'command', text: c }));
-  else simReply(c);
+  if (ws && ws.readyState === 1) {
+    S.thinking = true;
+    updateOrbLabel();
+    ws.send(JSON.stringify({ type: 'command', text: c }));
+  } else {
+    simReply(c);
+  }
 }
 
-// ── Microphone: real speech recognition + orb level visualization ───────────
-// Mic ON = hands-free conversation: speak → Jarvis answers aloud → mic
-// re-opens for your next sentence, until you toggle it off. (gateway.html
-// conversation-mode pattern; SR is one-shot per utterance on iOS.)
+// ── Voice modes: WAKE (say "Jarvis…") · LIVE (everything is a command) · OFF ─
+// Wake mode is the default: the deck listens passively while open; a sentence
+// starting with "Jarvis" (fuzzy — STT often hears "Java"/"drivers") becomes a
+// command. The mic never listens while Jarvis himself is speaking.
 const SRCls = window.SpeechRecognition || window.webkitSpeechRecognition;
+let voiceMode = (qs.get('voice') === '0' || !SRCls) ? 'off'
+  : (['wake', 'live', 'off'].includes(localStorage.getItem('jarvis_voice')) ? localStorage.getItem('jarvis_voice') : 'wake');
+let armed = false; // browsers require one user gesture before mic/audio work
 let stream = null, analyser = null, audioData = null;
 let rec = null, listening = false, relistenTimer = null;
+let awaitingCommand = 0; // bare "Jarvis" → next utterance is the command until this ts
 
-function startListening() {
-  if (!SRCls || listening || !S.mic) return;
-  speechSynthesis.cancel();
-  rec = new SRCls();
-  rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
-  let finalText = '';
-  rec.onstart = () => { listening = true; updateOrbLabel(); };
-  rec.onresult = (e) => {
-    for (const r of e.results) if (r.isFinal) finalText += r[0].transcript;
-  };
-  rec.onerror = (e) => {
-    if (e.error === 'no-speech') return; // onend relistens
-    if (e.error === 'not-allowed') {
-      addChat('JARVIS', 'Microphone permission is blocked, sir — allow it for this site in browser settings and toggle the mic again.');
-      setMic(false);
-    }
-  };
-  rec.onend = () => {
-    listening = false; updateOrbLabel();
-    const said = finalText.trim();
-    if (said) sendCommand(said); // relisten happens after the spoken reply ends
-    else scheduleRelisten();     // heard nothing — quietly reopen the mic
-  };
-  try { rec.start(); } catch { /* rapid restart race — ignore */ }
-}
+const WAKE_RE = /^(?:hey\s+)?(?:jarvis|javas?|jarvas|jarvi|drivers|davis)\b[,.!?]?\s*(.*)$/i;
 
-function scheduleRelisten() {
-  if (!S.mic) return;
-  clearTimeout(relistenTimer);
-  relistenTimer = setTimeout(() => { if (S.mic && !listening) startListening(); }, 400);
-}
-
-function setMic(on) {
-  S.mic = on;
-  $('btn-mic').classList.toggle('live', on);
-  $('btn-mic').textContent = on ? '◼ MIC LIVE' : '🎙 ENABLE MIC';
+function armVoice() {
+  if (armed || voiceMode === 'off') return;
+  armed = true;
   updateOrbLabel();
-  if (!on) {
-    clearTimeout(relistenTimer);
-    if (rec) try { rec.stop(); } catch {}
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    stream = null; analyser = null;
-  }
+  startListening();
+  attachAnalyser();
 }
 
-$('btn-mic').onclick = async () => {
-  primeTTS();
-  if (S.mic) return setMic(false);
-  if (!SRCls) {
-    addChat('JARVIS', location.protocol === 'https:'
-      ? 'This browser has no speech recognition, sir — Safari or Chrome will hear you. You can always type below.'
-      : 'Voice needs the secure https address, sir — open the deck via the tailnet URL.');
-  }
-  setMic(true);
-  startListening();
-  // Orb level visualization — best effort; voice works without it.
+async function attachAnalyser() { // orb level visualization — best effort
+  if (analyser) return;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -611,7 +655,83 @@ $('btn-mic').onclick = async () => {
     src.connect(analyser);
     audioData = new Uint8Array(analyser.frequencyBinCount);
   } catch { /* SR may still work; iOS grants it its own capture */ }
+}
+
+function startListening() {
+  if (!SRCls || listening || voiceMode === 'off' || !armed || S.speaking) return;
+  rec = new SRCls();
+  rec.lang = 'en-NZ'; rec.interimResults = false; rec.continuous = false;
+  let finalText = '';
+  rec.onstart = () => { listening = true; updateOrbLabel(); };
+  rec.onresult = (e) => { for (const r of e.results) if (r.isFinal) finalText += r[0].transcript; };
+  rec.onerror = (e) => {
+    if (e.error === 'no-speech' || e.error === 'aborted') return;
+    if (e.error === 'not-allowed') {
+      addChat('JARVIS', 'Microphone permission is blocked, sir — allow it for this site in browser settings, then tap the voice button.');
+      setVoiceMode('off');
+    }
+  };
+  rec.onend = () => {
+    listening = false; updateOrbLabel();
+    const said = finalText.trim();
+    if (said) handleUtterance(said);
+    scheduleRelisten(); // keep the ear open (guarded against his own voice)
+  };
+  try { rec.start(); } catch { /* rapid restart race — ignore */ }
+}
+
+function handleUtterance(said) {
+  if (voiceMode === 'live') return sendCommand(said);
+  const m = said.match(WAKE_RE);
+  if (m) {
+    const cmd = m[1].trim();
+    if (cmd) return sendCommand(cmd);
+    awaitingCommand = Date.now() + 15000;
+    addChat('JARVIS', 'Sir?');
+    return;
+  }
+  if (Date.now() < awaitingCommand) {
+    awaitingCommand = 0;
+    return sendCommand(said);
+  }
+  // Not addressed to Jarvis — wake mode stays silent.
+}
+
+function scheduleRelisten() {
+  if (voiceMode === 'off' || !armed) return;
+  clearTimeout(relistenTimer);
+  relistenTimer = setTimeout(() => { if (!listening && !S.speaking) startListening(); }, 400);
+}
+
+const MODE_LABEL = { wake: '👂 WAKE: “JARVIS…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };
+function setVoiceMode(mode, persist = true) {
+  voiceMode = mode;
+  if (persist) try { localStorage.setItem('jarvis_voice', mode); } catch {}
+  $('btn-mic').classList.toggle('live', mode === 'live');
+  $('btn-mic').textContent = MODE_LABEL[mode];
+  if (mode === 'off') {
+    clearTimeout(relistenTimer);
+    if (rec) try { rec.abort(); } catch {}
+    stopAllAudio();
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; analyser = null; }
+  } else if (armed) {
+    startListening();
+    attachAnalyser();
+  }
+  updateOrbLabel();
+}
+
+$('btn-mic').onclick = () => {
+  // Cycle WAKE → LIVE → OFF. Tapping while Jarvis talks also cuts him off.
+  stopAllAudio();
+  if (!SRCls) {
+    return addChat('JARVIS', location.protocol === 'https:'
+      ? 'This browser has no speech recognition, sir — Safari or Chrome will hear you. You can always type below.'
+      : 'Voice needs the secure https address, sir — open the deck via the tailnet URL.');
+  }
+  setVoiceMode(voiceMode === 'wake' ? 'live' : voiceMode === 'live' ? 'off' : 'wake');
 };
+setVoiceMode(voiceMode, false); // reflect initial mode on the button/orb
 
 // ── Demo briefing ────────────────────────────────────────────────────────────
 let demoRunning = false;
@@ -834,7 +954,23 @@ function handleMsg(m) {
   else if (m.type === 'queues' && Array.isArray(m.queues)) { S.queues = m.queues; renderQueues(); }
   else if (m.type === 'platforms' && Array.isArray(m.platforms)) { S.platforms = m.platforms; renderPlatforms(); }
   else if (m.type === 'org' && Array.isArray(m.tiers)) { S.org = { tiers: m.tiers, total: m.total }; if (S.view === 'org') renderOrg(); renderAgents(); }
-  else if (m.type === 'chat') addChat('JARVIS', m.text);
+  else if (m.type === 'chat_chunk') onChatChunk(m.text);
+  else if (m.type === 'chat') onChatFinal(m);
+  else if (m.type === 'notify') showAlert(m.level, m.title, m.speech);
+}
+
+// ── Spoken alert banner (warn/alert notifications, announced aloud) ─────────
+function showAlert(level, title, speech) {
+  const color = level === 'warn' ? '#ffb547' : '#ff4d6a';
+  const el = document.createElement('div');
+  el.className = 'alert-banner';
+  el.style.borderColor = color;
+  el.innerHTML = '<span style="color:' + color + '">' + (level === 'warn' ? '⚠' : '⬢') + '</span> <span></span>';
+  el.querySelector('span:last-child').textContent = title;
+  $('alerts').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 8000);
+  while ($('alerts').children.length > 3) $('alerts').firstChild.remove();
+  speak(speech || title);
 }
 
 // ── Command line ─────────────────────────────────────────────────────────────
@@ -847,6 +983,9 @@ $('cmd').addEventListener('keydown', (e) => {
 });
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
+// ?demo-alert=1 renders a sample alert banner (screenshot/QA hook — the live
+// path is WS {type:'notify'}, which virtual-time captures can never witness).
+if (qs.get('demo-alert')) showAlert('alert', '⬢ SAMPLE ALERT — vapron.ai DOWN 3 min, self-heal dispatched', '');
 addChat('JARVIS', 'Good evening, sir. Command Deck online. Establishing live link…');
 startSim();
 renderStats();

@@ -35,6 +35,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 import { readFileSync, writeFileSync } from 'fs';
 import { resolveIntent, runIntent, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY } from './lib/conversation.js';
 import { runAgent, hasAgent } from './lib/agent.js';
+import { synthesize, ttsEnabled } from './lib/tts.js';
 
 const PORT      = 9210;
 const SCHEDULER = 'http://127.0.0.1:9209';
@@ -116,7 +117,18 @@ const app = express();
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'jarvis-deck', clients: wss?.clients?.size ?? 0, link: 'ready' });
+  res.json({ status: 'ok', service: 'jarvis-deck', clients: wss?.clients?.size ?? 0, link: 'ready', tts: ttsEnabled() });
+});
+
+// GET /tts?text=… — the Jarvis neural voice (ElevenLabs, cached server-side).
+// 503 → the client quietly falls back to browser speechSynthesis.
+app.get('/tts', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
+  const buf = await synthesize(req.query.text);
+  if (!buf) return res.status(503).json({ error: 'tts unavailable' });
+  res.set('Content-Type', 'audio/mpeg');
+  res.set('Cache-Control', 'private, max-age=3600');
+  res.send(buf);
 });
 
 app.get('/', (req, res) => {
@@ -221,6 +233,11 @@ async function pollActivity() {
     for (const n of fresh) {
       state.lastNotifId = Math.max(state.lastNotifId, n.id);
       pushFeed(LEVEL_COLOR[n.level] || '#00e5ff', n.title, n.ts);
+      // warn/alert get announced aloud on the deck, not just a feed line —
+      // but only when they're actually fresh (not backfill after a restart).
+      if (['warn', 'alert', 'error'].includes(n.level) && Date.now() - Date.parse(n.ts) < 2 * 60 * 1000) {
+        broadcast({ type: 'notify', level: n.level, title: n.title, speech: n.speech || n.title });
+      }
     }
   }
   const events = await jget(`${ORCHESTRATOR}/events`);
@@ -539,10 +556,30 @@ function broadcast(obj) {
   }
 }
 
+// One rolling conversation shared across devices/reloads, persisted in memory
+// KV so Jarvis remembers context between sessions. runAgent() mutates and
+// bounds the array itself (last 24 messages).
+let sharedTranscript = null;
+async function loadTranscript() {
+  if (sharedTranscript) return sharedTranscript;
+  try {
+    const r = await fetch(`${MEMORY}/memory/kv/deck-conversation`).then(r => r.json());
+    const parsed = JSON.parse(r?.value || '[]');
+    sharedTranscript = Array.isArray(parsed) ? parsed : [];
+  } catch { sharedTranscript = []; }
+  return sharedTranscript;
+}
+function saveTranscript() {
+  if (!sharedTranscript) return;
+  fetch(`${MEMORY}/memory/kv`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: 'deck-conversation', value: JSON.stringify(sharedTranscript) }),
+  }).catch(() => {});
+}
+
 wss.on('connection', (ws, req) => {
   const user = req.headers['tailscale-user-login'] || 'local';
   console.log(`[deck] client connected (${user}) — ${wss.clients.size} online`);
-  const transcript = [];
 
   // Initial burst so every view is populated instantly
   const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
@@ -563,14 +600,18 @@ wss.on('connection', (ws, req) => {
     pushWire('deck.command', JSON.stringify({ from: 'craig', text: text.slice(0, 80) }));
     try {
       if (hasAgent()) {
+        const transcript = await loadTranscript();
+        const before = transcript.length;
         try {
-          const full = await runAgent(transcript, text, () => {});
-          transcript.push({ role: 'user', content: text }, { role: 'assistant', content: full.text || full.speech || '' });
-          if (transcript.length > 20) transcript.splice(0, transcript.length - 20);
-          return send({ type: 'chat', text: full.text || full.speech || 'Done, sir.' });
+          // runAgent pushes user+assistant turns onto transcript itself.
+          const full = await runAgent(transcript, text,
+            (chunk) => send({ type: 'chat_chunk', text: chunk }));
+          saveTranscript();
+          return send({ type: 'chat', text: full.text || 'Done, sir.', speech: full.speech });
         } catch (e) {
-          // API key present but unusable (no credits, outage) — fall through to
-          // the intent pipeline rather than surfacing an apology.
+          // API key unusable (no credits, outage) — undo this turn's partial
+          // transcript and fall through to the intent pipeline.
+          transcript.splice(before);
           console.error('[deck] agent brain failed, using intent pipeline:', e.message);
         }
       }

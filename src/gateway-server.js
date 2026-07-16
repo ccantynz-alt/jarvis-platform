@@ -33,6 +33,7 @@ import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
 import { spawn } from 'child_process';
 import { resolveIntent, runIntent, platformNames, loadRoadmap } from './lib/conversation.js';
+import { runAgent, hasAgent } from './lib/agent.js';
 import { notify } from './lib/notify.js';
 
 const PORT         = 9208;
@@ -207,7 +208,7 @@ app.post('/api/inbox/:id/read', async (req, res) => {
 // With ANTHROPIC_API_KEY: Messages API streaming (fast first token).
 // Without: locally-authenticated `claude` CLI, non-streaming fallback.
 
-const CONVERSE_MODEL = 'claude-sonnet-5';
+const CONVERSE_MODEL = 'claude-fable-5'; // top-tier brain — Craig's call, 2026-07-16
 const CONVERSE_SYSTEM = () => [
   'You are Jarvis, the ops assistant for Craig\'s platform estate, spoken to by voice.',
   `Platforms you manage: ${platformNames().join(', ')}.`,
@@ -369,6 +370,20 @@ wss.on('connection', (ws, req) => {
           transcript.push({ role: 'assistant', content: full });
           if (transcript.length > 20) transcript.splice(0, transcript.length - 20);
           return ws.send(JSON.stringify({ type: 'reply_done', speech: full.slice(0, 400), ms: Date.now() - t0 }));
+        }
+
+        // Default path — talk to the agentic brain (tool-calling Claude) when
+        // an API key is configured; otherwise fall back to the frozen keyword/
+        // Haiku intent pipeline so the gateway still works with no key.
+        if (hasAgent()) {
+          const full = await runAgent(transcript, text, (chunk) =>
+            ws.send(JSON.stringify({ type: 'reply_chunk', text: chunk })));
+          if (full.dispatched?.jobId) {
+            watchJob(full.dispatched.jobId, full.dispatched.platform || 'auto');
+          }
+          return ws.send(JSON.stringify({
+            type: 'reply_done', speech: full.speech, via: 'agent', ms: Date.now() - t0,
+          }));
         }
 
         // Intent pipeline (same engine as the frozen Slack bridge)

@@ -39,7 +39,11 @@ const REGISTRY_PATH = '/opt/jarvis/config/platforms.json';
 //     host / reverse proxy) and set JARVIS_CALLBACK_URL to it.
 const CLOUD_API_URL = process.env.JARVIS_CLOUD_API_URL
   || 'https://api.anthropic.com/v1/routines';   // <-- NEEDS HUMAN CONFIRMATION
-const CLOUD_MODEL = 'claude-sonnet-5';
+const CLOUD_MODEL = 'claude-fable-5';
+// Default model for dispatched build/design work when the job doesn't name one
+// (Craig, 2026-07-16: Fable 5 creates the frontend/backend — role agents keep
+// their explicit per-agent models from config/agents.json, unchanged).
+const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || 'claude-fable-5';
 
 // ── Durable job queue (memory-server :9200 is the system of record) ──────────
 // Jobs live in the SQLite `jobs` table, not in this process, so they survive
@@ -210,7 +214,7 @@ async function runLocalJob(row) {
   const result = await spawnClaude({
     prompt: row.prompt,
     cwd: row.path,
-    model: row.model || undefined,
+    model: row.model || DEFAULT_WORKER_MODEL,
     extraEnv: platformEnv(row.platform),
     timeoutMin: row.timeout_min,
   });
