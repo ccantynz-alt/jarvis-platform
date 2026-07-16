@@ -347,6 +347,21 @@ function renderStats() {
   $('stat-uptime').textContent = S.uptime;
 }
 
+// Human-readable throughput/latency for real (often slow) pipelines
+function fmtRate(r) {
+  if (r == null) return '—';
+  if (r >= 0.1) return (+r.toFixed(1)) + ' msg/s';
+  if (r * 60 >= 0.5) return (+(r * 60).toFixed(1)) + ' msg/min';
+  return (+(r * 3600).toFixed(1)) + ' msg/hr';
+}
+function fmtLag(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return Math.round(ms) + ' ms';
+  if (ms < 60000) return (+(ms / 1000).toFixed(1)) + ' s';
+  if (ms < 3600000) return Math.round(ms / 60000) + ' min';
+  return (+(ms / 3600000).toFixed(1)) + ' h';
+}
+
 // ── Queues (keyed; packet animations must not restart on update) ────────────
 const queueEls = new Map();
 function renderQueues() {
@@ -376,8 +391,8 @@ function renderQueues() {
     e.qpc.textContent = q.producer + ' → ' + q.consumer;
     e.qd.textContent = 'depth ' + q.depth;
     e.qd.style.color = q.depth > 10 ? '#ffb547' : '#3dffa0';
-    e.qr.textContent = 'throughput ' + q.rate + ' msg/s';
-    e.ql.textContent = 'lag ' + q.lag + ' ms';
+    e.qr.textContent = 'throughput ' + fmtRate(q.rate);
+    e.ql.textContent = 'lag ' + fmtLag(q.lag);
     e.qst.textContent = q.status;
     e.qst.style.color = q.status === 'HEALTHY' ? '#3dffa0' : '#ffb547';
     if (e.speed !== q.speed) { // only touch animation when pace actually changes
@@ -415,8 +430,10 @@ function renderPlatforms() {
         '<div class="mono pst" style="margin-left:auto;font-size:10px;color:' + dot + '"></div>' +
       '</div>' +
       '<div class="pd" style="font-size:12px;color:#7d99aa"></div>' +
+      // LIVE sparklines come from real latency history; a flat line means
+      // "not enough samples yet" — random squiggles are for SIM mode only.
       '<svg viewBox="0 0 100 26" style="width:100%;height:30px" preserveAspectRatio="none">' +
-        '<polyline points="' + (p.spark || sparkFor(p.name)) + '" fill="none" stroke="#00e5ff" stroke-width="1.4" opacity="0.85"></polyline></svg>' +
+        '<polyline points="' + (p.spark || (S.link === 'LIVE' ? '0,13 100,13' : sparkFor(p.name))) + '" fill="none" stroke="#00e5ff" stroke-width="1.4" opacity="0.85"></polyline></svg>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-family:\'IBM Plex Mono\',monospace;font-size:10px;color:#7d99aa">' +
         '<div>UPTIME<div class="pu" style="font-size:14px;color:#3dffa0"></div></div>' +
         '<div>LATENCY<div class="pl" style="font-size:14px;color:#dcedf6"></div></div>' +
@@ -531,6 +548,12 @@ $('btn-mic').onclick = async () => {
 // ── Demo briefing ────────────────────────────────────────────────────────────
 let demoRunning = false;
 $('btn-demo').onclick = () => {
+  // Live link → ask the real brain for the real briefing; canned demo is SIM-only.
+  if (ws && ws.readyState === 1) {
+    addChat('YOU', 'Jarvis, give me the briefing.');
+    ws.send(JSON.stringify({ type: 'command', text: 'morning briefing' }));
+    return;
+  }
   if (demoRunning) return; demoRunning = true;
   const seq = [
     ['YOU', 'Jarvis, give me the morning briefing.', 0],

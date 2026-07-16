@@ -32,7 +32,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { resolveIntent, runIntent, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY } from './lib/conversation.js';
 import { runAgent, hasAgent } from './lib/agent.js';
 
@@ -144,7 +144,42 @@ const state = {
   lastEventTs: '',
   recentTs: [],      // ms timestamps of feed+wire traffic for msgRate
   upSamples: new Map(), // platform → {up, total}
+  latHist: new Map(),   // platform → [latencyMs…] ring buffer (drives real sparklines)
 };
+
+// Persist rolling history so uptime %s and sparklines survive restarts.
+const STATE_FILE = '/opt/jarvis/memory/deck-state.json';
+try {
+  const saved = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+  state.upSamples = new Map(saved.upSamples || []);
+  state.latHist = new Map(saved.latHist || []);
+  state.lastNotifId = saved.lastNotifId || 0;
+  state.lastEventTs = saved.lastEventTs || '';
+} catch { /* first boot */ }
+function saveState() {
+  try {
+    writeFileSync(STATE_FILE, JSON.stringify({
+      upSamples: [...state.upSamples], latHist: [...state.latHist],
+      lastNotifId: state.lastNotifId, lastEventTs: state.lastEventTs,
+    }));
+  } catch (e) { console.error('[deck] state save failed:', e.message); }
+}
+
+// Real sparkline from latency history (design format: 21 "x,y" points, y 3–23)
+function sparkFromLatency(hist) {
+  if (!hist || hist.length < 2) return null;
+  const h = hist.slice(-21);
+  const min = Math.min(...h), max = Math.max(...h);
+  const span = Math.max(1, max - min);
+  return h.map((v, i) => {
+    const x = (i * (100 / (h.length - 1))).toFixed(1);
+    const y = (23 - ((v - min) / span) * 18).toFixed(1); // higher latency = higher peak
+    return `${x},${y}`;
+  }).join(' ');
+}
+
+const avg = (a) => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+const durMs = (j, from, to) => (j[from] && j[to]) ? Date.parse(j[to]) - Date.parse(j[from]) : null;
 
 function pushFeed(color, text, tsIso) {
   const line = { t: hhmm(tsIso), color, text };
@@ -326,31 +361,55 @@ async function pollOrg() {
   broadcast({ type: 'agents', agents: state.agents });
   broadcast({ type: 'org', tiers: state.orgTiers, total: state.orgTotal });
 
-  // Queues — real pipelines with real depths
+  // Queues — every depth/rate/lag measured, never invented.
+  //   rate = items per second over the last 24h (client formats /s /min /hr)
+  //   lag  = measured latency in ms for that pipeline (null → client shows —)
   const jobsToday = roles.reduce((n, r) => n + (r.jobs_today || 0), 0);
-  const unrouted = await jget(`${MEMORY}/memory/agent-reports?limit=50`);
-  const unroutedN = Array.isArray(unrouted) ? unrouted.filter(r => !r.routed_at).length : 0;
-  const inbox = await jget(`${MEMORY}/memory/notifications?unread=1`);
-  const unread = inbox?.notifications?.length ?? 0;
-  const q = orch?.queue || {};
+  const [unrouted, inbox, allNotif, memJobs] = await Promise.all([
+    jget(`${MEMORY}/memory/agent-reports?limit=50`),
+    jget(`${MEMORY}/memory/notifications?unread=1`),
+    jget(`${MEMORY}/memory/notifications?limit=50`),
+    jget(`${MEMORY}/memory/jobs?limit=100`),
+  ]);
+  const unreadList = inbox?.notifications ?? [];
+  const unroutedList = Array.isArray(unrouted) ? unrouted.filter(r => !r.routed_at) : [];
+  const jobs24 = (Array.isArray(memJobs) ? memJobs : [])
+    .filter(j => j.created_at && Date.now() - Date.parse(j.created_at) < 24 * 3600 * 1000);
+  const selfHealJobs = jobs24.filter(j => (j.task || '').includes('[self-heal]'));
+  const agentJobs = jobs24.filter(j => j.agent);
+  const notif24 = (allNotif?.notifications ?? [])
+    .filter(n => Date.now() - Date.parse(n.ts) < 24 * 3600 * 1000);
+  const perSec24 = (n) => n / (24 * 3600);
+  const oldestAge = (list, field) => list.length
+    ? Date.now() - Math.min(...list.map(x => Date.parse(x[field]))) : null;
+
   const mkq = (name, producer, consumer, depth, rate, lag, status) => ({
     name, producer, consumer, depth,
-    rate: +Number(rate).toFixed(1), lag: Math.round(lag),
-    speed: Math.max(1.4, 4.5 - Math.min(3, depth) - rate), delay: 1.1, status,
+    rate, lag: lag == null ? null : Math.round(lag),
+    speed: Math.max(1.6, 4.5 - Math.min(3, depth)), delay: 1.1, status,
   });
   state.queues = [
     mkq('dispatch.jobs', 'CEO / self-heal', 'Claude workers', queuedJobs.length + running.length,
-      (q.completed || 0) / 24 / 3.6, running.length ? 900 : 40,
+      perSec24(jobs24.filter(j => j.status === 'completed').length),
+      avg(jobs24.map(j => durMs(j, 'created_at', 'started_at')).filter(v => v != null)),
       orch?.canaryHeld ? 'HELD — CANARY' : (queuedJobs.length > 5 ? 'BACKED UP' : 'HEALTHY')),
-    mkq('selfheal.loop', 'Uptime sentinel', 'Repair agents', selfHealRuns.length, 0.2, 120,
+    mkq('selfheal.loop', 'Uptime sentinel', 'Repair agents', selfHealRuns.length,
+      perSec24(selfHealJobs.length),
+      avg(selfHealJobs.map(j => durMs(j, 'started_at', 'finished_at')).filter(v => v != null)),
       selfHealMode === 'live' ? 'HEALTHY' : selfHealMode.toUpperCase()),
-    mkq('agents.cron', 'Scheduler', 'Role agents', jobsToday, jobsToday / 86.4, 300,
+    mkq('agents.cron', 'Scheduler', 'Role agents', jobsToday,
+      perSec24(agentJobs.length),
+      avg(agentJobs.map(j => durMs(j, 'started_at', 'finished_at')).filter(v => v != null)),
       schedHealth?.mode === 'live' ? 'HEALTHY' : (schedHealth?.mode || 'OFF').toUpperCase()),
-    mkq('inbox.notifications', 'All services', 'Craig', unread, state.stats.msgRate / 60, 60,
-      unread > 20 ? 'BACKED UP' : 'HEALTHY'),
-    mkq('reports.escalation', 'Role agents', 'CEO → Craig', unroutedN, unroutedN / 86.4, 200,
-      unroutedN > 5 ? 'BACKED UP' : 'HEALTHY'),
-    mkq('deploy.gate', 'Platform deploys', 'GateTest', 0, 0.1, 150,
+    mkq('inbox.notifications', 'All services', 'Craig', unreadList.length,
+      perSec24(notif24.length),
+      oldestAge(unreadList, 'ts'),
+      unreadList.length > 20 ? 'BACKED UP' : 'HEALTHY'),
+    mkq('reports.escalation', 'Role agents', 'CEO → Craig', unroutedList.length,
+      perSec24(agentJobs.length),
+      oldestAge(unroutedList, 'ts'),
+      unroutedList.length > 5 ? 'BACKED UP' : 'HEALTHY'),
+    mkq('deploy.gate', 'Platform deploys', 'GateTest', 0, null, null,
       healthChecks[6] ? 'HEALTHY' : 'DOWN'),
   ];
   broadcast({ type: 'queues', queues: state.queues });
@@ -367,7 +426,7 @@ async function pollPlatforms() {
   const registry = readJSON('/opt/jarvis/config/platforms.json')?.platforms || {};
   const health = readJSON('/opt/jarvis/memory/platform-health.json') || [];
   const agentsCfg = readJSON('/opt/jarvis/config/agents.json')?.agents || {};
-  const jobs = await jget(`${ORCHESTRATOR}/jobs`);
+  const memJobs = await jget(`${MEMORY}/memory/jobs?limit=200`);
   const byName = {};
   for (const h of health) byName[h.name.toLowerCase()] = h;
 
@@ -376,16 +435,23 @@ async function pollPlatforms() {
     const url = PLATFORM_URLS[p.name];
     const host = url ? url.replace(/^https?:\/\/(www\.)?/, '') : p.name;
     const agentCount = Object.values(agentsCfg).filter(a => a.platform === p.name).length;
-    const platJobs = (Array.isArray(jobs) ? jobs : []).filter(j => j.platform === p.name && j.finishedAt);
-    const lastJob = platJobs.sort((a, b) => (b.finishedAt || '').localeCompare(a.finishedAt || ''))[0];
+    const platJobs = (Array.isArray(memJobs) ? memJobs : [])
+      .filter(j => j.platform === p.name && j.finished_at);
+    const done = platJobs.filter(j => j.status === 'completed').length;
+    const lastJob = platJobs.sort((a, b) => (b.finished_at || '').localeCompare(a.finished_at || ''))[0];
     const status = !h ? 'REGISTERED'
       : h.status === 'ONLINE' ? 'OPERATIONAL'
       : h.status === 'WARN' ? 'DEGRADED' : 'DOWN';
-    // rolling uptime sample
+    // rolling uptime + latency samples (persisted in deck-state.json)
     if (h) {
       const s = state.upSamples.get(p.name) || { up: 0, total: 0 };
       s.total++; if (h.status === 'ONLINE') s.up++;
       state.upSamples.set(p.name, s);
+      if (typeof h.latencyMs === 'number') {
+        const hist = state.latHist.get(p.name) || [];
+        hist.push(h.latencyMs);
+        state.latHist.set(p.name, hist.slice(-48));
+      }
     }
     const s = state.upSamples.get(p.name);
     const uptime = s && s.total >= 2 ? ((100 * s.up / s.total) >= 99.995 ? '100%' : (100 * s.up / s.total).toFixed(2) + '%') : '—';
@@ -393,14 +459,16 @@ async function pollPlatforms() {
       name: host, desc: PLATFORM_DESC[p.name] || (p.tech_stack || []).join(' · '),
       status, uptime,
       latency: h?.latencyMs ?? '—',
-      build: lastJob ? (lastJob.exitCode === 0 ? `job ✓` : `job ✗`) : '—',
+      build: done ? `#${done} ${lastJob?.exit_code === 0 ? '✓' : '✗'}` : '—',
       agents: agentCount,
-      deploy: lastJob ? ago(lastJob.finishedAt) : '—',
+      deploy: lastJob ? ago(lastJob.finished_at) : '—',
+      spark: sparkFromLatency(state.latHist.get(p.name)),
       dot: status === 'OPERATIONAL' ? '#3dffa0' : status === 'DEGRADED' ? '#ffb547'
          : status === 'DOWN' ? '#ff4d6a' : '#5f7a8c',
     };
   });
   broadcast({ type: 'platforms', platforms: state.platforms });
+  saveState();
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
