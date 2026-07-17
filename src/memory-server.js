@@ -198,6 +198,25 @@ app.post('/memory/session/end', (req, res) => {
   res.json({ ok: true, session_id });
 });
 
+// GET /memory/platform/:name — read side of /memory/platform/update.
+// conversation.js handlePlatformStatus expects {name,status,health_score,
+// last_issue,last_audit,notes}; an unknown platform returns 200 {} so the
+// caller's "no memory data yet" branch runs instead of an error message.
+app.get('/memory/platform/:name', (req, res) => {
+  const row = db.prepare('SELECT * FROM platform_state WHERE platform = ?').get(req.params.name);
+  if (!row) return res.json({});
+  let lastIssue = null;
+  try { lastIssue = JSON.parse(row.last_known_errors || '[]')[0] || null; } catch { /* legacy free-text errors */ }
+  res.json({
+    name: row.platform,
+    status: row.status,
+    health_score: row.health_score,
+    last_issue: lastIssue,
+    last_audit: row.updated_at,
+    notes: row.notes,
+  });
+});
+
 // POST /memory/platform/update
 app.post('/memory/platform/update', (req, res) => {
   const { platform, status, last_known_errors, health_score, notes } = req.body;

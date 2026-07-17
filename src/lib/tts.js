@@ -3,8 +3,9 @@
  *
  * ElevenLabs text-to-speech behind a disk cache and a daily character budget.
  * The Deck's GET /tts endpoint (and later the Gateway) call synthesize() and
- * stream the mp3 to the browser; clients fall back to speechSynthesis when
- * this returns null (unconfigured, disabled, over budget, or API failure).
+ * stream the mp3 to the browser; on failure it returns a reason code
+ * ('unconfigured' | 'budget' | 'api_error') the client uses to pick between
+ * retrying and switching to its backup browser voice for the day.
  *
  * Env (config/secrets.env):
  *   ELEVENLABS_API_KEY   — required for real synthesis
@@ -68,18 +69,20 @@ function pruneCache() {
 }
 
 /**
- * synthesize(text) → Buffer (mp3) | null (caller falls back to browser voice).
+ * synthesize(text) → { buf } (mp3) | { reason } on failure, where reason is
+ * 'unconfigured' | 'budget' | 'api_error'. The reason lets the client decide
+ * between retrying (transient) and switching to its backup voice for the day.
  */
 export async function synthesize(rawText) {
   const text = String(rawText || '').trim().slice(0, 1200); // hard per-call cap
-  if (!text || !ttsEnabled()) return null;
+  if (!text || !ttsEnabled()) return { reason: 'unconfigured' };
 
   const cached = cachePath(text);
   if (existsSync(cached)) {
     try {
       const buf = readFileSync(cached);
       writeFileSync(cached, buf); // touch mtime for LRU
-      return buf;
+      return { buf };
     } catch { /* fall through to synth */ }
   }
 
@@ -87,7 +90,7 @@ export async function synthesize(rawText) {
   const spent = await budgetSpent(day);
   if (spent + text.length > BUDGET) {
     console.warn(`[tts] daily budget reached (${spent}/${BUDGET} chars) — falling back`);
-    return null;
+    return { reason: 'budget' };
   }
 
   const ctl = new AbortController();
@@ -108,16 +111,16 @@ export async function synthesize(rawText) {
     });
     if (!r.ok) {
       console.error(`[tts] ElevenLabs ${r.status}: ${(await r.text()).slice(0, 160)}`);
-      return null;
+      return { reason: 'api_error' };
     }
     const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length < 200) return null; // not real audio
+    if (buf.length < 200) return { reason: 'api_error' }; // not real audio
     try { writeFileSync(cached, buf); pruneCache(); } catch { /* cache is best-effort */ }
     budgetAdd(day, text.length, spent);
-    return buf;
+    return { buf };
   } catch (e) {
     console.error('[tts] synth failed:', e.message);
-    return null;
+    return { reason: 'api_error' };
   } finally {
     clearTimeout(t);
   }

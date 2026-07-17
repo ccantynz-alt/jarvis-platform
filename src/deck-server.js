@@ -33,8 +33,8 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
 import { readFileSync, writeFileSync } from 'fs';
-import { resolveIntent, runIntent, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY } from './lib/conversation.js';
-import { runAgent, hasAgent } from './lib/agent.js';
+import { resolveIntent, runIntent, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
+import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider } from './lib/agent.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
 
 const PORT      = 9210;
@@ -120,15 +120,34 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'jarvis-deck', clients: wss?.clients?.size ?? 0, link: 'ready', tts: ttsEnabled() });
 });
 
+// PWA identity — manifest + icons (same auth as the page; loopback allowed
+// so the screenshot service can render/verify them).
+app.get('/deck.webmanifest', (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
+  res.set('Content-Type', 'application/manifest+json');
+  res.sendFile('/opt/jarvis/public/deck.webmanifest');
+});
+app.get('/icons/:file', (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
+  if (!/^deck-\d+\.png$/.test(req.params.file)) return res.status(404).end();
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.sendFile('/opt/jarvis/public/icons/' + req.params.file);
+});
+app.get('/deck-icon.html', (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
+  res.sendFile('/opt/jarvis/public/deck-icon.html');
+});
+
 // GET /tts?text=… — the Jarvis neural voice (ElevenLabs, cached server-side).
-// 503 → the client quietly falls back to browser speechSynthesis.
+// 503 carries a reason ('unconfigured'|'budget'|'api_error') so the client can
+// tell "gone for the day" from a transient blip instead of silently switching voices.
 app.get('/tts', async (req, res) => {
   if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
-  const buf = await synthesize(req.query.text);
-  if (!buf) return res.status(503).json({ error: 'tts unavailable' });
+  const out = await synthesize(req.query.text);
+  if (!out.buf) return res.status(503).json({ error: 'tts unavailable', reason: out.reason });
   res.set('Content-Type', 'audio/mpeg');
   res.set('Cache-Control', 'private, max-age=3600');
-  res.send(buf);
+  res.send(out.buf);
 });
 
 app.get('/', (req, res) => {
@@ -142,7 +161,18 @@ app.get('/', (req, res) => {
     console.log(`[deck] 403 for ${req.headers['x-forwarded-for'] || req.socket.remoteAddress} (${req.headers['tailscale-user-login'] || 'unknown user'})`);
     return res.status(403).send(`<!DOCTYPE html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>JARVIS — locked</title></head>
 <body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#04060c;color:#d7e7f0;font-family:monospace;text-align:center">
-<div><div style="font-size:22px;letter-spacing:6px;color:#00e5ff">JARVIS</div>
+<div>
+<svg width="120" height="120" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" style="display:block;margin:0 auto 14px">
+  <defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#00e5ff" stop-opacity=".5"/><stop offset="100%" stop-color="#000" stop-opacity="0"/></radialGradient>
+  <radialGradient id="c" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#eaffff"/><stop offset="100%" stop-color="#00c8e6"/></radialGradient></defs>
+  <circle cx="256" cy="256" r="240" fill="url(#g)"/>
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#00e5ff" stroke-opacity=".9" stroke-width="7" stroke-dasharray="480 800" transform="rotate(-35 256 256)"/>
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#00e5ff" stroke-opacity=".25" stroke-width="3"/>
+  <circle cx="256" cy="256" r="164" fill="none" stroke="#00e5ff" stroke-opacity=".55" stroke-width="4" stroke-dasharray="300 740" transform="rotate(120 256 256)"/>
+  <circle cx="256" cy="256" r="110" fill="none" stroke="#00e5ff" stroke-opacity=".8" stroke-width="4"/>
+  <circle cx="256" cy="256" r="62" fill="url(#c)"/>
+</svg>
+<div style="font-size:22px;letter-spacing:6px;color:#00e5ff">JARVIS</div>
 <p style="color:#8fb3c4;max-width:34em;line-height:1.6">This device isn't signed in yet.<br>
 Open the Gateway once on this device (its login also unlocks the Deck),<br>
 or append <b style="color:#00e5ff">/?token=&lt;your token&gt;</b> to this address one time.</p></div></body></html>`);
@@ -236,6 +266,9 @@ async function pollActivity() {
       // warn/alert get announced aloud on the deck, not just a feed line —
       // but only when they're actually fresh (not backfill after a restart).
       if (['warn', 'alert', 'error'].includes(n.level) && Date.now() - Date.parse(n.ts) < 2 * 60 * 1000) {
+        // Pre-warm the TTS cache so every client's /tts fetch for this alert is
+        // an instant cache hit (and the chars are only spent once, not per device).
+        synthesize(n.speech || n.title).catch(() => {});
         broadcast({ type: 'notify', level: n.level, title: n.title, speech: n.speech || n.title });
       }
     }
@@ -598,7 +631,15 @@ wss.on('connection', (ws, req) => {
     const text = String(msg.text || '').trim();
     if (!text) return;
     pushWire('deck.command', JSON.stringify({ from: 'craig', text: text.slice(0, 80) }));
+    // Any briefing ask also feeds the deck's structured briefing panel,
+    // regardless of whether the brain or the intent pipeline answers.
+    if (/\bbrief/i.test(text)) {
+      handleBriefing().then(b => { if (b?.data) send({ type: 'briefing', data: b.data }); }).catch(() => {});
+    }
     try {
+      // "switch brain to GPT / Claude" — handled before any brain runs
+      const switched = await maybeBrainSwitch(text);
+      if (switched) return send({ type: 'chat', text: switched, speech: switched });
       if (hasAgent()) {
         const transcript = await loadTranscript();
         const before = transcript.length;
@@ -638,6 +679,6 @@ tick(pollPlatforms, 30000);
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[jarvis-deck] listening on http://127.0.0.1:${PORT}`);
   console.log(`[jarvis-deck] auth token: ${AUTH_TOKEN ? 'configured ✓' : 'MISSING ✗ (all access will 403)'}`);
-  console.log(`[jarvis-deck] agent brain: ${hasAgent() ? 'Messages API ✓' : 'intent-pipeline fallback'}`);
+  console.log(`[jarvis-deck] agent brain: ${hasAgent() ? getBrainProvider() + ' ✓' : 'intent-pipeline fallback'}`);
   console.log('[jarvis-deck] expose with: tailscale serve --bg --https=8444 http://127.0.0.1:9210');
 });

@@ -7,10 +7,17 @@
  * handlers in lib/conversation.js — so there is zero behaviour drift from the
  * frozen Slack/intent path.
  *
- * Requires ANTHROPIC_API_KEY (Messages API, streaming). Callers MUST check
- * hasAgent() first and fall back to resolveIntent()/runIntent() when it's unset
- * — this module deliberately does NOT shell out to the `claude` CLI (that path
- * stays in conversation.js as the graceful fallback).
+ * TWO PROVIDERS, ONE BRAIN (Craig's split, 2026-07-17): the brain can run on
+ * either the OpenAI API (GPT/Codex credits) or the Anthropic Messages API.
+ * BRAIN_PROVIDER=auto prefers OpenAI when OPENAI_API_KEY is set, else
+ * Anthropic; runtime-switchable by voice ("Jarvis, switch brain to GPT /
+ * Claude") via maybeBrainSwitch(), persisted in memory KV 'brain-provider'.
+ * The transcript is stored in Anthropic block format regardless of provider
+ * (toOpenAIMessages() translates per call), so mid-session switches are safe.
+ * Callers MUST check hasAgent() first and fall back to resolveIntent()/
+ * runIntent() when no usable key exists — this module deliberately does NOT
+ * shell out to the `claude`/`codex` CLIs (the claude CLI path stays in
+ * conversation.js as the graceful fallback).
  *
  * Safety: dispatch_job is GATED. The first call returns needs_confirmation with
  * a spoken summary; the actual orchestrator dispatch only fires when the model
@@ -32,11 +39,54 @@ import {
 // runs the smartest model available; cost is accepted. Workers stay on sonnet.
 const AGENT_MODEL = 'claude-fable-5';
 const API_URL     = 'https://api.anthropic.com/v1/messages';
+// OpenAI side — override with OPENAI_BRAIN_MODEL when a newer model lands.
+const OPENAI_URL  = 'https://api.openai.com/v1/chat/completions';
+const openaiModel = () => process.env.OPENAI_BRAIN_MODEL || 'gpt-5.1';
 const MAX_TURNS   = 8;   // tool-use round-trips before we force a final answer
 const MAX_TOKENS  = 2000;
 
+// ── Provider selection ───────────────────────────────────────────────────────
+const openaiKey    = () => process.env.OPENAI_API_KEY || null;
+const anthropicKey = () => process.env.ANTHROPIC_API_KEY || null;
+
+let brainProvider = null; // 'openai' | 'anthropic' once resolved/switched
+(async () => { // restore last voice-switched choice across restarts (best effort)
+  try {
+    const r = await fetch(`${MEMORY}/memory/kv/brain-provider`).then(r => r.json());
+    if (r?.value === 'openai' || r?.value === 'anthropic') brainProvider = r.value;
+  } catch { /* KV empty or memory down — env/auto rules apply */ }
+})();
+
+export function getBrainProvider() {
+  if (brainProvider) return brainProvider;
+  const pref = (process.env.BRAIN_PROVIDER || 'auto').toLowerCase();
+  if (pref === 'openai' || pref === 'anthropic') return (brainProvider = pref);
+  return (brainProvider = openaiKey() ? 'openai' : 'anthropic');
+}
+
 export function hasAgent() {
-  return !!process.env.ANTHROPIC_API_KEY;
+  return getBrainProvider() === 'openai' ? !!openaiKey() : !!anthropicKey();
+}
+
+// "Jarvis, switch brain to GPT / Claude" — both servers call this before the
+// agent; a non-null return is the spoken confirmation and the turn is done.
+const SWITCH_RE = /\b(?:switch|change|set|swap)\s+(?:the\s+)?(?:brain|model|ai)\s*(?:over\s+)?(?:to\s+)?(gpt|codex|open\s*ai|chatgpt|claude|sonnet|fable|anthropic)\b/i;
+export async function maybeBrainSwitch(text) {
+  const m = String(text || '').match(SWITCH_RE);
+  if (!m) return null;
+  const want  = /gpt|codex|open\s*ai|chatgpt/i.test(m[1]) ? 'openai' : 'anthropic';
+  const label = want === 'openai' ? 'GPT' : 'Claude';
+  if (!(want === 'openai' ? openaiKey() : anthropicKey())) {
+    return `I can't switch to ${label}, sir — no ${want === 'openai' ? 'OpenAI' : 'Anthropic'} API key is configured on this box.`;
+  }
+  brainProvider = want;
+  try {
+    await fetch(`${MEMORY}/memory/kv`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'brain-provider', value: want }),
+    });
+  } catch { /* persistence is best-effort */ }
+  return `Brain switched to ${label}, sir.`;
 }
 
 function systemPrompt() {
@@ -136,15 +186,18 @@ async function runTool(name, input, ctx) {
  * payload if a confirmed dispatch fired this turn (so the caller can watchJob).
  */
 export async function runAgent(transcript, userText, onChunk = () => {}) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('agent unavailable: ANTHROPIC_API_KEY unset');
+  const provider = getBrainProvider();
+  const apiKey = provider === 'openai' ? openaiKey() : anthropicKey();
+  if (!apiKey) throw new Error(`agent unavailable: no ${provider} API key set`);
 
   transcript.push({ role: 'user', content: userText });
   const ctx = { pending: null, dispatched: null };
   let finalText = '';
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const { text, toolUses } = await streamOnce(apiKey, transcript, onChunk);
+    const { text, toolUses } = provider === 'openai'
+      ? await streamOnceOpenAI(apiKey, transcript, onChunk)
+      : await streamOnce(apiKey, transcript, onChunk);
     if (text) finalText = text;
 
     if (!toolUses.length) break; // model gave a plain answer — done
@@ -220,4 +273,93 @@ async function streamOnce(apiKey, transcript, onChunk) {
     }
   }
   return { text: text.trim(), toolUses: toolUses.filter(Boolean) };
+}
+
+// ── OpenAI provider ──────────────────────────────────────────────────────────
+// The transcript's canonical format stays Anthropic blocks; translate per call.
+
+const OPENAI_TOOLS = TOOLS.map(t => ({
+  type: 'function',
+  function: { name: t.name, description: t.description, parameters: t.input_schema },
+}));
+
+function toOpenAIMessages(transcript) {
+  const msgs = [{ role: 'system', content: systemPrompt() }];
+  for (const m of transcript) {
+    if (typeof m.content === 'string') { msgs.push({ role: m.role, content: m.content }); continue; }
+    if (m.role === 'assistant') {
+      let text = '';
+      const calls = [];
+      for (const b of m.content) {
+        if (b.type === 'text') text += b.text;
+        else if (b.type === 'tool_use') calls.push({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input || {}) } });
+      }
+      if (!text && !calls.length) continue;
+      const am = { role: 'assistant', content: text || null };
+      if (calls.length) am.tool_calls = calls;
+      msgs.push(am);
+    } else { // user message carrying tool results → one 'tool' message each
+      for (const b of m.content) {
+        if (b.type === 'tool_result') msgs.push({ role: 'tool', tool_call_id: b.tool_use_id, content: String(b.content) });
+      }
+    }
+  }
+  return msgs;
+}
+
+// One streaming chat-completions call; same return shape as streamOnce().
+async function streamOnceOpenAI(apiKey, transcript, onChunk) {
+  const r = await fetch(OPENAI_URL, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: openaiModel(),
+      stream: true,
+      max_completion_tokens: MAX_TOKENS,
+      // gpt-5.x on chat/completions only allows function tools with reasoning
+      // off ("use /v1/responses or set reasoning_effort to 'none'"). Voice
+      // wants fast answers anyway; flip via OPENAI_BRAIN_EFFORT only if we
+      // ever migrate to /v1/responses.
+      ...(openaiModel().startsWith('gpt-5') ? { reasoning_effort: 'none' } : {}),
+      messages: toOpenAIMessages(transcript),
+      tools: OPENAI_TOOLS,
+    }),
+  });
+  if (!r.ok) throw new Error(`OpenAI API ${r.status}: ${(await r.text()).slice(0, 200)}`);
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let text = '';
+  const calls = []; // index → { id, name, args } accumulated across deltas
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const payload = line.slice(6).trim();
+      if (payload === '[DONE]') continue;
+      let ev; try { ev = JSON.parse(payload); } catch { continue; }
+      const d = ev.choices?.[0]?.delta;
+      if (!d) continue;
+      if (typeof d.content === 'string' && d.content) { text += d.content; onChunk(d.content); }
+      for (const tc of d.tool_calls || []) {
+        const slot = calls[tc.index] || (calls[tc.index] = { id: '', name: '', args: '' });
+        if (tc.id) slot.id = tc.id;
+        if (tc.function?.name) slot.name += tc.function.name;
+        if (tc.function?.arguments) slot.args += tc.function.arguments;
+      }
+    }
+  }
+
+  const toolUses = calls.filter(Boolean).map((c, i) => {
+    let input = {};
+    try { input = c.args ? JSON.parse(c.args) : {}; } catch { /* malformed args → {} */ }
+    return { id: c.id || `call_${i}`, name: c.name, input };
+  });
+  return { text: text.trim(), toolUses };
 }

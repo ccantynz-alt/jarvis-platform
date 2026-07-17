@@ -33,7 +33,7 @@ import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
 import { spawn } from 'child_process';
 import { resolveIntent, runIntent, platformNames, loadRoadmap } from './lib/conversation.js';
-import { runAgent, hasAgent } from './lib/agent.js';
+import { runAgent, hasAgent, maybeBrainSwitch } from './lib/agent.js';
 import { notify } from './lib/notify.js';
 
 const PORT         = 9208;
@@ -372,9 +372,15 @@ wss.on('connection', (ws, req) => {
           return ws.send(JSON.stringify({ type: 'reply_done', speech: full.slice(0, 400), ms: Date.now() - t0 }));
         }
 
-        // Default path — talk to the agentic brain (tool-calling Claude) when
-        // an API key is configured; otherwise fall back to the frozen keyword/
-        // Haiku intent pipeline so the gateway still works with no key.
+        // "switch brain to GPT / Claude" — handled before any brain runs
+        const switched = await maybeBrainSwitch(text);
+        if (switched) {
+          return ws.send(JSON.stringify({ type: 'reply', text: switched, speech: switched, via: 'brain-switch', ms: Date.now() - t0 }));
+        }
+
+        // Default path — talk to the agentic brain (tool-calling, GPT or
+        // Claude per the brain provider) when an API key is configured;
+        // otherwise fall back to the frozen keyword/Haiku intent pipeline.
         if (hasAgent()) {
           const full = await runAgent(transcript, text, (chunk) =>
             ws.send(JSON.stringify({ type: 'reply_chunk', text: chunk })));

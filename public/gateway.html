@@ -133,6 +133,7 @@
   <span class="logo">JARVIS</span>
   <span class="spacer"></span>
   <button class="hbtn" id="muteBtn" title="Toggle speech">🔊</button>
+  <button class="hbtn" id="convBtn" title="Hands-free conversation">💬</button>
   <button class="hbtn" id="roadmapBtn">Roadmap</button>
   <button class="hbtn" id="inboxBtn">Inbox<span id="inboxBadge"></span></button>
 </header>
@@ -217,7 +218,7 @@
       || voiceCache.find(v => /en[-_](AU|NZ)/i.test(v.lang))
       || voiceCache.find(v => /^en/i.test(v.lang)) || null;
     u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
-    u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; };
+    u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; if (conversationMode) scheduleRelisten(); };
     u.onerror = (e) => { setJState('idle'); hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`; };
     speechSynthesis.speak(u);
   }
@@ -251,17 +252,20 @@
         const div = bubble('jarvis' + (m.interim ? ' interim' : ''), m.text || '');
         if (!m.interim && m.intent) meta(div, `${m.intent} · ${m.via} · ${m.ms}ms`);
         speak(m.speech);
+        if (!m.interim && muted) scheduleRelisten(); // muted → no TTS onend to drive the loop
       } else if (m.type === 'reply_chunk') {
         if (!streamDiv) streamDiv = bubble('jarvis', '');
         streamDiv.textContent += m.text;
         transcript.scrollTop = transcript.scrollHeight;
       } else if (m.type === 'reply_done') {
-        if (streamDiv) { meta(streamDiv, `converse · ${m.ms}ms`); }
+        if (streamDiv) { meta(streamDiv, `${m.via || 'converse'} · ${m.ms}ms`); }
         speak(m.speech); streamDiv = null;
+        if (muted) scheduleRelisten();
       } else if (m.type === 'notify') {
         const n = m.notification;
         bubble('notify ' + (n.level || 'info'), `${n.title}${n.body && n.body !== n.title ? '\n' + n.body : ''}`);
-        speak(n.speech);
+        // Notifications render silently here — the Command Deck (:8444) is the
+        // one voice of Jarvis now; two apps must never speak the same alert.
         refreshInbox();
       } else if (m.type === 'job_update') {
         const j = m.payload;
@@ -283,36 +287,64 @@
     if (e.key === 'Enter') { primeTTS(); send($('textIn').value); $('textIn').value = ''; }
   });
 
-  // ── Voice (push-to-talk) ───────────────────────────────────────────────────
+  // ── Voice — push-to-talk + hands-free conversation loop ─────────────────────
+  // Push-to-talk: tap mic → one utterance. Conversation mode (💬): after Jarvis
+  // finishes speaking, the mic auto-reopens for the next turn — tap once, then
+  // talk back and forth. iOS grants the mic only to a foreground tab, so this is
+  // hands-free with the app open (the phone-call path is the eyes-free story).
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const micBtn = $('micBtn');
+  const micBtn = $('micBtn'), convBtn = $('convBtn');
+  let conversationMode = false, rec = null, listening = false, relistenTimer = null;
+
+  function startListening() {
+    if (!SR || listening) return;
+    speechSynthesis.cancel();
+    rec = new SR();
+    rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
+    let finalText = '';
+    rec.onstart = () => { listening = true; micBtn.classList.add('listening'); hint.textContent = 'listening…'; setJState('listening'); };
+    rec.onresult = (e) => {
+      let interim = '';
+      for (const r of e.results) (r.isFinal ? (finalText += r[0].transcript) : (interim += r[0].transcript));
+      hint.textContent = interim || finalText || 'listening…';
+    };
+    rec.onerror = (e) => {
+      if (e.error === 'no-speech') return; // handled in onend (may relisten)
+      hint.textContent = e.error === 'not-allowed' ? '⚠ Mic permission denied — check Safari settings' : `voice error: ${e.error}`;
+      if (e.error === 'not-allowed') setConversation(false);
+    };
+    rec.onend = () => {
+      listening = false; micBtn.classList.remove('listening'); setJState('idle');
+      const said = finalText.trim();
+      if (said) { hint.textContent = ''; send(said); } // relisten happens after Jarvis replies (speak.onend)
+      else if (conversationMode) { hint.textContent = 'say something…'; scheduleRelisten(); }
+      else if (!hint.textContent.startsWith('⚠')) hint.textContent = '';
+    };
+    try { rec.start(); } catch { /* rapid restart can race — ignore */ }
+  }
+
+  // Re-open the mic a beat after Jarvis stops talking (called from speak.onend).
+  function scheduleRelisten() {
+    if (!conversationMode) return;
+    clearTimeout(relistenTimer);
+    relistenTimer = setTimeout(() => { if (conversationMode && !listening) startListening(); }, 400);
+  }
+
+  function setConversation(on) {
+    conversationMode = on;
+    convBtn.classList.toggle('active', on);
+    if (on) { primeTTS(); hint.textContent = 'hands-free on — tap 💬 to stop'; if (!listening) startListening(); }
+    else { clearTimeout(relistenTimer); hint.textContent = ''; if (listening) rec?.stop(); }
+  }
+
   if (!SR) {
-    micBtn.disabled = true;
+    micBtn.disabled = true; convBtn.disabled = true;
     hint.textContent = location.protocol === 'https:'
       ? 'Voice not supported in this browser — use the text box'
       : '⚠ Voice needs the https ts.net address, not http';
   } else {
-    let rec = null, listening = false;
-    micBtn.onclick = () => {
-      primeTTS();
-      if (listening) { rec?.stop(); return; }
-      speechSynthesis.cancel();
-      rec = new SR();
-      rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
-      let finalText = '';
-      rec.onstart = () => { listening = true; micBtn.classList.add('listening'); hint.textContent = 'listening…'; setJState('listening'); };
-      rec.onresult = (e) => {
-        let interim = '';
-        for (const r of e.results) (r.isFinal ? (finalText += r[0].transcript) : (interim += r[0].transcript));
-        hint.textContent = interim || finalText || 'listening…';
-      };
-      rec.onerror = (e) => { hint.textContent = e.error === 'not-allowed' ? '⚠ Mic permission denied — check Safari settings' : `voice error: ${e.error}`; };
-      rec.onend = () => {
-        listening = false; micBtn.classList.remove('listening'); setJState('idle');
-        if (finalText.trim()) { hint.textContent = ''; send(finalText); } else if (!hint.textContent.startsWith('⚠')) hint.textContent = '';
-      };
-      rec.start();
-    };
+    micBtn.onclick = () => { primeTTS(); if (listening) rec?.stop(); else startListening(); };
+    convBtn.onclick = () => setConversation(!conversationMode);
   }
 
   // ── Inbox ──────────────────────────────────────────────────────────────────
@@ -385,7 +417,7 @@
   $('closeRoadmap').onclick = () => $('roadmap').classList.remove('open');
   $('roadmap').onclick = (e) => { if (e.target.id === 'roadmap') $('roadmap').classList.remove('open'); };
 
-  bubble('jarvis', 'Jarvis online. Tap the mic and talk to me — try "status", "briefing", or "how is gatetest".');
+  bubble('jarvis', 'Jarvis online. Tap 🎙 and just talk — ask me anything or tell me to sort something out. Tap 💬 for hands-free back-and-forth.');
 })();
 </script>
 </body>

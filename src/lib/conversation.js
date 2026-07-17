@@ -223,8 +223,13 @@ function runClaudeCli(prompt) {
     let settled = false;
     const done = (val) => { if (!settled) { settled = true; resolve(val); } };
 
+    const env = { ...process.env, HOME: '/root' };
+    // The services load ANTHROPIC_API_KEY from secrets.env; if it leaks into
+    // the CLI it overrides the claude.ai subscription login (and fails hard
+    // when the key has no credits). The CLI must run on the local login.
+    delete env.ANTHROPIC_API_KEY;
     const proc = spawn('claude', ['--model', HAIKU_MODEL, '--print', prompt], {
-      env: { ...process.env, HOME: '/root' },
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
@@ -544,6 +549,7 @@ export async function handleBriefing() {
   let msg = `🌅 *JARVIS MORNING BRIEFING*\n`;
   msg += `${new Date().toLocaleDateString('en-NZ', { timeZone: 'Pacific/Auckland', weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}\n\n`;
   let speech = 'Here is your briefing.';
+  let data = null;
 
   try {
     const memory = await fetchJSON(`${MEMORY}/memory/summary`);
@@ -598,12 +604,23 @@ export async function handleBriefing() {
       `${warning.length ? `, ${warning.length} need attention` : ''}` +
       `${unaudited.length ? `, ${unaudited.length} not yet audited` : ''}` +
       `${running.length ? `. ${running.length} job${running.length === 1 ? '' : 's'} running` : ''}.`;
+
+    // Structured form for rich clients (Command Deck briefing panel).
+    // Additive: existing callers keep using text/speech untouched.
+    data = {
+      date: new Date().toISOString(),
+      healthy: healthy.map(p => ({ name: p.name, score: p.health_score || null })),
+      attention: warning.map(p => ({ name: p.name, score: p.health_score || null, issue: p.last_issue ? String(p.last_issue).slice(0, 120) : null })),
+      unaudited,
+      openIssues: memory.open_issues || 0,
+      jobs: running.slice(0, 5).map(j => ({ platform: j.platform, task: (j.task || '').slice(0, 80) })),
+    };
   } catch (e) {
     msg += `❌ Memory unavailable: ${e.message}`;
     speech = 'Sorry, memory is unavailable for the briefing.';
   }
 
-  return { text: msg, speech };
+  return { text: msg, speech, data };
 }
 
 export async function handleRoadmap() {

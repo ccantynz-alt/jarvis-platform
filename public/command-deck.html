@@ -2,8 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>JARVIS Command Deck</title>
+<link rel="manifest" href="/deck.webmanifest">
+<link rel="apple-touch-icon" href="/icons/deck-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="JARVIS">
+<meta name="theme-color" content="#04060c">
 <!--
   JARVIS Command Deck — implemented from Craig's Claude Design handoff
   (design_handoff_jarvis_command_deck / JARVIS Command Deck.dc.html).
@@ -42,16 +48,16 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .topbar{display:flex;align-items:center;gap:18px;padding:12px 18px;border-bottom:1px solid rgba(0,229,255,.14);
   background:rgba(6,10,18,.72);backdrop-filter:blur(8px);flex-wrap:wrap}
 .brand-dot{width:12px;height:12px;border-radius:50%;background:#00e5ff;animation:pulseRing 2.4s ease-out infinite}
-.tab{cursor:pointer;padding:8px 12px;font-weight:600;font-size:13px;letter-spacing:1.5px;text-transform:uppercase;
-  white-space:nowrap;color:#5f7a8c;border-bottom:2px solid transparent;transition:color .2s}
+.tab{cursor:pointer;padding:13px 14px;font-weight:600;font-size:13px;letter-spacing:1.5px;text-transform:uppercase;
+  white-space:nowrap;color:#6b8a9e;border-bottom:2px solid transparent;transition:color .2s;min-height:44px;display:flex;align-items:center}
 .tab:hover{color:#9fefff}
 .tab.active{color:#00e5ff;border-bottom-color:#00e5ff}
 
-.section-label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:3px;color:#5f7a8c}
+.section-label{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:3px;color:#6b8a9e}
 .agent-tile{border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.72);border-radius:4px;
   padding:10px 12px;display:flex;flex-direction:column;gap:4px;animation:riseIn .4s ease both}
-.btn{cursor:pointer;background:rgba(8,14,24,.8);padding:7px 18px;border-radius:3px;
-  font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px}
+.btn{cursor:pointer;background:rgba(8,14,24,.8);padding:12px 20px;border-radius:3px;min-height:44px;
+  display:flex;align-items:center;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px}
 #btn-mic{border:1px solid rgba(0,229,255,.4);color:#00e5ff}
 #btn-mic:hover{background:rgba(0,229,255,.08)}
 #btn-mic.live{border-color:#ff4d6a;color:#ff4d6a}
@@ -61,7 +67,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .chat-msg{max-width:85%;border-radius:4px;padding:8px 12px;animation:riseIn .3s ease both}
 .chat-msg.jarvis{align-self:flex-start;border:1px solid rgba(0,229,255,.25);background:rgba(6,18,26,.7)}
 .chat-msg.you{align-self:flex-end;border:1px solid rgba(255,181,71,.3);background:rgba(30,22,8,.6)}
-.chat-who{font-family:'IBM Plex Mono',monospace;font-size:9px;letter-spacing:2px;margin-bottom:3px}
+.chat-who{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px;margin-bottom:3px}
 .chat-msg.jarvis .chat-who{color:#00e5ff}
 .chat-msg.you .chat-who{color:#ffb547}
 .chat-text{font-size:14px;line-height:1.45;color:#dcedf6}
@@ -87,8 +93,35 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .cmd-prompt{font-family:'IBM Plex Mono',monospace;color:#00e5ff;font-size:14px;animation:blink 1.6s infinite}
 #cmd{flex:1;background:transparent;border:none;outline:none;color:#dcedf6;
   font-family:'IBM Plex Mono',monospace;font-size:14px;min-width:0}
-.view{height:100%}
+.view{height:100%;animation:viewFade .18s ease}
+@keyframes viewFade{from{opacity:0}to{opacity:1}}
 .hidden{display:none !important}
+
+/* Full-screen CORE: state label sits under the sphere, not behind the core */
+#core-slot #orb-wrap > .orb-label-wrap{align-items:center;justify-content:flex-end !important;padding-bottom:4%}
+#core-slot #orb-label{font-size:13px !important}
+
+/* Voice arming — unmissable, replaces the old whisper-quiet "TAP TO ARM VOICE" */
+@keyframes armPulse{0%,100%{opacity:.7;transform:scale(1)}50%{opacity:1;transform:scale(1.05)}}
+#arm-overlay{position:absolute;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;border-radius:50%;background:radial-gradient(circle, rgba(4,6,12,.5), transparent 72%)}
+#arm-overlay div{font-family:'Michroma',sans-serif;font-size:15px;letter-spacing:4px;color:#eaffff;
+  text-align:center;text-shadow:0 0 18px rgba(0,229,255,.85);animation:armPulse 1.8s ease-in-out infinite;padding:0 12px}
+
+/* Latest reply — the one thing Jarvis just said, front and centre */
+#latest-reply{font-size:17px;line-height:1.5;color:#dcedf6;max-width:680px;text-align:center;min-height:26px;padding:0 14px}
+#heard-line{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:1px;color:#5f7a8c;
+  min-height:16px;text-align:center;transition:opacity .6s;padding:0 10px}
+#heard-line.ignored{color:#40606f;font-style:italic}
+#voice-pending{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:1px;color:#ffb547;
+  border:1px solid rgba(255,181,71,.55);border-radius:3px;padding:4px 10px;cursor:pointer;animation:pulseRing 2.4s ease-out infinite}
+#voice-badge{color:#ffb547;border:1px solid #ffb547;border-radius:3px;padding:2px 8px;font-size:10px;letter-spacing:1px}
+#btn-history{border:1px solid rgba(107,138,158,.4);color:#6b8a9e}
+#btn-history:hover{background:rgba(107,138,158,.08)}
+#chat{display:flex} /* display lives here, not inline, so .collapsed can win */
+#chat.collapsed{display:none}
+#voice-debug{position:fixed;left:10px;bottom:64px;z-index:50;background:rgba(4,8,14,.92);
+  border:1px solid rgba(0,229,255,.25);border-radius:4px;padding:8px 10px;font-size:10px;line-height:1.7;color:#7d99aa;white-space:pre}
 
 #alerts{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:20;
   display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none}
@@ -96,13 +129,25 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   background:rgba(6,10,18,.92);border:1px solid #ffb547;border-radius:4px;padding:8px 16px;
   max-width:70vw;box-shadow:0 0 24px rgba(0,0,0,.6);animation:riseIn .3s ease both;transition:opacity .4s}
 
+/* Morning-briefing panel */
+#briefing{position:absolute;inset:0;z-index:30;display:none;align-items:center;justify-content:center;
+  background:rgba(2,4,8,.55);backdrop-filter:blur(3px)}
+#briefing.open{display:flex}
+.brief-card{width:min(680px,92vw);max-height:82%;overflow-y:auto;border:1px solid rgba(0,229,255,.3);
+  background:rgba(6,12,20,.96);border-radius:6px;padding:22px 26px;box-shadow:0 0 60px rgba(0,229,255,.12);
+  animation:riseIn .3s ease both}
+.brief-h{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid rgba(0,229,255,.18);padding-bottom:10px;margin-bottom:14px}
+.brief-sec{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:3px;color:#6b8a9e;margin:14px 0 6px}
+.brief-row{display:flex;gap:10px;align-items:baseline;font-size:14px;padding:4px 0}
+.brief-row .mono{font-size:11px}
+
 /* Keyboard a11y: visible only via :focus-visible, so mouse/touch look is untouched */
 .tab:focus-visible,.btn:focus-visible,#cmd:focus-visible{outline:2px solid rgba(0,229,255,.7);outline-offset:2px;border-radius:3px}
 .tab,.btn{touch-action:manipulation;user-select:none}
 
 /* Respect reduced motion: kill decorative loops, keep functional state changes */
 @media (prefers-reduced-motion: reduce){
-  .scan2,.brand-dot,.cmd-prompt,.qpacket{animation:none !important}
+  .scan2,.brand-dot,.cmd-prompt,.qpacket,.view{animation:none !important}
   .agent-tile,.chat-msg,.feed-line,.wire-line{animation:none !important;opacity:1}
   *{transition-duration:1ms !important}
 }
@@ -118,12 +163,13 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
     <div style="display:flex;align-items:center;gap:10px">
       <div class="brand-dot"></div>
       <div style="font-family:'Michroma',sans-serif;font-size:16px;letter-spacing:5px;color:#eaffff">JARVIS</div>
-      <div class="mono" style="font-size:10px;color:#5f7a8c;letter-spacing:2px;padding-top:2px">COMMAND&nbsp;DECK&nbsp;v2.1</div>
+      <div class="mono" style="font-size:11px;color:#6b8a9e;letter-spacing:2px;padding-top:2px">COMMAND&nbsp;DECK&nbsp;v2.2</div>
     </div>
     <div id="tabs" role="tablist" aria-label="Deck views" style="display:flex;gap:2px;flex:1;justify-content:center;flex-wrap:wrap"></div>
     <div style="display:flex;align-items:center;gap:16px;font-family:'IBM Plex Mono',monospace;font-size:12px">
       <div style="color:#3dffa0">◉ <span id="online-count">0</span> AGENTS ONLINE</div>
       <div style="color:#8fb3c4" id="clock"></div>
+      <div id="voice-badge" class="hidden"></div>
       <div id="link-badge" style="color:#ffb547;border:1px solid #ffb547;border-radius:3px;padding:2px 8px;font-size:10px;letter-spacing:1px">⬡ SIMULATION</div>
     </div>
   </div>
@@ -131,26 +177,40 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   <!-- MAIN -->
   <div style="overflow:hidden;position:relative">
     <div id="alerts" aria-live="assertive"></div>
+    <div id="briefing" role="dialog" aria-label="Morning briefing"></div>
+
+    <!-- CORE VIEW — the JARVIS brain, full screen (default) -->
+    <div id="view-core" class="view" style="display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden">
+      <div id="core-slot" style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;width:100%;height:100%;padding:12px;min-height:0">
+        <!-- #center-stack lives here on CORE and is reparented into the HUD tab -->
+        <div id="center-stack" style="display:flex;flex-direction:column;align-items:center;gap:8px;min-width:0;min-height:0;flex:1;width:100%">
+          <div id="orb-wrap" style="position:relative;width:280px;height:280px;max-width:100%;flex-shrink:0">
+            <canvas id="orb" width="560" height="560" style="width:100%;height:100%"></canvas>
+            <div class="orb-label-wrap" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none">
+              <div id="orb-label" style="font-family:'Michroma',sans-serif;font-size:11px;letter-spacing:4px;color:#9feaff;text-shadow:0 0 12px rgba(0,229,255,.6)">STANDBY</div>
+            </div>
+            <div id="arm-overlay" class="hidden" role="button" tabindex="0" aria-label="Activate voice"><div>TAP TO ACTIVATE<br>VOICE</div></div>
+          </div>
+          <div id="latest-reply" aria-live="polite"></div>
+          <div id="heard-line" aria-hidden="true"></div>
+          <div id="voice-pending" class="hidden" role="button" tabindex="0"></div>
+          <div style="display:flex;gap:10px">
+            <div id="btn-mic" class="btn" role="button" tabindex="0" aria-label="Toggle voice mode">🎙 ENABLE MIC</div>
+            <div id="btn-demo" class="btn" role="button" tabindex="0" aria-label="Run briefing">▶ RUN BRIEFING</div>
+            <div id="btn-history" class="btn" role="button" tabindex="0" aria-label="Toggle conversation history">☰ HISTORY</div>
+          </div>
+          <div id="chat" class="collapsed" aria-live="polite" aria-label="Conversation with JARVIS" style="flex:1;width:100%;max-width:720px;overflow-y:auto;flex-direction:column;gap:8px;padding:6px 4px;min-height:120px"></div>
+        </div>
+      </div>
+    </div>
 
     <!-- HUD VIEW -->
-    <div id="view-hud" class="view" style="display:grid;grid-template-rows:minmax(0,1fr);gap:14px;padding:14px;overflow:auto">
+    <div id="view-hud" class="view hidden" style="display:grid;grid-template-rows:minmax(0,1fr);gap:14px;padding:14px;overflow:auto">
       <div id="hud-left" style="display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0;overflow-y:auto">
         <div class="section-label">EXECUTIVE AGENTS · C-SUITE</div>
         <div id="csuite" style="display:flex;flex-direction:column;gap:10px"></div>
       </div>
-      <div style="display:flex;flex-direction:column;align-items:center;gap:8px;min-width:0;min-height:420px">
-        <div id="orb-wrap" style="position:relative;width:280px;height:280px;max-width:100%;flex-shrink:0">
-          <canvas id="orb" width="560" height="560" style="width:100%;height:100%"></canvas>
-          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none">
-            <div id="orb-label" style="font-family:'Michroma',sans-serif;font-size:11px;letter-spacing:4px;color:#9feaff;text-shadow:0 0 12px rgba(0,229,255,.6)">STANDBY</div>
-          </div>
-        </div>
-        <div style="display:flex;gap:10px">
-          <div id="btn-mic" class="btn" role="button" tabindex="0" aria-label="Toggle microphone">🎙 ENABLE MIC</div>
-          <div id="btn-demo" class="btn" role="button" tabindex="0" aria-label="Run demo briefing">▶ RUN BRIEFING</div>
-        </div>
-        <div id="chat" aria-live="polite" aria-label="Conversation with JARVIS" style="flex:1;width:100%;max-width:720px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:6px 4px;min-height:120px"></div>
-      </div>
+      <div id="hud-center-slot" style="display:flex;flex-direction:column;align-items:center;gap:8px;min-width:0;min-height:420px"></div>
       <div style="display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0">
         <div class="section-label">LIVE OPERATIONS FEED</div>
         <div id="feed" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;border:1px solid rgba(0,229,255,.1);background:rgba(8,14,24,.6);border-radius:4px;padding:10px;min-height:200px"></div>
@@ -205,7 +265,7 @@ const qs = new URLSearchParams(location.search);
 
 // ── State ────────────────────────────────────────────────────────────────────
 const S = {
-  view: 'hud', link: 'SIM', mic: false, speaking: false,
+  view: 'core', link: 'SIM', mic: false, speaking: false,
   agents: [], queues: [], platforms: [], org: null,
   msgRate: 84, queueDepth: 12, tasksDone: 3412, uptime: '—',
   bootTs: Date.now(),
@@ -216,7 +276,13 @@ const ts = () => new Date().toLocaleTimeString('en-GB');
 if (qs.get('scanlines') === '0') { $('scan1').remove(); $('scan2').remove(); }
 
 // ── Tabs / views ─────────────────────────────────────────────────────────────
-const TABS = [['hud','HUD'],['org','HIERARCHY'],['flow','MESSAGE FLOW'],['plat','PLATFORMS']];
+const TABS = [['core','CORE'],['hud','HUD'],['org','HIERARCHY'],['flow','MESSAGE FLOW'],['plat','PLATFORMS']];
+// The brain (orb+voice+chat) is one DOM stack, reparented between CORE and HUD
+function placeCenterStack(view) {
+  const stack = $('center-stack');
+  const target = view === 'hud' ? $('hud-center-slot') : $('core-slot');
+  if (stack.parentElement !== target) target.appendChild(stack);
+}
 for (const [id, label] of TABS) {
   const el = document.createElement('div');
   el.className = 'tab' + (id === S.view ? ' active' : '');
@@ -232,6 +298,8 @@ for (const [id, label] of TABS) {
       t.setAttribute('aria-selected', String(active));
     });
     for (const [vid] of TABS) $('view-' + vid).classList.toggle('hidden', vid !== id);
+    placeCenterStack(id);
+    layout();
     if (id === 'org') renderOrg();
   };
   $('tabs').appendChild(el);
@@ -257,15 +325,25 @@ $('clock').textContent = ts();
 
 // ── Responsive layout (design: narrow <1180, mid <1400) ─────────────────────
 function layout() {
-  const w = window.innerWidth;
+  const w = window.innerWidth, h = window.innerHeight;
   const narrow = w < 1180, mid = w >= 1180 && w < 1400;
   $('view-hud').style.gridTemplateColumns = narrow ? '1fr'
     : (mid ? 'minmax(240px,280px) minmax(360px,1fr) minmax(260px,320px)'
            : 'minmax(280px,340px) minmax(420px,1fr) minmax(300px,380px)');
   $('hud-left').style.order = narrow ? 2 : 0;
-  const orb = narrow ? Math.min(240, Math.max(160, w - 80)) : (mid ? 220 : 280);
+  // CORE = the brain full screen; HUD = compact orb in the center column
+  const orb = S.view === 'core'
+    ? Math.round(Math.min(h * 0.52, w * 0.82))
+    : (narrow ? Math.min(240, Math.max(160, w - 80)) : (mid ? 220 : 280));
   $('orb-wrap').style.width = orb + 'px';
   $('orb-wrap').style.height = orb + 'px';
+  // keep the canvas crisp at full-screen sizes (capped for GPU sanity;
+  // phones get a tighter cap so the neural core holds 60fps)
+  const cap = Math.min(w, h) < 820 ? 720 : 1400;
+  const px = Math.min(cap, Math.round(orb * Math.min(2, window.devicePixelRatio || 1)));
+  const cv = $('orb');
+  const want = S.view === 'core' ? Math.min(cap, Math.max(900, px)) : 560;
+  if (cv.width !== want) { cv.width = want; cv.height = want; }
   $('view-flow').style.gridTemplateColumns = w < 900 ? '1fr' : '1.2fr 1fr';
 }
 window.addEventListener('resize', layout);
@@ -320,9 +398,15 @@ function addChat(who, text, speechText) {
   box.appendChild(el);
   while (box.children.length > 50) box.firstChild.remove();
   box.scrollTop = box.scrollHeight;
+  if (who === 'JARVIS') $('latest-reply').textContent = text;
   if (who === 'JARVIS' && speechText !== null) speak(speechText || text);
   return t;
 }
+
+$('btn-history').onclick = () => {
+  const collapsed = $('chat').classList.toggle('collapsed');
+  $('btn-history').textContent = collapsed ? '☰ HISTORY' : '✕ HIDE HISTORY';
+};
 
 // Streaming reply bubble — text appears as the brain thinks, spoken when done.
 let streamEl = null;
@@ -330,6 +414,7 @@ function onChatChunk(chunk) {
   S.thinking = false;
   if (!streamEl) streamEl = addChat('JARVIS', '', null);
   streamEl.textContent += chunk;
+  $('latest-reply').textContent = streamEl.textContent; // reply forms live under the core
   $('chat').scrollTop = $('chat').scrollHeight;
   updateOrbLabel();
 }
@@ -337,6 +422,7 @@ function onChatFinal(m) {
   S.thinking = false;
   if (streamEl) {
     streamEl.textContent = m.text;
+    $('latest-reply').textContent = m.text;
     streamEl = null;
     speak(m.speech || m.text);
   } else {
@@ -552,6 +638,9 @@ function primeTTS() { // iOS: audio + speech must be unlocked by a user gesture
       'gICAgICAgICAgICAgICAgICAgICAgP//////////////////////////AAAAAExhdmM1OC4xMwAAAAAAAAAAAAAAACQCgAAAAAAAAAJx' +
       'ZuVs3wAAAAAAAAAAAAAAAAAAAAD/+5BkAA/wAABpAAAACAAADSAAAAEAAAGkAAAAIAAANIAAAAQAAAAAAAAAAAAAAAAAAAAA';
     jarvisAudio.play().catch(() => {});
+    attachOutputAnalyser(); // the core pulses to his real voice (needs gesture context)
+    fetch('/tts?text=' + encodeURIComponent('Sir?')).catch(() => {}); // pre-warm the wake ack
+    setTimeout(pumpSpeech, 300); // flush anything that queued before the first tap
   }
   armVoice(); // first tap also arms the wake-word mic (iOS gesture requirement)
 }
@@ -559,56 +648,150 @@ document.addEventListener('pointerdown', primeTTS, true);
 document.addEventListener('keydown', primeTTS, true);
 
 function stopAllAudio() {
+  speechQ.length = 0; updatePendingBadge();
   try { jarvisAudio.pause(); jarvisAudio.currentTime = 0; } catch {}
   if (window.speechSynthesis) speechSynthesis.cancel();
   S.speaking = false;
   updateOrbLabel();
 }
 
-function speakBrowser(text) {
-  if (!window.speechSynthesis) return;
-  speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
-  const u = new SpeechSynthesisUtterance(text);
-  const v = voiceCache.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur/i.test(v.name)) || voiceCache.find(v => /en-GB/i.test(v.lang)) || voiceCache[0];
-  if (v) u.voice = v;
-  u.rate = 1.02; u.pitch = 0.9;
-  u.onstart = () => { S.speaking = true; updateOrbLabel(); };
-  u.onend = () => { S.speaking = false; updateOrbLabel(); scheduleRelisten(); };
-  speechSynthesis.speak(u);
+// ── The Jarvis voice — ONE engine at a time, ONE utterance at a time ─────────
+// Everything spoken (replies, alerts, the boot greeting) flows through a single
+// serialized queue. The neural voice (/tts, ElevenLabs) is THE voice; the
+// browser voice is only an announced, sticky backup for the session — never a
+// silent per-utterance surprise. Before the first tap unlocks audio, speech
+// waits in the queue (with a visible badge) instead of playing robotic.
+const speechQ = [];
+let speechActive = false;
+let voiceEngine = 'neural'; // 'neural' | 'backup' (sticky; re-probes after 10 min)
+let backupSince = 0, ttsFailStreak = 0;
+
+function speak(text) {
+  if (qs.get('voice') === '0' || voiceMode === 'off') return;
+  const t = String(text == null ? '' : text).trim();
+  if (!t) return;
+  speechQ.push(t);
+  while (speechQ.length > 6) speechQ.shift(); // never build a backlog monologue
+  updatePendingBadge();
+  pumpSpeech();
 }
 
-// The Jarvis voice: neural TTS from the server, browser voice as fallback.
-// The mic is suspended while he talks (self-hearing guard) and reopens after.
-async function speak(text) {
-  if (qs.get('voice') === '0' || voiceMode === 'off') return;
-  if (listening && rec) try { rec.abort(); } catch {} // never transcribe himself
-  if (ttsPrimed) {
-    try {
-      const r = await fetch('/tts?text=' + encodeURIComponent(String(text).slice(0, 1200)));
-      if (r.ok) {
-        const url = URL.createObjectURL(await r.blob());
-        jarvisAudio.src = url;
-        jarvisAudio.onplay = () => { S.speaking = true; updateOrbLabel(); };
-        jarvisAudio.onended = jarvisAudio.onerror = () => {
-          S.speaking = false; updateOrbLabel();
-          URL.revokeObjectURL(url);
-          scheduleRelisten();
-        };
-        await jarvisAudio.play();
+async function pumpSpeech() {
+  if (speechActive || !speechQ.length) return;
+  if (!ttsPrimed) { updatePendingBadge(); return; } // waits for the first tap
+  speechActive = true;
+  while (speechQ.length) {
+    if (listening && rec) try { rec.abort(); } catch {} // never transcribe himself
+    const text = speechQ.shift();
+    updatePendingBadge();
+    try { await speakOnce(text); } catch { /* keep the queue moving */ }
+  }
+  speechActive = false;
+  scheduleRelisten(); // reopen the ear once the whole queue has drained
+}
+
+async function speakOnce(text) {
+  // After 10 minutes on backup, quietly try the neural voice again.
+  if (voiceEngine === 'backup' && Date.now() - backupSince > 600000) voiceEngine = 'neural';
+  if (voiceEngine === 'neural') {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let reason = 'api_error';
+      try {
+        const r = await fetch('/tts?text=' + encodeURIComponent(text.slice(0, 1200)));
+        if (r.ok) {
+          ttsFailStreak = 0; setVoiceBadge('');
+          await playNeural(await r.blob());
+          return;
+        }
+        try { reason = (await r.json()).reason || reason; } catch {}
+      } catch { /* network — treat as api_error */ }
+      ttsFailStreak++;
+      if (reason === 'budget' || reason === 'unconfigured' || ttsFailStreak >= 3) {
+        enterBackupVoice(reason, text);
         return;
       }
-    } catch { /* fall through to browser voice */ }
+      if (attempt === 0) {
+        setVoiceBadge('⚠ VOICE LINK — RETRYING');
+        await new Promise(r => setTimeout(r, 800));
+      } else {
+        // Transient blip: the text is already on screen — skip this one's audio
+        // rather than surprise him with a different voice.
+        setVoiceBadge('⚠ VOICE LINK ERROR');
+      }
+    }
+    return;
   }
-  speakBrowser(text);
+  await speakBrowserAsync(text);
 }
+
+function enterBackupVoice(reason, pendingText) {
+  const announce = voiceEngine !== 'backup';
+  voiceEngine = 'backup'; backupSince = Date.now(); ttsFailStreak = 0;
+  setVoiceBadge('⚠ BACKUP VOICE');
+  if (pendingText) speechQ.unshift(pendingText);
+  if (announce) speechQ.unshift(reason === 'budget'
+    ? 'Neural voice budget exhausted for today, sir — switching to the backup voice.'
+    : 'Neural voice link unavailable, sir — switching to the backup voice.');
+  updatePendingBadge();
+}
+
+function playNeural(blob) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    let done = false;
+    const finish = () => {
+      if (done) return; done = true;
+      S.speaking = false; updateOrbLabel();
+      URL.revokeObjectURL(url);
+      resolve();
+    };
+    jarvisAudio.src = url;
+    jarvisAudio.onplay = () => { S.speaking = true; updateOrbLabel(); };
+    jarvisAudio.onended = jarvisAudio.onerror = jarvisAudio.onpause = finish;
+    jarvisAudio.play().catch(finish);
+  });
+}
+
+function speakBrowserAsync(text) {
+  return new Promise((resolve) => {
+    if (!window.speechSynthesis) return resolve();
+    speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
+    const u = new SpeechSynthesisUtterance(text);
+    const v = voiceCache.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur/i.test(v.name)) || voiceCache.find(v => /en-GB/i.test(v.lang)) || voiceCache[0];
+    if (v) u.voice = v;
+    u.rate = 1.02; u.pitch = 0.9;
+    let done = false;
+    const finish = () => { if (done) return; done = true; S.speaking = false; updateOrbLabel(); resolve(); };
+    u.onstart = () => { S.speaking = true; updateOrbLabel(); };
+    u.onend = u.onerror = finish;
+    setTimeout(finish, 1500 + text.length * 90); // belt & braces: never wedge the queue
+    speechSynthesis.speak(u);
+  });
+}
+
+function setVoiceBadge(text) {
+  const b = $('voice-badge');
+  b.textContent = text;
+  b.classList.toggle('hidden', !text);
+}
+function updatePendingBadge() {
+  const el = $('voice-pending');
+  const n = speechQ.length;
+  const show = !ttsPrimed && n > 0 && voiceMode !== 'off';
+  el.classList.toggle('hidden', !show);
+  if (show) el.textContent = '🔇 ' + n + ' SPOKEN ' + (n === 1 ? 'MESSAGE' : 'MESSAGES') + ' WAITING — TAP TO HEAR';
+}
+
 function updateOrbLabel() {
   $('orb-label').textContent =
     S.speaking ? 'SPEAKING'
     : S.thinking ? 'THINKING'
-    : (voiceMode !== 'off' && !armed) ? 'TAP TO ARM VOICE'
+    : (voiceMode !== 'off' && !armed) ? ''
     : (voiceMode === 'live' && listening) ? 'LISTENING'
     : (voiceMode === 'wake' && listening) ? (Date.now() < awaitingCommand ? 'LISTENING' : 'SAY “JARVIS…”')
     : 'STANDBY';
+  $('arm-overlay').classList.toggle('hidden', !(voiceMode !== 'off' && !armed));
+  updateMicBtn();
 }
 
 // ── Command routing (shared by keyboard, voice, briefing button) ────────────
@@ -628,14 +811,25 @@ function sendCommand(c) {
 // starting with "Jarvis" (fuzzy — STT often hears "Java"/"drivers") becomes a
 // command. The mic never listens while Jarvis himself is speaking.
 const SRCls = window.SpeechRecognition || window.webkitSpeechRecognition;
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPadOS masquerades as Mac
+const SR_LANG = qs.get('lang') || localStorage.getItem('jarvis_lang') || 'en-NZ';
 let voiceMode = (qs.get('voice') === '0' || !SRCls) ? 'off'
   : (['wake', 'live', 'off'].includes(localStorage.getItem('jarvis_voice')) ? localStorage.getItem('jarvis_voice') : 'wake');
 let armed = false; // browsers require one user gesture before mic/audio work
-let stream = null, analyser = null, audioData = null;
+let stream = null, analyser = null, audioData = null; // mic level → listening halo
+let outAnalyser = null, outData = null;               // his own voice → speaking pulse
 let rec = null, listening = false, relistenTimer = null;
+let recGen = 0;        // stale-recognizer guard: old sessions can't double-start
+let srBackoff = 400;   // relisten delay; doubles on errors (cap 5s), resets on success
+let srRestarts = 0, lastSrError = '';
 let awaitingCommand = 0; // bare "Jarvis" → next utterance is the command until this ts
+let wakeHintUntil = 0;   // interim transcript matched the wake word — attentive visuals
 
-const WAKE_RE = /^(?:hey\s+)?(?:jarvis|javas?|jarvas|jarvi|drivers|davis)\b[,.!?]?\s*(.*)$/i;
+// Fuzzy on purpose: STT regularly mangles "Jarvis" — every variant here has
+// been seen in the wild or is a near-neighbour. Watch the HEARD line for new
+// mishears and add them.
+const WAKE_RE = /^(?:(?:hey|hi|ok|okay|oi)\s+)?(?:jarvis|javas?|jarvas|jarvi|jarvish?|jarves|jervis|gervais|harvis|drivers|davis)\b[,.!?]?\s*(.*)$/i;
 
 function armVoice() {
   if (armed || voiceMode === 'off') return;
@@ -645,7 +839,7 @@ function armVoice() {
   attachAnalyser();
 }
 
-async function attachAnalyser() { // orb level visualization — best effort
+async function attachAnalyser() { // mic level visualization — best effort
   if (analyser) return;
   try {
     stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -657,23 +851,110 @@ async function attachAnalyser() { // orb level visualization — best effort
   } catch { /* SR may still work; iOS grants it its own capture */ }
 }
 
+function attachOutputAnalyser() {
+  // Route the neural voice through an analyser so the core pulses to the REAL
+  // waveform. createMediaElementSource works once per element and reroutes all
+  // its audio — so: lazy, inside the first gesture, with resume guards, and a
+  // synthetic pulse fallback in the core loop if anything here throws.
+  if (outAnalyser) return;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaElementSource(jarvisAudio);
+    outAnalyser = ctx.createAnalyser(); outAnalyser.fftSize = 256;
+    src.connect(outAnalyser); outAnalyser.connect(ctx.destination);
+    outData = new Uint8Array(outAnalyser.frequencyBinCount);
+    const wake = () => { if (ctx.state === 'suspended') ctx.resume().catch(() => {}); };
+    wake();
+    jarvisAudio.addEventListener('play', wake);
+  } catch { outAnalyser = null; }
+}
+
+let chimeCtx = null, lastChime = 0;
+function ackChime() { // instant "I heard you" blip — zero latency, zero TTS cost
+  const now = Date.now();
+  if (now - lastChime < 1200) return;
+  lastChime = now;
+  try {
+    chimeCtx = chimeCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (chimeCtx.state === 'suspended') chimeCtx.resume().catch(() => {});
+    const o = chimeCtx.createOscillator(), g = chimeCtx.createGain();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(880, chimeCtx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(1320, chimeCtx.currentTime + 0.12);
+    g.gain.setValueAtTime(0.08, chimeCtx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, chimeCtx.currentTime + 0.25);
+    o.connect(g); g.connect(chimeCtx.destination);
+    o.start(); o.stop(chimeCtx.currentTime + 0.26);
+  } catch { /* purely cosmetic */ }
+}
+
+let heardTimer = null;
+function showHeard(text, ignored) { // failures must never be silent
+  const el = $('heard-line');
+  el.textContent = text ? (ignored ? 'HEARD (ignored): ' + text : 'HEARD: ' + text) : '';
+  el.classList.toggle('ignored', !!ignored);
+  el.style.opacity = '1';
+  clearTimeout(heardTimer);
+  if (text) heardTimer = setTimeout(() => { el.style.opacity = '0'; }, 4000);
+}
+
 function startListening() {
-  if (!SRCls || listening || voiceMode === 'off' || !armed || S.speaking) return;
+  if (!SRCls || listening || voiceMode === 'off' || !armed || S.speaking || speechActive) return;
+  if (qs.get('core')) return; // screenshot/QA state-forcing — no real mic
+  const gen = ++recGen;
   rec = new SRCls();
-  rec.lang = 'en-NZ'; rec.interimResults = false; rec.continuous = false;
+  rec.lang = SR_LANG;
+  // Desktop Chrome: one long-lived session (no wake-word dead zones) + interim
+  // transcripts. iOS webkit misbehaves on continuous — keep one-shot loop there.
+  rec.interimResults = !IS_IOS;
+  rec.continuous = !IS_IOS;
   let finalText = '';
-  rec.onstart = () => { listening = true; updateOrbLabel(); };
-  rec.onresult = (e) => { for (const r of e.results) if (r.isFinal) finalText += r[0].transcript; };
+  rec.onstart = () => { if (gen !== recGen) return; listening = true; updateOrbLabel(); };
+  rec.onresult = (e) => {
+    if (gen !== recGen) return;
+    srBackoff = 400; // session is healthy — reset the error backoff
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const r = e.results[i];
+      if (r.isFinal) {
+        const said = r[0].transcript.trim();
+        if (IS_IOS) finalText += ' ' + said;        // one-shot: act on onend
+        else if (said) handleUtterance(said);       // continuous: act immediately
+      } else interim += r[0].transcript;
+    }
+    interim = interim.trim();
+    if (interim) {
+      showHeard(interim, false);
+      if (voiceMode === 'wake' && WAKE_RE.test(interim) && Date.now() > wakeHintUntil) {
+        wakeHintUntil = Date.now() + 4000; // attentive glow + chime the instant "Jarvis" lands
+        ackChime();
+      }
+    }
+  };
   rec.onerror = (e) => {
+    if (gen !== recGen) return;
     if (e.error === 'no-speech' || e.error === 'aborted') return;
+    lastSrError = e.error || 'unknown';
+    srBackoff = Math.min(5000, srBackoff * 2);
     if (e.error === 'not-allowed') {
       addChat('JARVIS', 'Microphone permission is blocked, sir — allow it for this site in browser settings, then tap the voice button.');
       setVoiceMode('off');
+    } else if (e.error === 'service-not-allowed') {
+      addChat('JARVIS', IS_IOS
+        ? 'Speech recognition is unavailable, sir — enable Siri & Dictation in the iPhone Settings, then reopen the deck.'
+        : 'The speech service refused, sir — I will keep retrying.');
+    } else if (e.error === 'network') {
+      showHeard('SPEECH SERVICE UNREACHABLE — RETRYING', true);
+    } else if (e.error === 'audio-capture') {
+      showHeard('MICROPHONE UNAVAILABLE — RETRYING', true);
     }
   };
   rec.onend = () => {
+    if (gen !== recGen) return;
     listening = false; updateOrbLabel();
+    srRestarts++;
     const said = finalText.trim();
+    finalText = '';
     if (said) handleUtterance(said);
     scheduleRelisten(); // keep the ear open (guarded against his own voice)
   };
@@ -681,37 +962,51 @@ function startListening() {
 }
 
 function handleUtterance(said) {
-  if (voiceMode === 'live') return sendCommand(said);
+  if (voiceMode === 'live') { showHeard(said, false); return sendCommand(said); }
   const m = said.match(WAKE_RE);
   if (m) {
+    showHeard(said, false);
     const cmd = m[1].trim();
     if (cmd) return sendCommand(cmd);
     awaitingCommand = Date.now() + 15000;
+    updateOrbLabel();
     addChat('JARVIS', 'Sir?');
     return;
   }
   if (Date.now() < awaitingCommand) {
     awaitingCommand = 0;
+    showHeard(said, false);
     return sendCommand(said);
   }
-  // Not addressed to Jarvis — wake mode stays silent.
+  // Not addressed to Jarvis — shown dimmed so a mangled "Jarvis" is visible,
+  // and can be added to WAKE_RE.
+  showHeard(said, true);
 }
 
 function scheduleRelisten() {
   if (voiceMode === 'off' || !armed) return;
   clearTimeout(relistenTimer);
-  relistenTimer = setTimeout(() => { if (!listening && !S.speaking) startListening(); }, 400);
+  relistenTimer = setTimeout(() => { if (!listening && !S.speaking && !speechActive) startListening(); }, srBackoff);
 }
 
+// Chrome quietly kills long recognizer sessions; the watchdog reopens the ear.
+setInterval(() => {
+  if (armed && voiceMode !== 'off' && !listening && !S.speaking && !speechActive && !document.hidden) startListening();
+}, 3000);
+
 const MODE_LABEL = { wake: '👂 WAKE: “JARVIS…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };
+function updateMicBtn() {
+  $('btn-mic').classList.toggle('live', voiceMode === 'live');
+  $('btn-mic').textContent = (voiceMode !== 'off' && !armed) ? '👂 TAP TO ARM VOICE' : MODE_LABEL[voiceMode];
+}
 function setVoiceMode(mode, persist = true) {
   voiceMode = mode;
   if (persist) try { localStorage.setItem('jarvis_voice', mode); } catch {}
-  $('btn-mic').classList.toggle('live', mode === 'live');
-  $('btn-mic').textContent = MODE_LABEL[mode];
   if (mode === 'off') {
     clearTimeout(relistenTimer);
+    recGen++; // orphan any in-flight session
     if (rec) try { rec.abort(); } catch {}
+    listening = false;
     stopAllAudio();
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; analyser = null; }
   } else if (armed) {
@@ -733,6 +1028,23 @@ $('btn-mic').onclick = () => {
 };
 setVoiceMode(voiceMode, false); // reflect initial mode on the button/orb
 
+// ?voicedebug=1 — live voice pipeline panel (mode, errors, restarts, queue)
+if (qs.get('voicedebug') === '1') {
+  const dbg = document.createElement('div');
+  dbg.id = 'voice-debug'; dbg.className = 'mono';
+  document.body.appendChild(dbg);
+  setInterval(() => {
+    dbg.textContent =
+      'mode      ' + voiceMode + (armed ? ' · armed' : ' · NOT ARMED') +
+      '\nlistening ' + listening + '   speaking ' + S.speaking +
+      '\nlang      ' + SR_LANG + '   ios ' + IS_IOS +
+      '\nengine    ' + voiceEngine + '   primed ' + ttsPrimed +
+      '\nqueue     ' + speechQ.length + '   restarts ' + srRestarts +
+      '\nbackoff   ' + srBackoff + 'ms   lastErr ' + (lastSrError || '—') +
+      '\nawaitCmd  ' + Math.max(0, Math.round((awaitingCommand - Date.now()) / 1000)) + 's';
+  }, 500);
+}
+
 // ── Demo briefing ────────────────────────────────────────────────────────────
 let demoRunning = false;
 $('btn-demo').onclick = () => {
@@ -751,56 +1063,307 @@ $('btn-demo').onclick = () => {
   setTimeout(() => { demoRunning = false; }, 20000);
 };
 
-// ── Orb canvas ───────────────────────────────────────────────────────────────
+// ── The JARVIS neural core — a living brain, firing in colour ───────────────
+// ~144 neurons on a jittered 3D ellipsoid, k-nearest synapses drawn as curved
+// arcs, and a pool of glowing pulses that travel the synapses and cascade on
+// arrival — spreading activation: you watch a thought happen. Colour mix,
+// firing rate and travel speed follow deck state (idle / listening / thinking
+// / speaking / alert); SPEAKING pulses to the real output waveform when the
+// analyser is attached. Pure canvas 2D — additive sprite blits instead of
+// shadowBlur in the hot path, with a frame governor so iPhone holds 60fps.
 let level = 0;
-(function drawLoop() {
+let alertUntil = 0; // set by showAlert(); red wash until this timestamp
+(function neuralCore() {
   const cv = $('orb');
+  const FORCED = !!qs.get('core'); // QA captures: show full fidelity, no governor
+  const SMALL = Math.min(window.screen.width, window.screen.height) < 820;
+  const N = SMALL ? 84 : 144;
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // Vivid additive palette; index 5 is reserved for alerts.
+  const PAL = [[0,229,255],[139,92,246],[255,61,154],[255,181,71],[61,255,160],[255,77,106]];
+  const MIX = { // state → weighted colour picks (indices into PAL)
+    idle:      [0,0,0,1,1,4],
+    listening: [0,0,4,4,1,0],
+    thinking:  [2,2,3,3,1,2],
+    speaking:  [0,1,2,3,4,0],
+    alert:     [5,5,5,2,3,5],
+  };
+  const BASE = { // scaffolding/frame colour per state, eased between states
+    idle: [0,229,255], listening: [61,255,160], thinking: [216,110,255],
+    speaking: [80,235,255], alert: [255,77,106],
+  };
+
+  // Pre-rendered glow sprites — one per palette colour (the bloom, cheaply)
+  const sprites = PAL.map(([r,g,b]) => {
+    const s = document.createElement('canvas'); s.width = s.height = 64;
+    const c = s.getContext('2d');
+    const g2 = c.createRadialGradient(32,32,0,32,32,32);
+    g2.addColorStop(0,    'rgba(255,255,255,0.9)');
+    g2.addColorStop(0.25, 'rgba('+r+','+g+','+b+',0.85)');
+    g2.addColorStop(0.6,  'rgba('+r+','+g+','+b+',0.25)');
+    g2.addColorStop(1,    'rgba('+r+','+g+','+b+',0)');
+    c.fillStyle = g2; c.fillRect(0,0,64,64);
+    return s;
+  });
+
+  // Deterministic rand — the brain has the same anatomy every load
+  let seed = 9;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+
+  // Neurons: golden-angle ellipsoid (flattened — brain, not ball), jittered organic
+  const GA = Math.PI * (3 - Math.sqrt(5));
+  const pts = [];
+  for (let i = 0; i < N; i++) {
+    const y0 = 1 - (i / (N - 1)) * 2;
+    const rad = Math.sqrt(Math.max(0, 1 - y0 * y0));
+    const th = GA * i;
+    const j = 0.86 + rnd() * 0.3;
+    pts.push({
+      x: Math.cos(th) * rad * j + (rnd() - 0.5) * 0.08,
+      y: y0 * 0.82 * j + (rnd() - 0.5) * 0.08,
+      z: Math.sin(th) * rad * j + (rnd() - 0.5) * 0.08,
+      col: Math.floor(rnd() * 5), tw: rnd() * 7, flash: 0,
+    });
+  }
+
+  // Synapses: k-nearest neighbours as curved arcs + adjacency for cascades
+  const edges = [], adj = Array.from({ length: N }, () => []);
+  const seenEdge = new Set();
+  for (let i = 0; i < N; i++) {
+    const d = [];
+    for (let j2 = 0; j2 < N; j2++) if (j2 !== i) {
+      const dx = pts[i].x - pts[j2].x, dy = pts[i].y - pts[j2].y, dz = pts[i].z - pts[j2].z;
+      d.push([dx * dx + dy * dy + dz * dz, j2]);
+    }
+    d.sort((a, b) => a[0] - b[0]);
+    const k = 2 + (i % 3 === 0 ? 1 : 0);
+    for (let n2 = 0; n2 < k; n2++) {
+      const j2 = d[n2][1];
+      const key = Math.min(i, j2) + '|' + Math.max(i, j2);
+      if (seenEdge.has(key)) continue;
+      seenEdge.add(key);
+      adj[i].push(edges.length); adj[j2].push(edges.length);
+      edges.push({ a: i, b: j2, cp: (rnd() - 0.5) * 0.55 });
+    }
+  }
+
+  // Pulse pool — fixed size, zero allocation in the frame loop
+  const POOL = SMALL ? 120 : 200;
+  const pulses = Array.from({ length: POOL }, () => ({ on: false, e: 0, t: 0, sp: 1, dir: 1, col: 0, sz: 1 }));
+  function spawnPulse(eIdx, dir, col, sz) {
+    for (const p of pulses) if (!p.on) {
+      p.on = true; p.e = eIdx; p.dir = dir; p.t = dir > 0 ? 0 : 1;
+      p.sp = 0.7 + rnd() * 0.8; p.col = col; p.sz = sz || 1;
+      return;
+    }
+  }
+  const pickCol = (mix) => mix[Math.floor(rnd() * mix.length)];
+
+  const proj = new Array(N);
+  const ripples = [];
+  const base = { r: 0, g: 229, b: 255 };
+  let spawnAcc = 0, lastT = 0, lastRipple = 0, emaFrame = 16, raf = 0;
+
   const draw = (t) => {
-    requestAnimationFrame(draw);
+    raf = requestAnimationFrame(draw);
+    const frameStart = performance.now();
+    const dt = Math.min(50, lastT ? t - lastT : 16); lastT = t;
     const ctx = cv.getContext('2d');
     const Ssz = cv.width, cx = Ssz / 2, cy = Ssz / 2;
+
+    // state of mind
+    const now = Date.now();
+    const alert = now < alertUntil;
+    const attentive = now < awaitingCommand || now < wakeHintUntil;
+    const stName = alert ? 'alert' : S.speaking ? 'speaking' : S.thinking ? 'thinking'
+      : ((listening || attentive) ? 'listening' : 'idle');
+
+    // voice level — his real output while speaking, the mic while listening
     let lvl = 0;
-    if (analyser) { analyser.getByteFrequencyData(audioData); lvl = audioData.reduce((a, b) => a + b, 0) / audioData.length / 255; }
-    if (S.speaking) lvl = Math.max(lvl, 0.25 + 0.2 * Math.abs(Math.sin(t / 90)) + 0.1 * Math.random());
+    if (S.speaking && outAnalyser) {
+      outAnalyser.getByteFrequencyData(outData);
+      lvl = outData.reduce((a, b) => a + b, 0) / outData.length / 255;
+    }
+    if (S.speaking && lvl < 0.02) lvl = 0.25 + 0.2 * Math.abs(Math.sin(t / 90)) + 0.1 * Math.random();
+    if (!S.speaking && stName === 'listening' && analyser) {
+      analyser.getByteFrequencyData(audioData);
+      lvl = audioData.reduce((a, b) => a + b, 0) / audioData.length / 255;
+    }
     level += (lvl - level) * 0.15;
     const L = level;
+
+    // frame governor: degrade gracefully instead of stuttering
+    const perfMul = FORCED ? 1 : emaFrame > 30 ? 0.3 : emaFrame > 22 ? 0.6 : 1;
+
+    const tgt = BASE[stName];
+    base.r += (tgt[0] - base.r) * 0.07; base.g += (tgt[1] - base.g) * 0.07; base.b += (tgt[2] - base.b) * 0.07;
+    const C = Math.round(base.r) + ',' + Math.round(base.g) + ',' + Math.round(base.b);
+
     ctx.clearRect(0, 0, Ssz, Ssz);
-    const base = Ssz * 0.26;
-    const g = ctx.createRadialGradient(cx, cy, base * 0.2, cx, cy, base * (1.5 + L));
-    g.addColorStop(0, 'rgba(0,229,255,' + (0.30 + L * 0.5) + ')');
-    g.addColorStop(0.5, 'rgba(0,120,180,0.12)');
+    const R = Ssz * 0.30 * (1 + L * 0.18 + (attentive ? 0.04 : 0));
+    const speed = reduced ? 0 : (S.thinking ? 1.9 : attentive ? 1.3 : 1);
+    const yaw = t / 6200 * speed, pitch = 0.42 + Math.sin(t / 9000) * 0.12 * speed;
+    const sy = Math.sin(yaw), cyw = Math.cos(yaw), sp2 = Math.sin(pitch), cp2 = Math.cos(pitch);
+    const F = Ssz * 0.9;
+
+    // ambient glow
+    const g = ctx.createRadialGradient(cx, cy, R * 0.15, cx, cy, R * (1.7 + L));
+    g.addColorStop(0, 'rgba(' + C + ',' + (0.22 + L * 0.4) + ')');
+    g.addColorStop(0.55, 'rgba(' + C + ',0.06)');
     g.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, base * (1.6 + L), 0, 7); ctx.fill();
-    ctx.beginPath();
-    for (let i = 0; i <= 120; i++) {
-      const a = (i / 120) * Math.PI * 2;
-      const wob = Math.sin(a * 7 + t / 300) * 3 + Math.sin(a * 13 - t / 200) * 2;
-      const r = base + wob * (0.5 + L * 4) + L * Ssz * 0.05;
-      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R * (1.75 + L), 0, 7); ctx.fill();
+
+    // project all neurons
+    for (let i = 0; i < N; i++) {
+      const p = pts[i];
+      const x = p.x * cyw + p.z * sy, z1 = -p.x * sy + p.z * cyw;
+      const y = p.y * cp2 - z1 * sp2, z = p.y * sp2 + z1 * cp2;
+      const s = F / (F + z * R);
+      proj[i] = { x: cx + x * R * s, y: cy + y * R * s, z, s };
     }
-    ctx.closePath();
-    ctx.strokeStyle = 'rgba(0,229,255,' + (0.7 + L * 0.3) + ')'; ctx.lineWidth = 1.6; ctx.stroke();
-    for (let k = 0; k < 3; k++) {
-      const r2 = base * (1.18 + k * 0.16);
-      const off = t / (1400 + k * 600) * (k % 2 ? 1 : -1);
-      ctx.beginPath(); ctx.arc(cx, cy, r2, off, off + Math.PI * (0.5 + k * 0.3));
-      ctx.strokeStyle = 'rgba(0,229,255,' + (0.28 - k * 0.07) + ')'; ctx.lineWidth = 1; ctx.stroke();
+
+    // firing: spawn pulses by state
+    const RATE = stName === 'thinking' ? 80 : stName === 'speaking' ? 12 + L * 50
+      : stName === 'listening' ? 11 : stName === 'alert' ? 18 : 5;
+    spawnAcc += RATE * perfMul * (reduced ? 0.3 : 1) * dt / 1000;
+    while (spawnAcc >= 1) {
+      spawnAcc--;
+      spawnPulse(Math.floor(rnd() * edges.length), rnd() < 0.5 ? 1 : -1, pickCol(MIX[stName]), stName === 'thinking' ? 1.4 : 1);
     }
+
+    // static synapse web — faint scaffolding under the fireworks
+    if (perfMul === 1 || ((t / 16) | 0) % 2 === 0) {
+      ctx.lineWidth = 1;
+      for (let k = 0; k < edges.length; k++) {
+        const e = edges[k], a = proj[e.a], b = proj[e.b];
+        const depth = Math.max(0, 1 - (a.z + b.z + 2) / 4);
+        ctx.strokeStyle = 'rgba(' + C + ',' + (0.07 + depth * 0.14).toFixed(3) + ')';
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        ctx.beginPath(); ctx.moveTo(a.x, a.y);
+        ctx.quadraticCurveTo(mx - (b.y - a.y) * e.cp, my + (b.x - a.x) * e.cp, b.x, b.y);
+        ctx.stroke();
+      }
+    }
+
+    // pulses — glowing thoughts travelling the synapses (additive bloom)
+    ctx.globalCompositeOperation = 'lighter';
+    const spMul = S.thinking ? 2.2 : S.speaking ? 1.5 : 1;
+    for (const p of pulses) {
+      if (!p.on) continue;
+      p.t += p.dir * p.sp * spMul * dt / 900;
+      if (p.t <= 0 || p.t >= 1) {
+        const nodeIdx = p.t >= 1 ? edges[p.e].b : edges[p.e].a;
+        pts[nodeIdx].flash = 1;
+        // spreading activation — an arriving pulse can cascade into neighbours
+        const cascP = perfMul < 1 ? 0 : (S.thinking ? 0.7 : 0.3);
+        if (rnd() < cascP) {
+          const opts = adj[nodeIdx];
+          const e2 = opts[Math.floor(rnd() * opts.length)];
+          if (e2 !== undefined) spawnPulse(e2, edges[e2].a === nodeIdx ? 1 : -1, p.col, p.sz);
+        }
+        p.on = false; continue;
+      }
+      const e = edges[p.e], a = proj[e.a], b = proj[e.b];
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const qx = mx - (b.y - a.y) * e.cp, qy = my + (b.x - a.x) * e.cp;
+      const u = p.t, v = 1 - u;
+      const x = v * v * a.x + 2 * v * u * qx + u * u * b.x;
+      const y = v * v * a.y + 2 * v * u * qy + u * u * b.y;
+      const d2 = 16 * p.sz * ((a.s + b.s) / 2) * (1 + L * 0.5);
+      ctx.globalAlpha = 0.9;
+      ctx.drawImage(sprites[p.col], x - d2, y - d2, d2 * 2, d2 * 2);
+      // short comet trail — reads as motion even in a still frame
+      const u2 = Math.max(0, Math.min(1, u - p.dir * 0.07)), v2 = 1 - u2;
+      const tx = v2 * v2 * a.x + 2 * v2 * u2 * qx + u2 * u2 * b.x;
+      const ty = v2 * v2 * a.y + 2 * v2 * u2 * qy + u2 * u2 * b.y;
+      const d3 = d2 * 0.55;
+      ctx.globalAlpha = 0.4;
+      ctx.drawImage(sprites[p.col], tx - d3, ty - d3, d3 * 2, d3 * 2);
+    }
+    ctx.globalAlpha = 1;
+
+    // flashed neurons glow in their own colour, then decay
+    for (let i = 0; i < N; i++) {
+      const f = pts[i].flash;
+      if (f > 0.05) {
+        const q = proj[i], d2 = 16 * f * q.s;
+        ctx.globalAlpha = f * 0.9;
+        ctx.drawImage(sprites[pts[i].col], q.x - d2, q.y - d2, d2 * 2, d2 * 2);
+        ctx.globalAlpha = 1;
+      }
+      pts[i].flash *= Math.pow(0.9965, dt);
+    }
+    ctx.globalCompositeOperation = 'source-over';
+
+    // neurons — depth-shaded, twinkling
+    for (let i = 0; i < N; i++) {
+      const q = proj[i];
+      const depth = 1 - (q.z + 1) / 2;
+      const tw = 0.72 + 0.28 * Math.sin(t / 800 + pts[i].tw * 9);
+      ctx.fillStyle = 'rgba(' + C + ',' + ((0.14 + depth * 0.72) * tw).toFixed(3) + ')';
+      const rr = (0.9 + depth * 2.1) * q.s * (1 + L * 0.5);
+      ctx.beginPath(); ctx.arc(q.x, q.y, rr, 0, 7); ctx.fill();
+    }
+
+    // listening ripples — the ear is visibly open
+    if (stName === 'listening' && !reduced && now - lastRipple > (L > 0.2 ? 320 : 1400)) {
+      lastRipple = now; ripples.push({ r: R * 0.5, a: 0.5 });
+    }
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const rp = ripples[i];
+      rp.r += dt * R * 0.0012 * (1 + L); rp.a -= dt * 0.0005;
+      if (rp.a <= 0) { ripples.splice(i, 1); continue; }
+      ctx.strokeStyle = 'rgba(' + C + ',' + rp.a.toFixed(3) + ')';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(cx, cy, rp.r, 0, 7); ctx.stroke();
+    }
+
+    // awaiting-command countdown arc (the 15s "Sir?" window)
+    if (now < awaitingCommand) {
+      const frac = (awaitingCommand - now) / 15000;
+      ctx.strokeStyle = 'rgba(61,255,160,0.8)'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(cx, cy, R * 1.3, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2); ctx.stroke();
+    }
+
+    // outer ticks ring (HUD framing, kept from the original design)
     for (let i = 0; i < 60; i++) {
-      const a = (i / 60) * Math.PI * 2 + t / 9000;
-      const r1 = base * 1.62, r2b = base * 1.62 + (i % 5 === 0 ? 7 : 3);
+      const a2 = (i / 60) * Math.PI * 2 + (reduced ? 0 : t / 9000);
+      const r1 = R * 1.42, r2b = r1 + (i % 5 === 0 ? 7 : 3);
       ctx.beginPath();
-      ctx.moveTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1);
-      ctx.lineTo(cx + Math.cos(a) * r2b, cy + Math.sin(a) * r2b);
-      ctx.strokeStyle = 'rgba(0,229,255,0.18)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.moveTo(cx + Math.cos(a2) * r1, cy + Math.sin(a2) * r1);
+      ctx.lineTo(cx + Math.cos(a2) * r2b, cy + Math.sin(a2) * r2b);
+      ctx.strokeStyle = 'rgba(' + C + ',0.18)'; ctx.lineWidth = 1; ctx.stroke();
     }
-    ctx.beginPath(); ctx.arc(cx, cy, base * 0.24 + L * 10, 0, 7);
-    ctx.fillStyle = 'rgba(180,250,255,' + (0.75 + L * 0.25) + ')';
-    ctx.shadowColor = '#00e5ff'; ctx.shadowBlur = 24 + L * 40;
-    ctx.fill(); ctx.shadowBlur = 0;
+
+    // nucleus — white-hot centre with a coloured sprite halo (no shadowBlur)
+    ctx.globalCompositeOperation = 'lighter';
+    const hd = R * 0.34 + L * 22;
+    ctx.drawImage(sprites[stName === 'alert' ? 5 : stName === 'thinking' ? 2 : stName === 'listening' ? 4 : 0],
+      cx - hd, cy - hd, hd * 2, hd * 2);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.beginPath(); ctx.arc(cx, cy, R * 0.13 + L * 10, 0, 7);
+    ctx.fillStyle = 'rgba(234,255,255,' + (0.8 + L * 0.2) + ')';
+    ctx.fill();
+
+    // red wash while an alert lands — soft radial breath, never a hard disc
+    if (alert) {
+      const wa = 0.16 + 0.08 * Math.sin(t / 120);
+      const wg = ctx.createRadialGradient(cx, cy, R * 0.1, cx, cy, R * 1.7);
+      wg.addColorStop(0, 'rgba(255,77,106,' + wa.toFixed(3) + ')');
+      wg.addColorStop(0.6, 'rgba(255,77,106,' + (wa * 0.35).toFixed(3) + ')');
+      wg.addColorStop(1, 'rgba(255,77,106,0)');
+      ctx.fillStyle = wg;
+      ctx.beginPath(); ctx.arc(cx, cy, R * 1.7, 0, 7); ctx.fill();
+    }
+
+    emaFrame = emaFrame * 0.95 + (performance.now() - frameStart) * 0.05;
   };
-  requestAnimationFrame(draw);
+  raf = requestAnimationFrame(draw);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { cancelAnimationFrame(raf); lastT = 0; }
+    else raf = requestAnimationFrame(draw);
+  });
 })();
 
 // ── Simulation (design's fallback — runs whenever the live link is down) ────
@@ -957,6 +1520,48 @@ function handleMsg(m) {
   else if (m.type === 'chat_chunk') onChatChunk(m.text);
   else if (m.type === 'chat') onChatFinal(m);
   else if (m.type === 'notify') showAlert(m.level, m.title, m.speech);
+  else if (m.type === 'briefing' && m.data) showBriefing(m.data);
+}
+
+// ── Morning-briefing panel ({type:'briefing'} from the server) ──────────────
+function showBriefing(d) {
+  const box = $('briefing');
+  const row = (dot, name, extra, extraColor) =>
+    '<div class="brief-row"><span style="color:' + dot + '">●</span>' +
+    '<span style="font-weight:700;color:#eaffff">' + name + '</span>' +
+    (extra ? '<span class="mono" style="color:' + (extraColor || '#7d99aa') + '">' + extra + '</span>' : '') + '</div>';
+  let html = '<div class="brief-card"><div class="brief-h">' +
+    '<div style="font-family:\'Michroma\',sans-serif;font-size:14px;letter-spacing:4px;color:#eaffff">BRIEFING</div>' +
+    '<div class="mono" style="font-size:11px;color:#6b8a9e">' + new Date(d.date).toLocaleString('en-NZ', { dateStyle: 'full' }) + '</div>' +
+    '<div id="brief-close" role="button" tabindex="0" style="margin-left:auto;cursor:pointer;color:#6b8a9e;font-size:20px;padding:0 6px">✕</div></div>';
+  if (d.healthy?.length) {
+    html += '<div class="brief-sec">HEALTHY · ' + d.healthy.length + '</div>' +
+      d.healthy.map(p => row('#3dffa0', p.name, p.score ? p.score + '/100' : '')).join('');
+  }
+  if (d.attention?.length) {
+    html += '<div class="brief-sec" style="color:#ffb547">NEEDS ATTENTION · ' + d.attention.length + '</div>' +
+      d.attention.map(p => row('#ffb547', p.name, p.issue || (p.score ? p.score + '/100' : ''), '#ffb547')).join('');
+  }
+  if (d.unaudited?.length) {
+    html += '<div class="brief-sec">NOT YET AUDITED</div>' +
+      d.unaudited.map(n => row('#5f7a8c', n, '')).join('');
+  }
+  if (d.jobs?.length) {
+    html += '<div class="brief-sec" style="color:#00e5ff">RUNNING NOW · ' + d.jobs.length + '</div>' +
+      d.jobs.map(j => row('#00e5ff', j.platform, j.task)).join('');
+  }
+  if (d.openIssues) {
+    html += '<div class="brief-sec" style="color:#ffb547">⚠ ' + d.openIssues + ' UNRESOLVED ISSUES IN MEMORY</div>';
+  }
+  html += '</div>';
+  box.innerHTML = html;
+  box.classList.add('open');
+  const close = () => box.classList.remove('open');
+  $('brief-close').onclick = close;
+  box.onclick = (e) => { if (e.target === box) close(); };
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+  });
 }
 
 // ── Spoken alert banner (warn/alert notifications, announced aloud) ─────────
@@ -970,6 +1575,7 @@ function showAlert(level, title, speech) {
   $('alerts').appendChild(el);
   setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 8000);
   while ($('alerts').children.length > 3) $('alerts').firstChild.remove();
+  alertUntil = Date.now() + 3000; // the brain flashes red while the alert lands
   speak(speech || title);
 }
 
@@ -985,7 +1591,28 @@ $('cmd').addEventListener('keydown', (e) => {
 // ── Boot ─────────────────────────────────────────────────────────────────────
 // ?demo-alert=1 renders a sample alert banner (screenshot/QA hook — the live
 // path is WS {type:'notify'}, which virtual-time captures can never witness).
+// ?core=idle|listening|thinking|speaking|alert — force the neural core into a
+// state at boot (pair with &voice=0 so nothing speaks; startListening() also
+// no-ops under ?core so no real mic is touched in headless captures).
+const forceCore = qs.get('core');
+if (forceCore) {
+  armed = true; ttsPrimed = true;
+  if (forceCore === 'thinking') S.thinking = true;
+  if (forceCore === 'listening') { listening = true; awaitingCommand = Date.now() + 60000; }
+  if (forceCore === 'speaking') S.speaking = true;
+  if (forceCore === 'alert') alertUntil = Date.now() + 60000;
+  updateOrbLabel();
+  if (forceCore !== 'idle') $('orb-label').textContent = forceCore.toUpperCase();
+}
 if (qs.get('demo-alert')) showAlert('alert', '⬢ SAMPLE ALERT — vapron.ai DOWN 3 min, self-heal dispatched', '');
+if (qs.get('demo-briefing')) showBriefing({
+  date: new Date().toISOString(),
+  healthy: [{ name: 'zoobicon', score: 95 }, { name: 'gatetest', score: 92 }, { name: 'alecrae', score: 100 }],
+  attention: [{ name: 'vapron', score: 61, issue: 'latency spikes — self-heal fired 4× overnight' }],
+  unaudited: ['davenroe', 'marcoreid'],
+  openIssues: 3,
+  jobs: [{ platform: 'vapron', task: 'AUTONOMOUS SELF-HEAL — verify https 200' }],
+});
 addChat('JARVIS', 'Good evening, sir. Command Deck online. Establishing live link…');
 startSim();
 renderStats();

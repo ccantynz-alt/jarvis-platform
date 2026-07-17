@@ -1,0 +1,37 @@
+// Jarvis fleet Tailscale ACL — makes the tailnet INFRASTRUCTURE, not a personal
+// device group, so boxes join headlessly and Jarvis can SSH box→box with no
+// interactive browser check. Paste into the Tailscale admin console
+// (Access controls). HuJSON (comments allowed).
+{
+  // tag:server = a fleet box owned/managed by the account admin.
+  "tagOwners": {
+    "tag:server": ["autogroup:admin"]
+  },
+
+  // Network connectivity: keep it open within the tailnet (tighten later if
+  // you want per-service microsegmentation).
+  "acls": [
+    { "action": "accept", "src": ["*"], "dst": ["*:*"] }
+  ],
+
+  "ssh": [
+    // THE KEY RULE: a fleet box may SSH another fleet box with NO interactive
+    // check. This is what lets Jarvis (running on tag:server) reach 158 / a
+    // standby / a new box while Craig is unreachable.
+    {
+      "action": "accept",
+      "src": ["tag:server"],
+      "dst": ["tag:server"],
+      "users": ["autogroup:nonroot", "root"]
+    },
+
+    // Craig's personal devices (laptop/phone/iPad) keep the interactive check
+    // when THEY initiate SSH — human sessions stay gated, automation does not.
+    {
+      "action": "check",
+      "src": ["autogroup:member"],
+      "dst": ["tag:server"],
+      "users": ["autogroup:nonroot", "root"]
+    }
+  ]
+}

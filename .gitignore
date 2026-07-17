@@ -12,4 +12,4 @@ visual-baselines/
 deploy-gate-workspace/
 backups/
 config/secrets.env.bak.*
-config/*.bak.*
+*.bak.*
