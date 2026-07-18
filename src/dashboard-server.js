@@ -387,7 +387,7 @@ app.get('/api/platform-status', async (req, res) => {
   } catch {}
 
   // Last screenshot per platform
-  const SCREENSHOT_DIR = '/root/jarvis-screenshots';
+  const SCREENSHOT_DIR = '/opt/jarvis/screenshots';
   let latestScreenshots = {};
   try {
     readdirSync(SCREENSHOT_DIR)

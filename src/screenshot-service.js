@@ -6,15 +6,15 @@ import { createHash } from 'crypto';
 import express from 'express';
 import { notify } from './lib/notify.js';
 
-mkdirSync('/root/jarvis-screenshots', { recursive: true });
-mkdirSync('/root/jarvis-baselines', { recursive: true });
+mkdirSync('/opt/jarvis/screenshots', { recursive: true });
+mkdirSync('/opt/jarvis/visual-baselines', { recursive: true });
 
-const BASELINE_DIR = '/root/jarvis-baselines';
+const BASELINE_DIR = '/opt/jarvis/visual-baselines';
 
 const app = express();
 app.use(express.json());
 
-const SCREENSHOT_DIR = '/root/jarvis-screenshots';
+const SCREENSHOT_DIR = '/opt/jarvis/screenshots';
 
 function detectChromium() {
   for (const bin of ['google-chrome', 'google-chrome-stable', 'chromium-browser', 'chromium']) {

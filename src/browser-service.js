@@ -29,7 +29,7 @@ const MAX_TEXT = 6000;           // chars of page text handed back to the brain
 const MAX_LINKS = 40;
 const MAX_REDIRECTS = 5;
 const MAX_CONCURRENT_RENDER = 2;
-const SHOT_DIR = '/root/jarvis-screenshots';
+const SHOT_DIR = '/opt/jarvis/screenshots';
 const AUDIT = '/opt/jarvis/logs/browser-audit.jsonl';
 
 mkdirSync(SHOT_DIR, { recursive: true });
