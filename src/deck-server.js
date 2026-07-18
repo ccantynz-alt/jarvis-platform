@@ -15,8 +15,9 @@
  * (Coolify's Traefik publishes :8080) and unacceptable publicly (the deck
  * accepts commands). Same-origin /jarvis behind the tailnet + token instead.
  *
- * Auth: JARVIS_DECK_TOKEN, falling back to JARVIS_GATEWAY_TOKEN (same audience
- * — Craig's tailnet devices). Cookie bootstrap via /?token=… like the gateway.
+ * Auth: JARVIS_DECK_TOKEN only — deliberately NOT shared with the gateway, so
+ * a leaked gateway credential can't open the deck (and vice versa). Cookie
+ * bootstrap via /?token=… like the gateway.
  *
  * Every number pushed to the deck is real:
  *   agents    ← :9209/org (role-agent registry) + :9205 running jobs
@@ -31,7 +32,7 @@
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, timingSafeEqual, randomBytes } from 'crypto';
 import { readFileSync, writeFileSync } from 'fs';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
@@ -42,7 +43,23 @@ const SCHEDULER = 'http://127.0.0.1:9209';
 
 // ── Auth (gateway-server.js pattern — fail closed) ───────────────────────────
 
-const AUTH_TOKEN     = process.env.JARVIS_DECK_TOKEN || process.env.JARVIS_GATEWAY_TOKEN || '';
+// Token resolution: env override → config/deck.token → self-provision.
+// The deck mints its own credential on first boot so it never has to share
+// the gateway's; rotate by deleting the file and restarting.
+const TOKEN_FILE = '/opt/jarvis/config/deck.token';
+const AUTH_TOKEN = (() => {
+  if (process.env.JARVIS_DECK_TOKEN) return process.env.JARVIS_DECK_TOKEN;
+  try { const t = readFileSync(TOKEN_FILE, 'utf8').trim(); if (t) return t; } catch {}
+  const fresh = randomBytes(32).toString('hex');
+  try {
+    writeFileSync(TOKEN_FILE, fresh + '\n', { mode: 0o600 });
+    console.log('[jarvis-deck] minted new deck token → config/deck.token');
+    return fresh;
+  } catch (err) {
+    console.error(`[jarvis-deck] cannot persist deck token (${err.message}) — auth disabled, failing closed`);
+    return '';
+  }
+})();
 const AUTH_COOKIE    = 'jarvis_deck_auth';
 const COOKIE_MAX_AGE = 30 * 24 * 60 * 60;
 
@@ -67,10 +84,7 @@ function requestToken(req) {
   const header = String(req.headers.authorization || '');
   if (header.startsWith('Bearer ')) return header.slice(7).trim();
   const cookies = parseCookies(req.headers.cookie);
-  // Accept the Gateway's cookie too: browsers share cookies across ports on
-  // the same host, so a device already signed in to the Gateway (:8443) is
-  // automatically signed in to the Deck (:8444) — no second token dance.
-  return cookies[AUTH_COOKIE] || cookies['jarvis_gw_auth'] || null;
+  return cookies[AUTH_COOKIE] || null;
 }
 
 // Direct loopback call (screenshot service, health checks) — no proxy hop.
@@ -174,8 +188,8 @@ app.get('/', (req, res) => {
 </svg>
 <div style="font-size:22px;letter-spacing:6px;color:#00e5ff">JARVIS</div>
 <p style="color:#8fb3c4;max-width:34em;line-height:1.6">This device isn't signed in yet.<br>
-Open the Gateway once on this device (its login also unlocks the Deck),<br>
-or append <b style="color:#00e5ff">/?token=&lt;your token&gt;</b> to this address one time.</p></div></body></html>`);
+Append <b style="color:#00e5ff">/?token=&lt;deck token&gt;</b> to this address one time<br>
+(the deck token lives in <b style="color:#00e5ff">config/deck.token</b> on the box — Gateway logins no longer unlock the Deck).</p></div></body></html>`);
   }
   res.set('Cache-Control', 'no-cache, must-revalidate');
   res.sendFile('/opt/jarvis/public/command-deck.html');
@@ -573,7 +587,7 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
   const cookies = parseCookies(req.headers.cookie);
-  const authed = tokenMatches(cookies[AUTH_COOKIE] || cookies['jarvis_gw_auth']);
+  const authed = tokenMatches(cookies[AUTH_COOKIE]);
   if (!authed && !(req.socket.remoteAddress?.includes('127.0.0.1') && !req.headers['x-forwarded-for'])) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();
