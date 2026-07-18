@@ -603,6 +603,17 @@ function broadcast(obj) {
   }
 }
 
+// Protocol-level keepalive: a client that misses a whole ping round is gone —
+// terminate so wss.clients (and the deck's own liveness view) stays honest.
+const KEEPALIVE = setInterval(() => {
+  for (const client of wss.clients) {
+    if (client.isAlive === false) { client.terminate(); continue; }
+    client.isAlive = false;
+    try { client.ping(); } catch {}
+  }
+}, 30000);
+wss.on('close', () => clearInterval(KEEPALIVE));
+
 // One rolling conversation shared across devices/reloads, persisted in memory
 // KV so Jarvis remembers context between sessions. runAgent() mutates and
 // bounds the array itself (last 24 messages).
@@ -631,6 +642,8 @@ function saveTranscript() {
 wss.on('connection', (ws, req) => {
   const user = req.headers['tailscale-user-login'] || 'local';
   console.log(`[deck] client connected (${user}) — ${wss.clients.size} online`);
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
 
   // Initial burst so every view is populated instantly
   const send = (o) => ws.readyState === 1 && ws.send(JSON.stringify(o));
@@ -645,6 +658,7 @@ wss.on('connection', (ws, req) => {
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
+    if (msg.type === 'ping') return ws.readyState === 1 && ws.send('{"type":"pong"}');
     if (msg.type !== 'command') return;
     const text = String(msg.text || '').trim();
     if (!text) return;

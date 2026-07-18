@@ -151,6 +151,8 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   .agent-tile,.chat-msg,.feed-line,.wire-line{animation:none !important;opacity:1}
   *{transition-duration:1ms !important}
 }
+/* Live-link lost: telemetry is stale, say so with pixels — never fake it */
+.stale{opacity:.35;filter:grayscale(.7) saturate(.4);pointer-events:none;transition:opacity .4s}
 </style>
 </head>
 <body>
@@ -214,7 +216,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
       <div style="display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0">
         <div class="section-label">LIVE OPERATIONS FEED</div>
         <div id="feed" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:6px;border:1px solid rgba(0,229,255,.1);background:rgba(8,14,24,.6);border-radius:4px;padding:10px;min-height:200px"></div>
-        <div class="statbox">
+        <div class="statbox" id="statbox">
           <div><span class="lbl">MSG/MIN</span><div style="font-size:20px;color:#00e5ff" id="stat-msg">0</div></div>
           <div><span class="lbl">QUEUE DEPTH</span><div style="font-size:20px;color:#ffb547" id="stat-queue">0</div></div>
           <div><span class="lbl">TASKS DONE</span><div style="font-size:20px;color:#3dffa0" id="stat-tasks">0</div></div>
@@ -267,7 +269,8 @@ const qs = new URLSearchParams(location.search);
 const S = {
   view: 'core', link: 'SIM', mic: false, speaking: false,
   agents: [], queues: [], platforms: [], org: null,
-  msgRate: 84, queueDepth: 12, tasksDone: 3412, uptime: '—',
+  // Real values arrive over the live link; SIM seeds these only under ?sim=1.
+  msgRate: 0, queueDepth: 0, tasksDone: 0, uptime: '—',
   bootTs: Date.now(),
 };
 const dotFor = (st) => st === 'ACTIVE' ? '#3dffa0' : (st === 'REVIEW' ? '#ffb547' : '#5f7a8c');
@@ -1477,31 +1480,62 @@ function simReply(cmd) {
 }
 
 // ── Live link ────────────────────────────────────────────────────────────────
-let ws = null, retryTimer = null;
-const WS_URL = qs.get('ws') ||
+// SIM (fake demo telemetry) only ever runs with ?sim=1. Without it, a lost
+// link shows RECONNECTING + dimmed panels — never invented numbers.
+let ws = null, retryTimer = null, retryDelay = 1000, lastMsgAt = 0;
+const SIM_MODE    = qs.get('sim') === '1';
+const WS_DISABLED = qs.get('ws') === '0';   // QA hook: deterministic offline state
+const WS_URL = (!WS_DISABLED && qs.get('ws')) ||
   ((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/jarvis');
+
+const STALE_IDS = ['hud-left', 'feed', 'wire', 'queues', 'platforms', 'statbox'];
+function markStale(on) {
+  for (const id of STALE_IDS) { const el = $(id); if (el) el.classList.toggle('stale', on); }
+}
 
 function setLink(mode) {
   S.link = mode;
   const b = $('link-badge');
   if (mode === 'LIVE') { b.textContent = '⬢ LIVE LINK'; b.style.color = '#3dffa0'; b.style.borderColor = '#3dffa0'; }
-  else { b.textContent = '⬡ SIMULATION'; b.style.color = '#ffb547'; b.style.borderColor = '#ffb547'; }
+  else if (mode === 'SIM') { b.textContent = '⬡ SIMULATION'; b.style.color = '#ffb547'; b.style.borderColor = '#ffb547'; }
+  else { b.textContent = '⬡ RECONNECTING'; b.style.color = '#ff5d5d'; b.style.borderColor = '#ff5d5d'; }
 }
 function connectWS() {
+  if (WS_DISABLED) {
+    if (SIM_MODE) { setLink('SIM'); } else { setLink('DOWN'); markStale(true); }
+    return;
+  }
   try { ws = new WebSocket(WS_URL); } catch (e) { scheduleReconnect(); return; }
   ws.onopen = () => {
     stopSim();
+    retryDelay = 1000;
+    lastMsgAt = Date.now();
+    markStale(false);
     setLink('LIVE');
-    addChat('JARVIS', 'Live link established, sir. Simulation disengaged — you are seeing real telemetry.');
+    addChat('JARVIS', 'Live link established, sir. You are seeing real telemetry.');
   };
-  ws.onmessage = (ev) => { try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
+  ws.onmessage = (ev) => { lastMsgAt = Date.now(); try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
   ws.onclose = () => {
-    if (S.link === 'LIVE') { setLink('SIM'); startSim(); }
+    if (SIM_MODE) { setLink('SIM'); startSim(); }
+    else if (S.link !== 'DOWN') { setLink('DOWN'); markStale(true); }
     scheduleReconnect();
   };
   ws.onerror = () => {};
 }
-function scheduleReconnect() { clearTimeout(retryTimer); retryTimer = setTimeout(connectWS, 8000); }
+function scheduleReconnect() {
+  if (WS_DISABLED) return;
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(connectWS, retryDelay);
+  retryDelay = Math.min(retryDelay * 2, 30000);
+}
+// Heartbeat watchdog: a silent-but-open socket is a dead link. 45s idle →
+// app-level ping; 60s idle → close so onclose/reconnect fire immediately.
+setInterval(() => {
+  if (!ws || ws.readyState !== 1 || SIM_MODE || WS_DISABLED) return;
+  const idle = Date.now() - lastMsgAt;
+  if (idle > 60000) { try { ws.close(); } catch (e) {} }
+  else if (idle > 45000) { try { ws.send(JSON.stringify({ type: 'ping' })); } catch (e) {} }
+}, 15000);
 
 function handleMsg(m) {
   if (m.type === 'agents' && Array.isArray(m.agents)) { S.agents = m.agents; renderAgents(); if (S.view === 'org' && !S.org) renderOrg(); }
@@ -1614,7 +1648,7 @@ if (qs.get('demo-briefing')) showBriefing({
   jobs: [{ platform: 'vapron', task: 'AUTONOMOUS SELF-HEAL — verify https 200' }],
 });
 addChat('JARVIS', 'Good evening, sir. Command Deck online. Establishing live link…');
-startSim();
+if (SIM_MODE) startSim();
 renderStats();
 connectWS();
 </script>
