@@ -32,8 +32,8 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
 import { spawn } from 'child_process';
-import { resolveIntent, runIntent, platformNames, loadRoadmap } from './lib/conversation.js';
-import { runAgent, hasAgent, maybeBrainSwitch } from './lib/agent.js';
+import { resolveIntent, runIntent, resolveDispatchGate, platformNames, loadRoadmap } from './lib/conversation.js';
+import { runAgent, hasAgent, maybeBrainSwitch, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { notify } from './lib/notify.js';
 
 const PORT         = 9208;
@@ -91,38 +91,21 @@ app.get('/health', (_req, res) => {
 });
 
 // Token bootstrap: /?token=... sets the cookie once per device, then redirects clean.
-app.get('/', (req, res, next) => {
-  if (req.query.token !== undefined) {
-    if (!tokenMatches(req.query.token)) return res.status(403).send('Forbidden');
-    res.setHeader('Set-Cookie',
-      `${AUTH_COOKIE}=${encodeURIComponent(req.query.token)}; Max-Age=${COOKIE_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax; Secure`);
-    return res.redirect('/');
-  }
-  if (!isAuthed(req)) return res.status(403).send('Forbidden — open /?token=<JARVIS_GATEWAY_TOKEN> once on this device');
-  next();
-});
-
-app.get('/', (_req, res) => {
-  // iOS home-screen PWAs cache aggressively — force revalidation so UI fixes
-  // actually reach devices without a manual hard-refresh.
-  res.set('Cache-Control', 'no-cache, must-revalidate');
-  res.sendFile('/opt/jarvis/public/gateway.html');
-});
+// CONSOLIDATED (2026-07-17): the Command Deck is the one Jarvis. This old voice
+// UI now forwards there, so any old bookmark/home-screen icon lands on the Deck.
+// The internal endpoints below (/ws, /internal/notify, /health) are unchanged —
+// the gateway server keeps running for notification fan-out, it just no longer
+// serves a separate human page.
+const DECK_URL = 'https://jarvis.tailbd6217.ts.net:8444/';
+app.get('/', (_req, res) => res.redirect(302, DECK_URL));
 
 app.get('/icon-180.png', (req, res) => {
   if (!isAuthed(req)) return res.status(403).end();
   res.sendFile('/opt/jarvis/public/icon-180.png');
 });
 
-// Jarvis avatar scene (hybrid visual: AI-rendered loop + code-driven reactive glow)
-app.get('/jarvis-bg.mp4', (req, res) => {
-  if (!isAuthed(req)) return res.status(403).end();
-  res.sendFile('/opt/jarvis/public/jarvis-bg.mp4'); // sendFile handles Range (needed by iOS video)
-});
-app.get('/jarvis-bg.jpg', (req, res) => {
-  if (!isAuthed(req)) return res.status(403).end();
-  res.sendFile('/opt/jarvis/public/jarvis-bg.jpg');
-});
+// (Removed dead /jarvis-bg.mp4 + .jpg routes — leftovers from the rejected
+// video-avatar experiment; no client references them and the assets are gone.)
 
 // ── Internal endpoints (other Jarvis services / tailnet peers) ───────────────
 
@@ -327,6 +310,7 @@ wss.on('connection', (ws, req) => {
   const user = req.headers['tailscale-user-login'] || 'local';
   console.log(`[gateway] client connected (${user}) — ${wss.clients.size} online`);
   const transcript = []; // per-connection conversational memory (converse mode)
+  const dispatchGate = { turn: 0, pending: null }; // dispatch confirmation gate (per connection)
 
   ws.send(JSON.stringify({ type: 'hello', platforms: platformNames() }));
 
@@ -359,6 +343,7 @@ wss.on('connection', (ws, req) => {
     if (msg.type === 'utterance') {
       const text = String(msg.text || '').trim();
       if (!text) return;
+      dispatchGate.turn++; // each utterance is one human turn (dispatch gate)
       const t0 = Date.now();
 
       try {
@@ -378,18 +363,40 @@ wss.on('connection', (ws, req) => {
           return ws.send(JSON.stringify({ type: 'reply', text: switched, speech: switched, via: 'brain-switch', ms: Date.now() - t0 }));
         }
 
+        // DISPATCH GATE: run a dispatch prepared last turn only if Craig now
+        // affirms — the single execution point for both brain and fallback.
+        const gated = await resolveDispatchGate(dispatchGate, text,
+          (m) => ws.send(JSON.stringify({ type: 'reply', text: m.text, speech: m.speech, interim: true })));
+        if (gated.handled) {
+          if (gated.data?.jobId) watchJob(gated.data.jobId, gated.data.platform || 'auto');
+          return ws.send(JSON.stringify({ type: 'reply', text: gated.text, speech: gated.speech, via: 'dispatch-gate', ms: Date.now() - t0 }));
+        }
+
         // Default path — talk to the agentic brain (tool-calling, GPT or
         // Claude per the brain provider) when an API key is configured;
         // otherwise fall back to the frozen keyword/Haiku intent pipeline.
         if (hasAgent()) {
-          const full = await runAgent(transcript, text, (chunk) =>
-            ws.send(JSON.stringify({ type: 'reply_chunk', text: chunk })));
-          if (full.dispatched?.jobId) {
-            watchJob(full.dispatched.jobId, full.dispatched.platform || 'auto');
+          const before = transcript.length;
+          try {
+            const full = await runAgent(transcript, text, (chunk) =>
+              ws.send(JSON.stringify({ type: 'reply_chunk', text: chunk })), dispatchGate);
+            if (full.dispatched?.jobId) {
+              watchJob(full.dispatched.jobId, full.dispatched.platform || 'auto');
+            }
+            const back = noteBrainHealthy();
+            if (back) ws.send(JSON.stringify({ type: 'reply', text: back, speech: back, interim: true }));
+            return ws.send(JSON.stringify({
+              type: 'reply_done', speech: full.speech, via: 'agent', ms: Date.now() - t0,
+            }));
+          } catch (e) {
+            // Both brain providers unusable — undo the partial turn and fall
+            // through to the keyword intent pipeline (previously this branch
+            // dead-ended in a generic error and never reached the fallback).
+            transcript.splice(before);
+            console.error('[gateway] agent brain failed, using intent pipeline:', e.message);
+            const notice = noteBrainDegraded();
+            if (notice) ws.send(JSON.stringify({ type: 'reply', text: notice, speech: notice, interim: true }));
           }
-          return ws.send(JSON.stringify({
-            type: 'reply_done', speech: full.speech, via: 'agent', ms: Date.now() - t0,
-          }));
         }
 
         // Intent pipeline (same engine as the frozen Slack bridge)
@@ -398,11 +405,9 @@ wss.on('connection', (ws, req) => {
 
         // Job-completion announcements for voice-dispatched work
         const onEvent = (m) => ws.send(JSON.stringify({ type: 'reply', text: m.text, speech: m.speech, interim: true }));
-        const result = await runIntent(intent, text, onEvent);
-        if (intent.type === 'dispatch' || intent.type === 'passthrough') {
-          const jobId = result?.data?.jobId;
-          if (jobId) watchJob(jobId, result.data.platform || intent.platform || 'auto');
-        }
+        const result = await runIntent(intent, text, onEvent, dispatchGate);
+        // dispatch/passthrough now only PREVIEW (gate runs them next turn), so
+        // there's no jobId here to watch — the gate's dispatch handles watchJob.
         ws.send(JSON.stringify({
           type: 'reply',
           text: result?.text ?? '(no reply)',

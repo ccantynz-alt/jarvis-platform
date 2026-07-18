@@ -188,8 +188,8 @@
         "React",
         "TypeScript"
       ],
-      "status": "inactive",
-      "notes": "Fork of upstream abi/screenshot-to-code (third-party). backend container Exited (137)=OOM 2026-07-03; not running. No public site. Bring up with: cd /opt/screenshot-to-code && docker compose up -d."
+      "status": "active",
+      "notes": "Third-party fork (abi/screenshot-to-code). Container restarted 2026-07-17 (was OOM-exited 2026-07-03). Runs on :5173 (frontend) / :7001 (backend), loopback only. Bring up: cd /opt/screenshot-to-code && docker compose up -d. 2026-07-17: restart: unless-stopped set on both services (compose + docker update) after self-heal session 78; frontend/backend verified HTTP 200."
     }
   },
   "defaults": {

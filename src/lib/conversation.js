@@ -408,6 +408,42 @@ export async function handleDispatch(rawText, platform, onEvent = () => {}) {
   }
 }
 
+// ── Dispatch confirmation gate ───────────────────────────────────────────────
+// Dispatching spawns a full-permission worker that can commit and push to a
+// production branch — it must NEVER fire from a single turn, whether the request
+// came through the agent brain OR the keyword fallback. The gate ({turn, pending})
+// lives on the connection: a preview stamps the turn it was shown in, and the job
+// only runs when the user affirms in a LATER turn. This is the sole execution path.
+export const AFFIRM_RE = /^\s*(y(es|ep|eah|up)?|confirm(ed)?|do it|go ahead|proceed|affirmative|make it so|please do|go for it|sure)\b/i;
+export const NEGATE_RE = /^\s*(no|nope|nah|cancel|stop|don'?t|do not|abort|negative|belay|forget it|leave it)\b/i;
+
+// Stamp a pending dispatch and return the spoken confirmation prompt. Never runs.
+export function previewDispatch(gate, platform, task) {
+  if (gate) gate.pending = { platform, task, turn: gate.turn };
+  const m = `Ready to dispatch to ${platform}: ${task}. Shall I proceed, sir? Say yes to confirm.`;
+  return { text: m, speech: m, previewed: true };
+}
+
+// Call FIRST on every command. If a dispatch is awaiting confirmation from an
+// EARLIER turn and the user affirms, it runs; if they decline, it's dropped;
+// anything else drops the stale pending and is treated as a fresh command.
+export async function resolveDispatchGate(gate, text, onEvent = () => {}) {
+  if (!gate || !gate.pending || gate.pending.turn >= gate.turn) return { handled: false };
+  const p = gate.pending;
+  if (AFFIRM_RE.test(text)) {
+    gate.pending = null;
+    const res = await handleDispatch(p.task, p.platform, onEvent);
+    return { handled: true, ...res };
+  }
+  if (NEGATE_RE.test(text)) {
+    gate.pending = null;
+    const m = `Understood, sir — I'll leave ${p.platform} be.`;
+    return { handled: true, text: m, speech: m };
+  }
+  gate.pending = null;
+  return { handled: false };
+}
+
 export async function handleJobs() {
   try {
     const jobs = await fetch(`${ORCHESTRATOR}/jobs`).then(r => r.json());
@@ -675,10 +711,15 @@ export function handleHelp() {
  * Run a resolved intent through its handler. Multi-message flows emit interim
  * messages via onEvent({text, speech}); the final reply is returned.
  */
-export async function runIntent(intent, rawText, onEvent = () => {}) {
+export async function runIntent(intent, rawText, onEvent = () => {}, gate = null) {
+  const dispatchTask = (rawText || '').replace(/<[^>]+>/g, '').trim();
   switch (intent.type) {
     case 'ask':             return handleAsk(intent.question);
-    case 'dispatch':        return handleDispatch(rawText, intent.platform, onEvent);
+    // Dispatch/passthrough PREVIEW only — the gate runs it on the next
+    // affirmative turn. Without a gate, a dispatch can never fire (fail-safe).
+    case 'dispatch':        return previewDispatch(gate,
+                              intent.platform === 'auto' ? (matchPlatform(dispatchTask) || 'auto') : intent.platform,
+                              dispatchTask);
     case 'jobs':            return handleJobs();
     case 'status':          return handleStatus();
     case 'platform-status': return handlePlatformStatus(intent.platform);
@@ -686,6 +727,6 @@ export async function runIntent(intent, rawText, onEvent = () => {}) {
     case 'roadmap':         return handleRoadmap();
     case 'help':            return handleHelp();
     case 'passthrough':
-    default:                return handleDispatch(rawText, 'auto', onEvent);
+    default:                return previewDispatch(gate, matchPlatform(dispatchTask) || 'auto', dispatchTask);
   }
 }

@@ -9,6 +9,13 @@ set -uo pipefail
 MEM="http://127.0.0.1:9200/memory/platform/update"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+# A single failed probe is usually a transient flap (a slow site, a blip), not a
+# real outage — and self-heal keys off status=error. Only report "error" after
+# TWO consecutive failures. State lives in a tiny per-platform strike counter.
+STATE_DIR="/var/lib/jarvis/fleet-check"
+mkdir -p "$STATE_DIR"
+STRIKES_TO_FAIL=2
+
 # platform|probe-url   — probes the platform's REAL public presence (the site
 # the owner cares about), so dashboard numbers match reality.
 FLEET="
@@ -29,9 +36,21 @@ summary=""
 while IFS='|' read -r name url expected; do
   [ -z "$name" ] && continue
   code=$(curl -s -L -o /dev/null -w '%{http_code}' --max-time 12 "$url" 2>/dev/null)
+  strike_file="$STATE_DIR/${name}.strikes"
   case "$code" in
-    2*|3*) status="healthy"; score=95 ;;
-    *)     status="error";   score=0  ;;
+    2*|3*)
+      status="healthy"; score=95
+      rm -f "$strike_file"                       # recovered — clear strikes
+      ;;
+    *)
+      strikes=$(( $(cat "$strike_file" 2>/dev/null || echo 0) + 1 ))
+      echo "$strikes" > "$strike_file"
+      if [ "$strikes" -ge "$STRIKES_TO_FAIL" ]; then
+        status="error"; score=0                  # confirmed down (2+ in a row)
+      else
+        status="working"; score=60               # first miss — flag, don't fail
+      fi
+      ;;
   esac
   note="fleet-check $TS: $url -> HTTP ${code:-000}"
   curl -s -X POST "$MEM" -H 'Content-Type: application/json' \

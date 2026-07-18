@@ -6,6 +6,11 @@ mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
 
 const db = new Database('/opt/jarvis/memory/jarvis.db');
+// WAL so readers never block on a writer — this DB is the spine every Jarvis
+// service reads on a hot path. (Was journal_mode=delete despite the backup
+// script's name; online db.backup() still works fine under WAL.)
+db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 5000');
 const app = express();
 app.use(express.json());
 
@@ -265,6 +270,16 @@ app.post('/memory/repair/verify', (req, res) => {
 app.post('/memory/notifications', (req, res) => {
   const { source = 'jarvis', level = 'info', title, body, speech } = req.body;
   if (!title) return res.status(400).json({ error: 'title required' });
+  // Dedup: a repeatedly-firing condition (a flapping probe, a stuck job) must
+  // not mint a new row — and a new spoken alert — every time. Collapse an
+  // identical (source, level, title) within a short window onto the last row.
+  const DEDUP_WINDOW_MS = 10 * 60 * 1000;
+  const recent = db.prepare(`
+    SELECT id FROM notifications
+    WHERE source = ? AND level = ? AND title = ?
+      AND ts > ? ORDER BY id DESC LIMIT 1
+  `).get(source, level, title, new Date(Date.now() - DEDUP_WINDOW_MS).toISOString());
+  if (recent) return res.json({ id: recent.id, deduped: true });
   const result = db.prepare(`
     INSERT INTO notifications (ts, source, level, title, body, speech)
     VALUES (?, ?, ?, ?, ?, ?)

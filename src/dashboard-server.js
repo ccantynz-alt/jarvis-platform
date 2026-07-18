@@ -264,6 +264,12 @@ async function pollAndDiffJobs() {
 
 app.use(express.json());
 
+// CONSOLIDATED (2026-07-17): the Command Deck is the one Jarvis. The old
+// monitoring page now forwards there (before auth, so the hop is frictionless).
+// The /health and /api/* routes below still run for internal callers.
+const DECK_URL = 'https://jarvis.tailbd6217.ts.net:8444/';
+app.get('/', (_req, res) => res.redirect(302, DECK_URL));
+
 // Auth gate — everything below this middleware requires a valid token.
 app.use((req, res, next) => {
   if (req.path === '/health') return next(); // external uptime watcher
@@ -465,7 +471,9 @@ logEvent('SYS', 'JARVIS Mothership initializing...');
 logEvent('SYS', 'Core orchestrator online — awaiting connections');
 
 const PORT = 9206;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[jarvis-dashboard] Serving at http://0.0.0.0:${PORT}`);
-  console.log(`[jarvis-dashboard] Open your browser: http://66.42.121.161:${PORT}`);
+// Loopback only — exposed to the tailnet via `tailscale serve --https=8445`
+// (like the deck/gateway). No longer bound to the public interface.
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`[jarvis-dashboard] Serving at http://127.0.0.1:${PORT}`);
+  console.log(`[jarvis-dashboard] Tailnet: https://jarvis.tailbd6217.ts.net:8445/?token=<TOKEN>`);
 });

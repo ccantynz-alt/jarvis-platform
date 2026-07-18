@@ -33,8 +33,8 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
 import { readFileSync, writeFileSync } from 'fs';
-import { resolveIntent, runIntent, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
-import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider } from './lib/agent.js';
+import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
+import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
 
 const PORT      = 9210;
@@ -593,6 +593,10 @@ function broadcast(obj) {
 // KV so Jarvis remembers context between sessions. runAgent() mutates and
 // bounds the array itself (last 24 messages).
 let sharedTranscript = null;
+// Dispatch confirmation gate: `turn` counts human commands; a preview stamps
+// the turn it was shown in, and a dispatch only fires when confirmed in a LATER
+// turn (see agent.js dispatch_job). Shared like the transcript (single principal).
+const dispatchGate = { turn: 0, pending: null };
 async function loadTranscript() {
   if (sharedTranscript) return sharedTranscript;
   try {
@@ -630,6 +634,7 @@ wss.on('connection', (ws, req) => {
     if (msg.type !== 'command') return;
     const text = String(msg.text || '').trim();
     if (!text) return;
+    dispatchGate.turn++; // each spoken/typed command is one human turn (dispatch gate)
     pushWire('deck.command', JSON.stringify({ from: 'craig', text: text.slice(0, 80) }));
     // Any briefing ask also feeds the deck's structured briefing panel,
     // regardless of whether the brain or the intent pipeline answers.
@@ -640,24 +645,34 @@ wss.on('connection', (ws, req) => {
       // "switch brain to GPT / Claude" — handled before any brain runs
       const switched = await maybeBrainSwitch(text);
       if (switched) return send({ type: 'chat', text: switched, speech: switched });
+      // DISPATCH GATE: a dispatch prepared last turn only runs if Craig now
+      // affirms — this is the single execution point for BOTH the brain and the
+      // keyword fallback, so no path can launch a worker from one turn.
+      const gated = await resolveDispatchGate(dispatchGate, text,
+        (m) => send({ type: 'chat', text: m.speech || m.text }));
+      if (gated.handled) return send({ type: 'chat', text: gated.text, speech: gated.speech });
       if (hasAgent()) {
         const transcript = await loadTranscript();
         const before = transcript.length;
         try {
           // runAgent pushes user+assistant turns onto transcript itself.
           const full = await runAgent(transcript, text,
-            (chunk) => send({ type: 'chat_chunk', text: chunk }));
+            (chunk) => send({ type: 'chat_chunk', text: chunk }), dispatchGate);
           saveTranscript();
+          const back = noteBrainHealthy();
+          if (back) send({ type: 'notify', level: 'info', title: back, speech: back });
           return send({ type: 'chat', text: full.text || 'Done, sir.', speech: full.speech });
         } catch (e) {
-          // API key unusable (no credits, outage) — undo this turn's partial
-          // transcript and fall through to the intent pipeline.
+          // Both brain providers unusable (no credits, outage) — undo this
+          // turn's partial transcript and fall through to the intent pipeline.
           transcript.splice(before);
           console.error('[deck] agent brain failed, using intent pipeline:', e.message);
+          const notice = noteBrainDegraded();
+          if (notice) send({ type: 'notify', level: 'warn', title: notice, speech: notice });
         }
       }
       const { intent } = await resolveIntent(text);
-      const result = await runIntent(intent, text, (m) => send({ type: 'chat', text: m.speech || m.text }));
+      const result = await runIntent(intent, text, (m) => send({ type: 'chat', text: m.speech || m.text }), dispatchGate);
       send({ type: 'chat', text: result?.speech || result?.text || 'Acknowledged, sir.' });
     } catch (e) {
       console.error('[deck] command error:', e.message);

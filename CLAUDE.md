@@ -1,7 +1,7 @@
 # CLAUDE.md — Jarvis Platform
 > Operating doctrine for every Claude Code session working on this repo.
 > Read this entire file before touching any code.
-> Last verified against the live box: 2026-07-06.
+> Last verified against the registry and implementation: 2026-07-17.
 
 ---
 
@@ -15,38 +15,47 @@ stay healthy without human intervention.
 Jarvis serves Craig Canty / MarcoReid Intelligence Systems.
 
 Platforms Jarvis monitors (source of truth: `config/platforms.json` —
-read it, don't trust this list). As of 2026-07-06 the registry contains:
-zoobicon, vapron, bookaride, gatetest, alecrae, jarvis, voxlen, gluecron.
+read it, don't trust this list). As of 2026-07-17 the registry contains 12:
+zoobicon, vapron, bookaride, gatetest, alecrae, jarvis, voxlen, gluecron,
+universal-ai-operator, marcoreid, davenroe, screenshot-to-code.
 Notes:
 - AlecRae **runs on THIS box** at `/opt/alecrae` (bun API :4100, Next.js
   :4200, user `alecrae`)
 - Gluecron **runs on THIS box** as a Docker container behind
   Coolify/Traefik (see Gotchas below)
 - GateTest has a local checkout at `/opt/gatetest`
-- MarcoReid and the eSIM MVNO are talked about but NOT yet in the
-  registry — Haiku intent routing can't target a platform that isn't
-  registered. Add them when they're real.
+- MarcoReid is registered as a Vercel-hosted platform; Jarvis monitors its
+  live site and repo rather than a local checkout.
 
 ---
 
-## THE TEN SERVICES
+## THE ELEVEN SERVICES
 
 | Service | File | Port | Bind | Purpose |
 |---------|------|------|------|---------|
 | jarvis-memory | src/memory-server.js | 9200 | loopback | Cross-session SQLite memory + notifications inbox + durable job queue + agent reports |
 | jarvis-screenshot | src/screenshot-service.js | 9201 | loopback | CDP screenshot capture |
 | jarvis-metrics | src/metrics-collector.js | 9202 | loopback | Real server metrics + WebSocket |
-| jarvis-slack | src/slack-bridge.js | 9203 | loopback | **RETIRED 2026-07-15** — unit disabled, NOTIFY_SLACK_LEGACY=0, deploy-gate repointed to notify(). Code stays in git ~30 days then delete. The Gateway inbox is the only notification channel. |
 | jarvis-audit | src/audit-runner.js | 9204 | loopback | Build + test audit runner |
 | jarvis-orchestrator | src/orchestrator.js | 9205 | loopback | Dispatch engine — durable job queue (SQLite `jobs` table via :9200) + scheduler tick; spawns Claude agents (local + SSH) via src/lib/spawn-agent.js |
-| jarvis-dashboard | src/dashboard-server.js | 9206 | 0.0.0.0 + token auth | Status panel + screenshot browser; token = JARVIS_DASHBOARD_TOKEN in secrets.env, login once per device via `?token=` |
+| jarvis-dashboard | src/dashboard-server.js | 9206 | loopback, exposed ONLY via `tailscale serve --https=8445` | Status panel + screenshot browser; token = JARVIS_DASHBOARD_TOKEN in secrets.env, login once per device via `?token=` |
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | loopback | GateTest scan gating platform deploys |
 | jarvis-gateway | src/gateway-server.js | 9208 | loopback, exposed ONLY via `tailscale serve` (tailnet HTTPS) | **THE interface** — conversational voice/text control channel + notification inbox. Spec: docs/GATEWAY.md. Token = JARVIS_GATEWAY_TOKEN. |
 | jarvis-agents | src/agent-scheduler.js | 9209 | loopback | **Agent-org scheduler** — dispatches role agents from config/agents.json on cron (budget-capped), routes agent reports up the escalation ladder (ok→inbox, action_needed→warn, escalate→alert). Kill switch: `AGENTS_MODE=off|dry-run|live` in the unit file. Registry + personas: config/agents.json, config/personas/, config/knowledge/. |
-| jarvis-deck | src/deck-server.js | 9210 | loopback, exposed ONLY via `tailscale serve --https=8444` | **Command Deck v2.2** (2026-07-16, from Craig's Claude Design handoff) — public/command-deck.html: full-screen **CORE** 3D neural-core brain (default) + HUD/Hierarchy/Message Flow/Platforms tabs; PWA (deck.webmanifest + /icons/deck-*.png, source deck-icon.html); briefing panel (`{type:'briefing'}`); raw WS `/jarvis` = handoff contract v1.0 + `chat_chunk`/`notify`/`org`/`briefing`. All numbers real. Commands → lib/agent.js brain (**claude-fable-5**) with intent fallback; conversation in memory KV `deck-conversation`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs via src/lib/tts.js (cache + daily budget + `TTS_DISABLED`), speechSynthesis fallback. QA hooks `?demo-alert=1`/`?demo-briefing=1` (:9201 virtual-time captures can't see live WS pushes). Evidence: docs/DECK-AUDIT-2026-07-16.md. Token = deck/gateway token or gateway cookie. |
+| jarvis-deck | src/deck-server.js | 9210 | loopback, exposed ONLY via `tailscale serve --https=8444` | **Command Deck v2.2** (2026-07-16, from Craig's Claude Design handoff) — public/command-deck.html: full-screen **CORE** 3D neural-core brain (default) + HUD/Hierarchy/Message Flow/Platforms tabs; PWA (deck.webmanifest + /icons/deck-*.png, source deck-icon.html); briefing panel (`{type:'briefing'}`); raw WS `/jarvis` = handoff contract v1.0 + `chat_chunk`/`notify`/`org`/`briefing`. All numbers real. Commands → the three-provider lib/agent.js brain with intent fallback; conversation in memory KV `deck-conversation`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs via src/lib/tts.js (cache + daily budget + `TTS_DISABLED`), speechSynthesis fallback. QA hooks `?demo-alert=1`/`?demo-briefing=1` (:9201 virtual-time captures can't see live WS pushes). Evidence: docs/DECK-AUDIT-2026-07-16.md. Token = deck/gateway token or gateway cookie. |
+| jarvis-browser | src/browser-service.js | 9211 | loopback | SSRF-guarded web search, fetch, and Chromium render bridge for the brain |
 
-All are managed by systemd (`systemctl status 'jarvis-*'`) and survive reboots.
-All have a `/health` endpoint Claude must probe before assuming they are running.
+Health paths are namespaced for memory (`/memory/health`), screenshot
+(`/screenshot/health`), metrics (`/metrics/health`), deploy-gate
+(`/deploy-gate/health`), audit (`/audit/health`), and browser
+(`/browser/health`). Agents, deck, dashboard, gateway, and orchestrator use
+plain `/health`. Retired Slack code uses `/slack/health` when run.
+
+The conversational brain has three switchable providers. `BRAIN_PROVIDER=auto`
+prefers OpenAI when configured (default model `gpt-5.1`), then Anthropic
+(`claude-fable-5`), then Google Gemini. A provider can be selected explicitly
+or by voice; on API failure the brain automatically tries the other configured
+providers and makes the working provider sticky.
 `config/platforms.json` is re-read on every request — registry edits take
 effect immediately, no restart needed.
 
@@ -61,7 +70,7 @@ wins: probe, then fix this file. A doctrine file that lies is worse than none �
 every future agent starts with false beliefs and wastes its first 20 minutes
 rediscovering the truth.
 
-**Extension (2026-07-09):** `docs/ROADMAP.md`'s "THE 20 MOVES" list and
+**Extension (2026-07-09):** `docs/ROADMAP.md`'s "THE 23 MOVES" list and
 `config/roadmap.json` are twins — one prose, one machine-readable (powers the
 Gateway's Roadmap checklist, `GET /api/roadmap`, and the voice "what's left"
 intent). Whenever a move's status changes, update BOTH in the same commit.
@@ -104,7 +113,7 @@ closed. Don't add to that number.)
 
 ### Rule 4 — Never break co-tenants
 This box also runs AlecRae, Gluecron, GateTest, and the Coolify stack.
-Jarvis owns ports 9200–9210 and nothing else. Before binding any port,
+Jarvis owns ports 9200–9211 and nothing else. Before binding any port,
 check `ss -tlnp`. Do not modify co-tenant config from this repo.
 
 ### Rule 5 — No competitor dependencies
@@ -118,7 +127,7 @@ If you need browser automation, extend src/screenshot-service.js.
 
 ```
 Craig (voice/text, iPad/phone — tailnet) ──► https://jarvis.tailbd6217.ts.net:8443
-        ↓ tailscale serve                        [Slack = frozen legacy sidecar via 9203]
+        ↓ tailscale serve
 jarvis-gateway (9208) ── lib/conversation.js ──→ jarvis-orchestrator (9205)
                                                ↓ spawns
                               claude --print (local cwd, or ssh -i .ssh/orchestrator root@<server>)
@@ -149,15 +158,15 @@ Public (0.0.0.0):
 - :22 sshd
 - :80 / :443 — **Coolify's Traefik** (`coolify-proxy` container) — TLS front door for gluecron.com and other Coolify apps
 - :6001/:6002 — Coolify realtime; :8000 — Coolify web UI; :8080 — Traefik (published by Coolify)
-- :9206 — jarvis-dashboard (token auth; `/health` open for off-box watcher)
 
 Loopback only:
 - :3000 gatetest-web (binds 10.0.1.1, coolify bridge — Traefik fronts gatetest.ai)
 - :4100 AlecRae API (bun) · :4200 AlecRae web (next)
 - :5432 Postgres
-- :9200–9205, :9207 Jarvis services
+- :9200–9202, :9204–9207 Jarvis services
 - :9208 jarvis-gateway — loopback + `tailscale serve --https=8443` (tailnet-only HTTPS; never expose publicly)
-- :9209 jarvis-agents · :9210 jarvis-deck — loopback; deck also on `tailscale serve --https=8444` (tailnet-only, same rule as the gateway)
+- :9209 jarvis-agents · :9210 jarvis-deck · :9211 jarvis-browser — loopback; deck is also on `tailscale serve --https=8444`
+- :9206 jarvis-dashboard — loopback + `tailscale serve --https=8445` (tailnet-only, same rule as deck and gateway)
 
 The old doctrine said Vapron owns 3000/3001/8090/9099 — **not true on this
 box**. Vapron lives elsewhere; check `config/platforms.json` for servers.
@@ -175,8 +184,9 @@ jarvis-platform/
 │   ├── slack-bridge.js        — Slack Socket Mode, intent routing (largest file)
 │   ├── audit-runner.js        — build/test/screenshot audit loop
 │   ├── orchestrator.js        — /dispatch API, spawns Claude agents, cron sprints
-│   ├── dashboard-server.js    — public status panel + /screenshots browser
-│   └── deploy-gate.js         — GateTest scan on every platform deploy
+│   ├── dashboard-server.js    — tailnet status panel + /screenshots browser
+│   ├── deploy-gate.js         — GateTest scan on every platform deploy
+│   └── browser-service.js     — guarded web search/fetch/render bridge
 ├── scripts/
 │   ├── install.sh             — one-command server setup
 │   ├── session-start.sh       — run at start of every Claude session
@@ -185,7 +195,7 @@ jarvis-platform/
 │   ├── platforms.json         — THE platform registry (hot-reloaded)
 │   ├── secrets.env            — real secrets (gitignored, lives only on box)
 │   └── secrets.env.example    — env var template
-├── systemd/                   — unit files for all eight services
+├── systemd/                   — unit files for Jarvis services
 ├── memory/jarvis.db           — SQLite memory store (gitignored)
 ├── visual-baselines/          — screenshot baselines (gitignored, served at :9206/screenshots)
 ├── .ssh/orchestrator          — root SSH key for remote dispatch (gitignored — NEVER commit)
@@ -236,7 +246,7 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   creds; Coolify owns the gluecron deploy now). The cups snap was disabled
   the same day (it exposed cupsd publicly on :631). Don't re-enable either
   without a reason.
-- **Slack intent routing is two-tier**: keyword fast-path for confident
+- **Retired Slack intent routing was two-tier**: keyword fast-path for confident
   short commands, Haiku CLI classification (~3-10s) for ambiguous natural
   phrasing, silent keyword fallback on any classifier failure. Debug with
   `curl 'http://127.0.0.1:9203/slack/test?text=...'` — it returns
@@ -266,16 +276,12 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
-1. No external watcher: Jarvis monitors the platforms but nothing off-box
-   monitors Jarvis. If this box dies, the reporter dies with it.
-   (`:9206/health` is intentionally unauthenticated for this purpose.)
-2. Haiku intent classification runs via CLI cold-start (~3-10s per
+1. Haiku intent classification runs via CLI cold-start (~3-10s per
    ambiguous message). An ANTHROPIC_API_KEY in secrets.env + switching
    classifyIntent to the HTTP Messages API would cut that to ~300ms.
-3. Orchestrator still runs agents as root with
+2. Orchestrator still runs agents as root with
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
-4. MarcoReid / eSIM not in platforms.json (see WHAT JARVIS IS).
 
 Cleared 2026-07-06: dashboard auth (was #1), cupsd exposure (was #2),
 keyword-only intents (was #3), no DB backups (was #5) — see git log.
@@ -286,7 +292,8 @@ keyword-only intents (was #3), no DB backups (was #5) — see git log.
 
 1. Check service status: `systemctl status jarvis-<name>`
 2. Check logs: `journalctl -u jarvis-<name> -n 50`
-3. Probe health endpoint: `curl http://127.0.0.1:<port>/health`
+3. Probe the service's documented health path (for example,
+   `curl http://127.0.0.1:9200/memory/health`; plain `/health` is not universal)
 4. Never restart a service without reading its last 50 log lines first
 5. If a service is down, read memory first — it may explain why
 6. Web app hanging behind Traefik? Read Gotchas above before touching code.

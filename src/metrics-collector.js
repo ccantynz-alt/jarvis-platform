@@ -58,16 +58,11 @@ function collectMetrics() {
       memory: checkPort(9200),
       screenshot: checkPort(9201),
       metrics: 'ONLINE',
-      slack: checkPort(9203),
       audit: checkPort(9204)
     },
-    vapron: {
-      web: checkPort(3000),
-      api: checkPort(3001),
-      gateway: checkPort(8090),
-      deploy_agent: checkPort(9099),
-      caddy: checkPort(443)
-    },
+    // NOTE: no local `vapron` port block — vapron runs on box 158, not here.
+    // Local port checks matched unrelated co-tenant processes (:3000/:443) and
+    // reported false health. vapron health comes from fleet-check/the heartbeat.
     platforms: platformHealth
   };
 }

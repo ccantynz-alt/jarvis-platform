@@ -37,10 +37,22 @@ const ORCHESTRATOR = 'http://127.0.0.1:9205';
 const OWN_IP       = process.env.OWN_IP || '66.42.121.161';
 
 const MODE                 = process.env.SELF_HEAL_MODE || 'dry-run';
-const DOWN_MINUTES         = Number(process.env.SELF_HEAL_DOWN_MINUTES || 12);   // > one fleet-check cycle
-const COOLDOWN_MIN         = Number(process.env.SELF_HEAL_COOLDOWN_MIN || 30);
-const MAX_ATTEMPTS_PER_DAY = Number(process.env.SELF_HEAL_MAX_ATTEMPTS || 6);
-const MAX_CONCURRENT       = Number(process.env.SELF_HEAL_MAX_CONCURRENT || 2);
+// Guardrails must NEVER silently vanish. systemd keeps inline comments as part
+// of an env value, so Number() can yield NaN — and every `x < NaN` comparison
+// is false, which disabled ALL four gates on 2026-07-17 (117 dispatches/day
+// against a cap of 6). Parse defensively: non-finite or non-positive → default.
+function guardrail(name, fallback) {
+  const n = Number(String(process.env[name] ?? '').trim().split(/\s|#/)[0]);
+  if (Number.isFinite(n) && n > 0) return n;
+  if (process.env[name] !== undefined) {
+    console.error(`[self-heal] BAD GUARDRAIL ${name}=${JSON.stringify(process.env[name])} — using default ${fallback}`);
+  }
+  return fallback;
+}
+const DOWN_MINUTES         = guardrail('SELF_HEAL_DOWN_MINUTES', 12);   // > one fleet-check cycle
+const COOLDOWN_MIN         = guardrail('SELF_HEAL_COOLDOWN_MIN', 30);
+const MAX_ATTEMPTS_PER_DAY = guardrail('SELF_HEAL_MAX_ATTEMPTS', 6);
+const MAX_CONCURRENT       = guardrail('SELF_HEAL_MAX_CONCURRENT', 2);
 
 const STATE_DIR = '/var/lib/jarvis/self-heal';
 const LOG       = '/var/log/jarvis-self-heal.log';

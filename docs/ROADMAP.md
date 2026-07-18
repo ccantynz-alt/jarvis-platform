@@ -3,7 +3,7 @@
 > **This is the single source of truth.** Every agent (Jarvis-dispatched, Vapron's,
 > or interactive) reads this at session start and updates it the moment a decision
 > changes. If this file disagrees with reality, fix reality *or* fix this file —
-> never leave them out of sync. Last updated: 2026-07-08.
+> never leave them out of sync. Last updated: 2026-07-15.
 
 ---
 
@@ -24,7 +24,7 @@
 | Cloud executor (`runCloud`) | 🔒 OFF | Stays off until registry repos are fixed (#8) + cloud creds confirmed. |
 | Canonical Vapron repo | 🟡 RECOMMEND `/root/Vapron` (`ccantynz-alt/Vapron`, branch `Main`) | Craig to confirm which GitHub repo he actually pushes to. |
 | GateTest canonical repo | 🟡 INFER `crclabs-hq/GateTest` | All tonight's work came from there; registry wrongly says `ccantynz-alt/gatetest`. Craig to confirm. |
-| **Slack** — keep or drop | ✅ DECIDED 2026-07-08 (Craig) — **FROZEN LEGACY** | jarvis-slack keeps running with **zero new features**. Notifications dual-write (Gateway inbox + Slack) via `NOTIFY_SLACK_LEGACY=1` until Gateway proven (criteria in docs/GATEWAY.md: 14 green days + daily-driven + zero missed notifications), then flag off → disable → delete. **Agents: do NOT build on or recommend Slack.** The interface is the Jarvis Gateway. |
+| **Slack** — keep or drop | ✅ RETIRED 2026-07-15 | jarvis-slack is disabled and `NOTIFY_SLACK_LEGACY=0`; deploy-gate now uses `notify()`. **Agents: do NOT build on or recommend Slack.** The Gateway inbox is the notification channel. |
 | Registry repo fixes (gatetest/alecrae/bookaride) | ⏳ PENDING Craig confirm | Blocks safe cloud dispatch. |
 
 ## BANKED (done — do not redo)
@@ -35,7 +35,7 @@ live (`mcp.gatetest.ai`).
 
 ---
 
-## THE 20 MOVES (order = strategy; reliability is the floor)
+## THE 23 MOVES (order = strategy; reliability is the floor)
 
 ### Phase 1 — STABILIZE (kill "everything breaks")
 1. ✅ Restart policies — all jarvis-* + gatetest-mcp = `Restart=always`, alecrae = `on-failure`. (Container autoheal deferred — could conflict with Coolify; Craig call.)
@@ -45,30 +45,30 @@ live (`mcp.gatetest.ai`).
 5. ✅ Restore-drill passed — backup recovers faithfully (all tables match, integrity ok).
 
 ### Phase 2 — ALIGN (stop the burning)
-6. This ledger — every agent reads/updates it. **(seeded by this file)**
-7. Point all CLAUDE.mds here; enforce Rule 0.
-8. Fix registry repo mismatches (closes cloud cross-contamination).
-9. Enforce session protocol — auto-log repairs to memory.
+6. ✅ This ledger — every agent reads/updates it.
+7. 🔄 Point all CLAUDE.mds here; enforce Rule 0.
+8. ⬜ Fix registry repo mismatches.
+9. 🔄 Enforce session protocol — auto-log repairs to memory.
 
 ### Phase 3 — AUTOMATE (self-running)
-10. Agent runtime → Claude Agent SDK, scoped permissions (retire `--dangerously-skip-permissions`).
-11. Enable cloud executor (after #8 + creds).
-12. Turn on self-repair (jarvis → cloud).
-13. Auto-dispatch + guardrail layer (allowlist, spend caps, confidence thresholds).
-14. Intent routing → HTTP API (~300ms vs ~4-10s CLI).
+10. ⬜ Agent runtime → Claude Agent SDK, scoped permissions.
 22. ✅ **DONE 2026-07-15** — Durable job queue + CLI canary gate (agent-org Phase 1): jobs survive restarts in SQLite (`jobs`/`job_transitions` via :9200), scheduler tick with `MAX_CONCURRENT_JOBS` + timeouts, boot recovery re-queues interrupted jobs, and `spawn-agent.js` holds all dispatch behind a CANARY-OK probe whenever the claude CLI version changes (kills the 2.1.207-class silent-failure mode).
 23. 🔄 **IN PROGRESS 2026-07-15** — Agent-org roster + scheduler + Slack retirement (Phase 2): 19 role agents registered (social-media × 9 platforms; accountant + legal × NZ/AU/US/UK/SG with DRAFT-only honesty framing), `jarvis-agents` (:9209) cron-dispatches them budget-capped and routes reports up the escalation ladder into the Gateway inbox. Verified end-to-end. jarvis-slack disabled; deploy-gate repointed to notify(). Remaining: flip `AGENTS_MODE` dry-run→live (Craig's call) and the 158 watchdog alert cutover.
+11. ⬜ Enable cloud executor (after #8 + creds).
+12. ⬜ Turn on self-repair (jarvis → cloud).
+13. ⬜ Auto-dispatch + guardrail layer.
+14. ⬜ Intent routing → HTTP API (~300ms vs ~4-10s CLI).
 
 ### Phase 4 — CONSOLIDATE onto Vapron
-15. Confirm canonical Vapron repo; clean the 3-checkout mess.
+15. ⬜ Confirm canonical Vapron repo; clean 3-checkout mess.
 16. ~~Add Jarvis SSH key to 158~~ **SUPERSEDED 2026-07-08 by estate model: never SSH between boxes.** 158 joins the tailnet (handoff brief) and exposes health + heartbeat over it; registry gets the tailnet health URL.
-17. Onboard GateTest to Vapron as pilot tenant #1 (prove the loop).
-18. Migrate off Coolify → Vapron proxy (endgame of #4).
-19. Roll remaining platforms onto Vapron; Jarvis's #1 monitor = Vapron API health.
+17. 🔄 Onboard GateTest to Vapron as pilot tenant #1.
+18. ⬜ Migrate off Coolify → Vapron proxy (endgame of #4).
+19. ⬜ Roll remaining platforms onto Vapron.
 
 ### Phase 5 — INTERFACE (the product)
-20. 🔨 IN PROGRESS 2026-07-08 — Jarvis Gateway MVP: Tailscale mesh + jarvis-gateway (:9208, `tailscale serve` HTTPS) + browser-native voice. Spec: docs/GATEWAY.md. Un-gated from Voxlen.
-21. 🟨 Embodied Jarvis — lip-synced live avatar + one consistent custom voice (TTS as a Vapron service, per estate model). Added 2026-07-10 after the footage-avatar iterations: pre-recorded video can only ever *pretend* to talk; the real thing needs a rendered avatar driven by the Gateway's existing speech-state events. **Custom-voice half in progress 2026-07-16:** ElevenLabs neural voice wired into the Command Deck (`src/lib/tts.js`, `GET /tts` on :9210 — cache, daily char budget, `TTS_DISABLED` kill switch; blocked only on a valid `ELEVENLABS_API_KEY`). Avatar half untouched; Vapron-hosted TTS remains the end-state.
+20. 🔄 Jarvis Gateway MVP — private mesh, streaming brain, voice in/out. Tailscale mesh + jarvis-gateway (:9208, `tailscale serve` HTTPS) are live and voice-tested; iPad/phone shakedown is ongoing. Spec: docs/GATEWAY.md.
+21. 🔄 Embodied Jarvis — lip-synced live avatar + one custom voice (TTS via Vapron). **Custom-voice half live 2026-07-16:** ElevenLabs neural voice is wired into the Command Deck (`src/lib/tts.js`, `GET /tts` on :9210 — cache, daily char budget, `TTS_DISABLED` kill switch; awaiting a valid `ELEVENLABS_API_KEY`). Avatar half untouched; Vapron-hosted TTS remains the end-state.
 
 ---
 
