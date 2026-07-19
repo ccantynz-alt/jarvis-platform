@@ -15,6 +15,7 @@
 // in agent_context (memory-server :9200) so it survives restarts.
 
 import { spawn, execFile } from 'child_process';
+import { profileEnv, classifyFailure, reportExhausted, getActiveProfile } from './claude-auth.js';
 
 const MEMORY = 'http://127.0.0.1:9200';
 const CANARY_KEY = 'claude_verified_version';
@@ -30,12 +31,12 @@ export function workerEnv(extraEnv = {}) {
     DISABLE_AUTOUPDATER: '1',
     ...extraEnv,
   };
-  // Hybrid economics: CLI workers ALWAYS run on the flat-rate claude.ai
-  // subscription login. If the metered ANTHROPIC_API_KEY (used only by the
-  // gateway's Messages-API brain) leaks into a worker env, it overrides the
+  // Subscription economics: CLI workers ALWAYS run on a flat-rate claude.ai
+  // subscription login. profileEnv() points CLAUDE_CONFIG_DIR at the ACTIVE
+  // login (claude-auth.js two-account failover) and strips the metered
+  // ANTHROPIC_API_KEY — if that key leaks into a worker env it overrides the
   // subscription auth and bills every job per-token.
-  delete env.ANTHROPIC_API_KEY;
-  return env;
+  return profileEnv(env);
 }
 
 // Spawn any worker command with a hard timeout. Resolves (never rejects) with
@@ -79,12 +80,26 @@ export function spawnProcess(cmd, args, { cwd, env, timeoutMin = 30 } = {}) {
   });
 }
 
-// Spawn a local claude worker on a task prompt.
-export function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMin = 30 }) {
+// Spawn a local claude worker on a task prompt. If the run dies on a USAGE
+// LIMIT, flip to Craig's other subscription login (claude-auth) and retry the
+// job ONCE on that account — the fleet keeps moving through 5-hour resets.
+export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMin = 30 }) {
   const args = ['--dangerously-skip-permissions', '--print'];
   if (model) args.push('--model', model);
   args.push(prompt);
-  return spawnProcess('claude', args, { cwd, env: workerEnv(extraEnv), timeoutMin });
+
+  const run = () => spawnProcess('claude', args, { cwd, env: workerEnv(extraEnv), timeoutMin });
+  let result = await run();
+  if (result.code !== 0 && !result.timedOut) {
+    const cls = classifyFailure(result);
+    if (cls.kind === 'usage_limit') {
+      const current = getActiveProfile()?.name;
+      const next = await reportExhausted(current, cls.resetAt).catch(() => null);
+      if (next && next !== current) result = await run(); // fresh env picks up the flip
+      else result.limitHeld = true; // every account exhausted — caller should re-queue, not fail
+    }
+  }
+  return result;
 }
 
 export function claudeVersion() {

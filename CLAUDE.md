@@ -51,11 +51,24 @@ Health paths are namespaced for memory (`/memory/health`), screenshot
 (`/browser/health`). Agents, deck, dashboard, gateway, and orchestrator use
 plain `/health`. Retired Slack code uses `/slack/health` when run.
 
-The conversational brain has three switchable providers. `BRAIN_PROVIDER=auto`
-prefers OpenAI when configured (default model `gpt-5.1`), then Anthropic
-(`claude-fable-5`), then Google Gemini. A provider can be selected explicitly
-or by voice; on API failure the brain automatically tries the other configured
-providers and makes the working provider sticky.
+**The brain runs on Craig's claude.ai SUBSCRIPTIONS, not metered APIs
+(2026-07-19).** Provider `claude` = a persistent Claude Agent SDK session
+(src/lib/brain-claude.js) billed to the subscription login; `BRAIN_PROVIDER=auto`
+always prefers it. Model tiers: everyday **Sonnet 5**, voice-switchable to
+Opus/Fable ("switch model to Fable"), with an automatic one-turn escalation
+retry when a tier struggles. Tools + persona live in src/lib/brain-tools.js —
+ONE surface shared by every provider. The metered APIs (openai `gpt-5.1`,
+anthropic Messages, gemini) are EMERGENCY fallbacks only; any automatic
+failover away from `claude` fires a spoken notify() — silent downgrades
+(the 2026-07-18 Gemini incident) must never repeat.
+**Two-account failover (src/lib/claude-auth.js):** subscription logins live at
+`/root/.claude` (profile `default`) and `/root/.claude-profiles/<name>`
+(`CLAUDE_CONFIG_DIR`; one-time `CLAUDE_CONFIG_DIR=<dir> claude login`). On a
+usage-limit error the brain AND spawn-agent workers flip to the other login,
+announce it, and retry once; when all accounts are exhausted work is held (not
+failed) until the earliest reset. Durable state in memory KV
+`claude-active-profile` / `claude-profile-exhausted:<name>`. Voice: "switch
+account".
 `config/platforms.json` is re-read on every request — registry edits take
 effect immediately, no restart needed.
 
