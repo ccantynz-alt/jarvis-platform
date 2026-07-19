@@ -53,7 +53,7 @@ live (`mcp.gatetest.ai`).
 ### Phase 3 — AUTOMATE (self-running)
 10. ⬜ Agent runtime → Claude Agent SDK, scoped permissions.
 22. ✅ **DONE 2026-07-15** — Durable job queue + CLI canary gate (agent-org Phase 1): jobs survive restarts in SQLite (`jobs`/`job_transitions` via :9200), scheduler tick with `MAX_CONCURRENT_JOBS` + timeouts, boot recovery re-queues interrupted jobs, and `spawn-agent.js` holds all dispatch behind a CANARY-OK probe whenever the claude CLI version changes (kills the 2.1.207-class silent-failure mode).
-23. 🔄 **IN PROGRESS 2026-07-15** — Agent-org roster + scheduler + Slack retirement (Phase 2): 19 role agents registered (social-media × 9 platforms; accountant + legal × NZ/AU/US/UK/SG with DRAFT-only honesty framing), `jarvis-agents` (:9209) cron-dispatches them budget-capped and routes reports up the escalation ladder into the Gateway inbox. Verified end-to-end. jarvis-slack disabled; deploy-gate repointed to notify(). Remaining: flip `AGENTS_MODE` dry-run→live (Craig's call) and the 158 watchdog alert cutover.
+23. 🔄 **IN PROGRESS 2026-07-19** — Agent-org roster + scheduler + Slack retirement (Phase 2): 44 role agents registered — the original 19 (social-media × 9 platforms; accountant + legal × NZ/AU/US/UK/SG, DRAFT-only honesty framing) plus a REAL C-suite (cto/cmo/cfo/clo/coo/cro — weekly roll-up agents, not the deck's old cosmetic tiles) that `reports_to` now actually routes through, plus seo-specialist-* and site-medic-* on the same 9-platform roster. `jarvis-agents` (:9209) cron-dispatches them budget-capped and routes reports up the escalation ladder into the Gateway inbox. Verified end-to-end; deck Hierarchy tab renders the real tree. jarvis-slack disabled; deploy-gate repointed to notify(). 158 watchdog alert cutover is **done** (`jarvis-heartbeat.timer` on 158 posts to `/internal/heartbeat` every 5 min on a scoped `JARVIS_HEARTBEAT_TOKEN_vapron158`, verified live). Remaining: flip `AGENTS_MODE` dry-run→live (Craig's call, after reviewing one dry-run cycle).
 11. ⬜ Enable cloud executor (after #8 + creds).
 12. ⬜ Turn on self-repair (jarvis → cloud).
 13. ⬜ Auto-dispatch + guardrail layer.
@@ -61,7 +61,7 @@ live (`mcp.gatetest.ai`).
 
 ### Phase 4 — CONSOLIDATE onto Vapron
 15. ⬜ Confirm canonical Vapron repo; clean 3-checkout mess.
-16. ~~Add Jarvis SSH key to 158~~ **SUPERSEDED 2026-07-08 by estate model: never SSH between boxes.** 158 joins the tailnet (handoff brief) and exposes health + heartbeat over it; registry gets the tailnet health URL.
+16. ~~Add Jarvis SSH key to 158~~ **SUPERSEDED 2026-07-08 by estate model: never SSH between boxes.** ✅ **DONE 2026-07-19** — 158 is on the tailnet (`vapron-158.tailbd6217.ts.net`), exposes health tailnet-only (`tailscale serve --https=8443 → 127.0.0.1:9095`, Vapron's ops-agent), and `jarvis-heartbeat.timer` posts every 5 min to the Gateway's `/internal/heartbeat`. Registry (`platforms.json`) still needs the tailnet health URL wired in (`vapron.server` is the tailnet IP already; a `health_url` field is the remaining piece).
 17. 🔄 Onboard GateTest to Vapron as pilot tenant #1.
 18. ⬜ Migrate off Coolify → Vapron proxy (endgame of #4).
 19. ⬜ Roll remaining platforms onto Vapron.
