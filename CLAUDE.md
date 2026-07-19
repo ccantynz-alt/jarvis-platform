@@ -149,7 +149,7 @@ closed. Don't add to that number.)
 
 ### Rule 4 — Never break co-tenants
 This box also runs AlecRae, Gluecron, GateTest, and the Coolify stack.
-Jarvis owns ports 9200–9211 and nothing else. Before binding any port,
+Jarvis owns ports 9200–9212 and nothing else. Before binding any port,
 check `ss -tlnp`. Do not modify co-tenant config from this repo.
 
 ### Rule 5 — No competitor dependencies
@@ -194,6 +194,15 @@ Public (0.0.0.0):
 - :22 sshd
 - :80 / :443 — **Coolify's Traefik** (`coolify-proxy` container) — TLS front door for gluecron.com and other Coolify apps
 - :6001/:6002 — Coolify realtime; :8000 — Coolify web UI; :8080 — Traefik (published by Coolify)
+- :9212 — jarvis-dashboard's public liveness ping (2026-07-19). ONE route
+  (`GET /health` → `{"status":"ok"}`), plain `http.createServer`, no express,
+  no auth surface, no other route ever. The July 18 hardening session moved
+  the real dashboard (:9206, job-dispatch WS + API) to loopback-only —
+  correct, that's a real control surface — but silently killed the public
+  `:9206/health` signal that KNOWN DEBT #1 / Roadmap move #21's off-box
+  watcher depends on. This port exists ONLY to restore that liveness signal.
+  If you ever need more than a static "ok" here, that's a sign to build a
+  proper endpoint elsewhere, not extend this one.
 
 Loopback only:
 - :3000 gatetest-web (binds 10.0.1.1, coolify bridge — Traefik fronts gatetest.ai)
@@ -202,7 +211,7 @@ Loopback only:
 - :9200–9202, :9204–9207 Jarvis services
 - :9208 jarvis-gateway — loopback + `tailscale serve --https=8443` (tailnet-only HTTPS; never expose publicly)
 - :9209 jarvis-agents · :9210 jarvis-deck · :9211 jarvis-browser — loopback; deck is also on `tailscale serve --https=8444`
-- :9206 jarvis-dashboard — loopback + `tailscale serve --https=8445` (tailnet-only, same rule as deck and gateway)
+- :9206 jarvis-dashboard — loopback + `tailscale serve --https=8445` (tailnet-only, same rule as deck and gateway). Its `/health` is NOT public despite an old comment claiming otherwise — see :9212 above for the actual public liveness ping.
 
 The old doctrine said Vapron owns 3000/3001/8090/9099 — **not true on this
 box**. Vapron lives elsewhere; check `config/platforms.json` for servers.
@@ -321,6 +330,10 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
 
 Cleared 2026-07-06: dashboard auth (was #1), cupsd exposure (was #2),
 keyword-only intents (was #3), no DB backups (was #5) — see git log.
+Cleared 2026-07-19: resource guards / pre-OOM alerting (metrics-collector.js);
+no external watcher (was silently broken by the July 18 dashboard hardening —
+see :9212 in PORTS ON THIS BOX — a cloud-scheduled routine now pings it hourly
+and alerts Craig on a state change, see docs/OFF-BOX-WATCHDOG.md).
 
 ---
 
