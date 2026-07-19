@@ -1,5 +1,14 @@
 {
   "platforms": {
+    "craig-pc": {
+      "name": "craig-pc",
+      "display_name": "Craig's PC",
+      "server": "pc",
+      "executor": "pc",
+      "path": "C:\\dev",
+      "status": "active",
+      "notes": "Windows 11 worker node (this machine). Jobs run via src/pc-worker.js pulling over the tailnet — see docs/PC-WORKER.md. Not part of the platform fleet; no repo, no build/push."
+    },
     "zoobicon": {
       "name": "zoobicon",
       "display_name": "Zoobicon",
@@ -8,19 +17,27 @@
       "repo": "git@github.com:ccantynz-alt/zoobicon.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "React", "Node.js"],
+      "tech_stack": [
+        "TypeScript",
+        "React",
+        "Node.js"
+      ],
       "status": "active"
     },
     "vapron": {
       "name": "vapron",
       "display_name": "Vapron",
-      "server": "66.42.121.161",
-      "path": "/root/vapron",
+      "server": "100.89.227.39",
+      "path": "/opt/vapron",
       "repo": "git@github.com:ccantynz-alt/vapron.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "React"],
-      "status": "active"
+      "tech_stack": [
+        "TypeScript",
+        "React"
+      ],
+      "status": "active",
+      "public_host": "mail.vapron.ai"
     },
     "bookaride": {
       "name": "bookaride",
@@ -30,7 +47,10 @@
       "repo": "git@github.com:ccantynz-alt/bookaride.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "React"],
+      "tech_stack": [
+        "TypeScript",
+        "React"
+      ],
       "status": "active"
     },
     "gatetest": {
@@ -41,7 +61,10 @@
       "repo": "git@github.com:ccantynz-alt/gatetest.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "Node.js"],
+      "tech_stack": [
+        "TypeScript",
+        "Node.js"
+      ],
       "status": "active"
     },
     "alecrae": {
@@ -52,9 +75,17 @@
       "repo": "git@github.com:ccantynz-alt/alecrae.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "React", "Next.js"],
+      "tech_stack": [
+        "TypeScript",
+        "React",
+        "Next.js"
+      ],
       "status": "active",
-      "services": ["alecrae-api", "alecrae-mta", "alecrae-web"],
+      "services": [
+        "alecrae-api",
+        "alecrae-mta",
+        "alecrae-web"
+      ],
       "port": 4100
     },
     "jarvis": {
@@ -65,7 +96,10 @@
       "repo": "git@github.com:ccantynz-alt/jarvis-platform.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["Node.js", "JavaScript"],
+      "tech_stack": [
+        "Node.js",
+        "JavaScript"
+      ],
       "status": "active"
     },
     "voxlen": {
@@ -76,7 +110,13 @@
       "repo": "git@github.com:ccantynz-alt/voxlen.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "React", "Rust", "Tauri", "Swift"],
+      "tech_stack": [
+        "TypeScript",
+        "React",
+        "Rust",
+        "Tauri",
+        "Swift"
+      ],
       "status": "active"
     },
     "gluecron": {
@@ -87,7 +127,12 @@
       "repo": "git@github.com:ccantynz-alt/Gluecron.com.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "Bun", "Hono", "Drizzle ORM"],
+      "tech_stack": [
+        "TypeScript",
+        "Bun",
+        "Hono",
+        "Drizzle ORM"
+      ],
       "site_url": "https://gluecron.com",
       "status": "active"
     },
@@ -99,7 +144,10 @@
       "repo": "",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["Python", "Docker"],
+      "tech_stack": [
+        "Python",
+        "Docker"
+      ],
       "status": "active",
       "notes": "Local-only, no git remote as of 2026-07-06 (master_engine.py + venv + Dockerfile). No public domain."
     },
@@ -111,7 +159,10 @@
       "repo": "git@github.com:ccantynz-alt/marcoreid.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "Next.js"],
+      "tech_stack": [
+        "TypeScript",
+        "Next.js"
+      ],
       "site_url": "https://www.marcoreid.com",
       "status": "active",
       "notes": "Vercel-hosted (not on the box). Deploy is Vercel's; Jarvis monitors the live site + repo, not a local checkout."
@@ -124,7 +175,10 @@
       "repo": "git@github.com:ccantynz-alt/davenroe.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["TypeScript", "Next.js"],
+      "tech_stack": [
+        "TypeScript",
+        "Next.js"
+      ],
       "site_url": "https://www.davenroe.com",
       "status": "active",
       "notes": "Vercel-hosted (not on the box). Deploy is Vercel's; Jarvis monitors the live site + repo, not a local checkout."
@@ -137,9 +191,14 @@
       "repo": "https://github.com/abi/screenshot-to-code",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
-      "tech_stack": ["Python", "FastAPI", "React", "TypeScript"],
+      "tech_stack": [
+        "Python",
+        "FastAPI",
+        "React",
+        "TypeScript"
+      ],
       "status": "active",
-      "notes": "Fork of upstream abi/screenshot-to-code (third-party). Local checkout on the box; backend + frontend + docker-compose."
+      "notes": "Third-party fork (abi/screenshot-to-code). Container restarted 2026-07-17 (was OOM-exited 2026-07-03). Runs on :5173 (frontend) / :7001 (backend), loopback only. Bring up: cd /opt/screenshot-to-code && docker compose up -d. 2026-07-17: restart: unless-stopped set on both services (compose + docker update) after self-heal session 78; frontend/backend verified HTTP 200."
     }
   },
   "defaults": {

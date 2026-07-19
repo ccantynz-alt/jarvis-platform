@@ -1,9 +1,12 @@
 import express from 'express';
-import { spawn } from 'child_process';
 import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import cron from 'node-cron';
+import { pickExecutor } from './executors.js';
+import { notify } from './lib/notify.js';
+import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { getAgent, buildAgentPrompt } from './lib/agents.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -13,14 +16,106 @@ const MEMORY_SVC    = 'http://127.0.0.1:9200';
 const app = express();
 app.use(express.json());
 
-const PORT = 9205;
+// Defaults to 9205 (the live port). Honouring PORT lets a test instance bind a
+// free port without touching the live service; secrets.env sets no PORT, so the
+// systemd service still binds 9205 unchanged.
+const PORT = parseInt(process.env.PORT, 10) || 9205;
 const OWN_IP = process.env.OWN_IP || '66.42.121.161';
 const MEMORY_URL = 'http://127.0.0.1:9200';
 const REGISTRY_PATH = '/opt/jarvis/config/platforms.json';
 
-// In-memory job store — survives process lifetime only, which is enough for
-// the async dispatch use case. Jobs are also recorded in Jarvis memory.
-const jobs = new Map();
+// ── Cloud (CCR) dispatch config ───────────────────────────────────────────────
+// EVERYTHING in the cloud path is INERT unless JARVIS_CLOUD_ENABLED === '1'
+// AND both JARVIS_CLOUD_TOKEN and JARVIS_CLOUD_ENV are set. With the flag off
+// (the default), pickExecutor never returns 'cloud' and none of this runs.
+//
+// ⚠️  HUMAN CONFIRMATION REQUIRED before enabling cloud mode:
+//   - CLOUD_API_URL below is a BEST-GUESS at the Anthropic code/triggers
+//     ("routines") create+run endpoint. Confirm the real URL + auth scheme
+//     (Bearer token vs x-api-key, anthropic-version header) against live docs.
+//   - The callback must be reachable FROM the cloud agent. The orchestrator
+//     binds loopback-only (127.0.0.1:9205), so a cloud agent CANNOT reach it
+//     directly — a human must expose a public callback URL (tunnel / dashboard
+//     host / reverse proxy) and set JARVIS_CALLBACK_URL to it.
+const CLOUD_API_URL = process.env.JARVIS_CLOUD_API_URL
+  || 'https://api.anthropic.com/v1/routines';   // <-- NEEDS HUMAN CONFIRMATION
+const CLOUD_MODEL = 'claude-fable-5';
+// Default model for dispatched build/design work when the job doesn't name one
+// (Craig, 2026-07-16: Fable 5 creates the frontend/backend — role agents keep
+// their explicit per-agent models from config/agents.json, unchanged).
+const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || 'claude-fable-5';
+
+// ── Durable job queue (memory-server :9200 is the system of record) ──────────
+// Jobs live in the SQLite `jobs` table, not in this process, so they survive
+// restarts (previously an in-memory Map — every restart silently dropped the
+// whole job list). The orchestrator is the single scheduler: it enqueues on
+// /dispatch and a tick loop starts queued jobs up to MAX_CONCURRENT_JOBS.
+
+const MAX_CONCURRENT_JOBS = parseInt(process.env.MAX_CONCURRENT_JOBS, 10) || 3;
+const SCHEDULER_TICK_MS = 4000;
+const CANARY_RETRY_MS = 30 * 60_000;
+// PC-worker lease: how long a claimed job is reserved before an unrenewed
+// lease is reaped back to queued (worker slept, lost network, or crashed).
+// The worker's heartbeat (POST /worker/heartbeat) renews it while a job runs.
+const PC_LEASE_MS = 120_000;
+
+async function dbGet(path) {
+  const r = await fetch(`${MEMORY_URL}${path}`);
+  if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
+  return r.json();
+}
+
+async function dbPost(path, body) {
+  const r = await fetch(`${MEMORY_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`POST ${path} → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return r.json();
+}
+
+function jobTransition(id, to, detail, fields = {}, from = undefined) {
+  return dbPost(`/memory/jobs/${id}/transition`, { to, detail, fields, from });
+}
+
+// POST the transition and return true/false instead of throwing on a 409
+// (guard miss — someone else already moved the row). Used by the atomic
+// PC-worker claim race.
+async function tryTransition(id, to, detail, fields, from) {
+  const r = await fetch(`${MEMORY_URL}/memory/jobs/${id}/transition`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to, detail, fields, from }),
+  });
+  if (r.status === 409) return false;
+  if (!r.ok) throw new Error(`POST transition → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return true;
+}
+
+// Map a DB row to the camelCase shape /jobs and /status/:id always returned,
+// so the dashboard and conversation.js need zero changes. startedAt falls back
+// to createdAt because queued jobs haven't started and old consumers sort on it.
+function toApiJob(row) {
+  return {
+    id: row.id,
+    platform: row.platform,
+    agent: row.agent,
+    task: row.task,
+    status: row.status,
+    isLocal: row.server === OWN_IP,
+    server: row.server,
+    path: row.path,
+    executor: row.executor,
+    enqueuedBy: row.enqueued_by,
+    attempts: row.attempts,
+    startedAt: row.started_at || row.created_at,
+    finishedAt: row.finished_at,
+    exitCode: row.exit_code,
+    output: row.output,
+    error: row.error,
+  };
+}
 
 // Event log for dashboard consumption (circular buffer, last 200 events)
 const eventLog = [];
@@ -49,7 +144,12 @@ function loadDesignRefs(platformPath) {
   }
 }
 
-function buildPrompt(platform, task, platformPath) {
+function buildPrompt(platform, task, platformPath, executor = null) {
+  // PC-worker jobs run on Craig's Windows machine, not the Linux fleet box —
+  // none of the session-start.sh / CLAUDE.md / git-push boilerplate applies
+  // (no /opt/jarvis there, no platform repo to push).
+  if (executor === 'pc') return task;
+
   const parts = [
     `Read CLAUDE.md.`,
     `Run bash /opt/jarvis/scripts/session-start.sh ${platform}.`,
@@ -95,101 +195,447 @@ function platformEnv(platform) {
   return extra;
 }
 
-function runLocal(platform, path, prompt, job) {
-  const proc = spawn(
-    'claude',
-    ['--dangerously-skip-permissions', '--print', prompt],
-    {
-      cwd: path,
-      env: { ...process.env, HOME: '/root', ...platformEnv(platform) },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }
-  );
+// Record a completed spawn result against the job row. Same notify/memory
+// behavior the old in-process handlers had.
+async function finishJob(row, result) {
+  const success = result.code === 0 && !result.timedOut;
+  const error = result.timedOut
+    ? `timed out after ${row.timeout_min} min\n${result.stderr}`
+    : result.stderr;
 
-  let stdout = '';
-  let stderr = '';
-  proc.stdout.on('data', (d) => { stdout += d.toString(); });
-  proc.stderr.on('data', (d) => { stderr += d.toString(); });
-
-  proc.on('close', (code) => {
-    const success = code === 0;
-    job.status = success ? 'completed' : 'failed';
-    job.exitCode = code;
-    job.output = stdout.slice(-4000);  // keep last 4k chars
-    job.error = stderr.slice(-2000);
-    job.finishedAt = new Date().toISOString();
-
-    console.log(`[orchestrator] job ${job.id} (${platform}) finished — exit ${code}`);
-    logToMemory({
-      platform,
-      status: success ? 'healthy' : 'error',
-      notes: `Orchestrator job ${job.id}: ${success ? 'completed' : 'failed (exit ' + code + ')'}`,
+  await jobTransition(row.id, success ? 'completed' : 'failed',
+    result.timedOut ? 'timeout' : `exit ${result.code}`, {
+      finished_at: new Date().toISOString(),
+      exit_code: result.code,
+      output: result.stdout,
+      error: String(error || '').slice(-2000),
     });
-  });
 
-  proc.on('error', (err) => {
-    job.status = 'failed';
-    job.error = err.message;
-    job.finishedAt = new Date().toISOString();
-    console.error(`[orchestrator] job ${job.id} spawn error:`, err.message);
+  console.log(`[orchestrator] job ${row.id} (${row.platform}) finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
+  logEvent(success ? 'JOB' : 'ERR',
+    `Agent ${success ? 'completed' : 'failed'} — ${row.id.slice(0, 8)} on ${row.platform} (exit ${result.code}${result.timedOut ? ', timeout' : ''})`);
+  // Role-agent jobs must not flip platform health state — a social-media
+  // draft succeeding says nothing about the platform being healthy.
+  if (!row.agent) {
+    logToMemory({
+      platform: row.platform,
+      status: success ? 'healthy' : 'error',
+      notes: `Orchestrator job ${row.id}: ${success ? 'completed' : 'failed (exit ' + result.code + ')'}`,
+    });
+  }
+  if (!success) {
+    notify({
+      source: 'orchestrator',
+      level: 'error',
+      title: `❌ Job failed on ${row.platform} (exit ${result.code}${result.timedOut ? ', timeout' : ''})`,
+      body: `Job ${row.id.slice(0, 8)}: ${(error || result.stdout || 'no output').slice(0, 500)}`,
+    }).catch((e) => console.error('[orchestrator] failure notify failed:', e.message));
+  }
+}
+
+async function runLocalJob(row) {
+  const result = await spawnClaude({
+    prompt: row.prompt,
+    cwd: row.path,
+    model: row.model || DEFAULT_WORKER_MODEL,
+    extraEnv: platformEnv(row.platform),
+    timeoutMin: row.timeout_min,
+  });
+  await finishJob(row, result);
+}
+
+async function runRemoteJob(row) {
+  // Escape single quotes in the prompt for shell safety
+  const safePrompt = row.prompt.replace(/'/g, "'\\''");
+  const extraEnvStr = Object.entries(platformEnv(row.platform))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(' ');
+  const sshCmd = `cd ${row.path} && IS_SANDBOX=1 DISABLE_AUTOUPDATER=1 ${extraEnvStr ? extraEnvStr + ' ' : ''}claude --dangerously-skip-permissions --print '${safePrompt}'`;
+
+  const result = await spawnProcess('ssh', [
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'ConnectTimeout=10',
+    '-i', '/opt/jarvis/.ssh/orchestrator',
+    `root@${row.server}`,
+    sshCmd,
+  ], { env: process.env, timeoutMin: row.timeout_min });
+  await finishJob(row, result);
+}
+
+// Resolve a job row to a clean failure without crashing the process.
+async function failJobRow(row, message) {
+  logEvent('ERR', `Job ${row.id.slice(0, 8)} failed: ${String(message).slice(0, 100)}`);
+  console.error(`[orchestrator] job ${row.id} failed:`, message);
+  await jobTransition(row.id, 'failed', 'error', {
+    finished_at: new Date().toISOString(),
+    exit_code: 1,
+    error: String(message).slice(-2000),
+  }).catch((e) => console.error('[orchestrator] fail transition failed:', e.message));
+  logToMemory({
+    platform: row.platform,
+    status: 'error',
+    notes: `Orchestrator job ${row.id}: failed — ${String(message).slice(0, 120)}`,
   });
 }
 
-function runRemote(platform, server, path, prompt, job) {
-  // Escape single quotes in the prompt for shell safety
-  const safePrompt = prompt.replace(/'/g, "'\\''");
-  const extraEnvStr = Object.entries(platformEnv(platform))
-    .map(([k, v]) => `${k}=${v}`)
-    .join(' ');
-  const sshCmd = `cd ${path} && ${extraEnvStr ? extraEnvStr + ' ' : ''}claude --dangerously-skip-permissions --print '${safePrompt}'`;
+// runCloud — dispatch a cloud CCR agent via the Anthropic code/triggers API.
+// Clones entry.repo, appends a FINAL-STEP instruction telling the agent to POST
+// its result back to /dispatch/callback. Resolves the SAME job fields runLocal
+// sets. On any misconfiguration or API error it fails the job cleanly (never
+// crashes). Reached only when JARVIS_CLOUD_ENABLED==='1' routes here.
+async function runCloud(row) {
+  const platform = row.platform;
+  const token = process.env.JARVIS_CLOUD_TOKEN;
+  const environmentId = process.env.JARVIS_CLOUD_ENV;
 
-  const proc = spawn(
-    'ssh',
-    [
-      '-o', 'StrictHostKeyChecking=no',
-      '-o', 'ConnectTimeout=10',
-      '-i', '/opt/jarvis/.ssh/orchestrator',
-      `root@${server}`,
-      sshCmd,
-    ],
-    { stdio: ['ignore', 'pipe', 'pipe'] }
-  );
+  // Fail cleanly (do NOT crash) when cloud creds are missing.
+  if (!token || !environmentId) {
+    const missing = !token ? 'JARVIS_CLOUD_TOKEN' : 'JARVIS_CLOUD_ENV';
+    return failJobRow(row, `cloud dispatch unavailable: ${missing} is not set`);
+  }
+  let entry;
+  try {
+    entry = loadRegistry()[platform];
+  } catch (e) {
+    return failJobRow(row, `cloud dispatch: registry load failed — ${e.message}`);
+  }
+  if (!entry?.repo) {
+    return failJobRow(row, `cloud dispatch requires a git repo for platform "${platform}" (entry.repo is empty)`);
+  }
 
-  let stdout = '';
-  let stderr = '';
-  proc.stdout.on('data', (d) => { stdout += d.toString(); });
-  proc.stderr.on('data', (d) => { stderr += d.toString(); });
+  // The cloud agent runs off-box, so it cannot reach the loopback orchestrator.
+  // A human must set JARVIS_CALLBACK_URL to a publicly reachable endpoint that
+  // proxies to POST /dispatch/callback. Falls back to a best-effort URL.
+  const callbackUrl = process.env.JARVIS_CALLBACK_URL
+    || `http://${OWN_IP}:${PORT}/dispatch/callback`;
 
-  proc.on('close', (code) => {
-    const success = code === 0;
-    job.status = success ? 'completed' : 'failed';
-    job.exitCode = code;
-    job.output = stdout.slice(-4000);
-    job.error = stderr.slice(-2000);
-    job.finishedAt = new Date().toISOString();
-    console.log(`[orchestrator] job ${job.id} (${platform}@${server}) finished — exit ${code}`);
-    logEvent(success ? 'JOB' : 'ERR',
-      `Agent ${success ? 'completed' : 'failed'} — ${job.id.slice(0,8)} on ${platform} (exit ${code})`);
+  const finalStep = [
+    ``,
+    ``,
+    `FINAL STEP (required): after all work is complete, report back to Jarvis by`,
+    `sending an HTTP POST to ${callbackUrl}`,
+    `with header "X-Jarvis-Token: ${token}" and a JSON body:`,
+    `{"jobId":"${row.id}","ok":true,"summary":"<one-paragraph summary of what you did>"}`,
+    `Set "ok" to false if the task could not be completed.`,
+  ].join('\n');
+
+  const content = row.prompt + finalStep;
+
+  // Request shape per the reference (routines/trigger create+run). Endpoint and
+  // auth scheme are BEST-GUESS — see CLOUD_API_URL note. Needs human confirmation.
+  const body = {
+    name: `jarvis-${platform}-${row.id.slice(0, 8)}`,
+    run_once_at: new Date().toISOString(),
+    job_config: {
+      ccr: {
+        environment_id: environmentId,
+        session_context: {
+          model: CLOUD_MODEL,
+          sources: [{ git_repository: { url: entry.repo } }],
+          allowed_tools: ['Read', 'Edit', 'Write', 'Bash'],
+        },
+        events: [
+          { data: { type: 'user', message: { role: 'user', content } } },
+        ],
+      },
+    },
+  };
+
+  try {
+    const r = await fetch(CLOUD_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+
+    if (!r.ok) {
+      return failJobRow(row, `cloud API ${r.status}: ${text.slice(0, 500)}`);
+    }
+
+    // Dispatched OK. The job stays 'running' until the agent POSTs the callback,
+    // at which point /dispatch/callback resolves status/output/finished_at.
+    await jobTransition(row.id, 'running', 'cloud agent dispatched, awaiting callback', {
+      output: `Cloud agent dispatched (CCR ${CLOUD_MODEL}). Awaiting callback for job ${row.id}. API response: ${text.slice(0, 500)}`,
+    });
+    logEvent('CLOUD', `Cloud agent dispatched — ${row.id.slice(0, 8)} on ${platform}`);
     logToMemory({
       platform,
-      status: success ? 'healthy' : 'error',
-      notes: `Orchestrator job ${job.id} (remote ${server}): ${success ? 'completed' : 'failed (exit ' + code + ')'}`,
+      status: 'working',
+      notes: `Orchestrator job ${row.id} dispatched to cloud (${platform}); awaiting callback`,
     });
-  });
+  } catch (e) {
+    return failJobRow(row, `cloud dispatch error: ${e.message}`);
+  }
+}
 
-  proc.on('error', (err) => {
-    job.status = 'failed';
-    job.error = err.message;
-    job.finishedAt = new Date().toISOString();
-    logEvent('ERR', `Agent spawn error — ${job.id.slice(0,8)} on ${platform}: ${err.message}`);
-    console.error(`[orchestrator] job ${job.id} ssh error:`, err.message);
-  });
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+
+let gateHeld = false;
+let lastCanaryAt = 0;
+let tickInFlight = false;
+
+async function executeJob(row) {
+  try {
+    if (row.executor === 'cloud') return await runCloud(row);
+    if (row.executor === 'local') return await runLocalJob(row);
+    // 'pc' jobs are pulled via /worker/claim, never started here — the
+    // scheduler filter above keeps them out of toStart. Defensive-only.
+    if (row.executor === 'pc') return;
+    return await runRemoteJob(row);
+  } catch (e) {
+    await failJobRow(row, e.message);
+  }
+}
+
+async function schedulerTick() {
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+    const queued = await dbGet('/memory/jobs?status=queued&limit=100');
+    if (!queued.length) return;
+
+    const running = await dbGet('/memory/jobs?status=running&limit=100');
+    const slots = MAX_CONCURRENT_JOBS - running.length;
+    if (slots <= 0) return;
+
+    // Canary gate: a changed claude CLI must pass a probe before ANY job
+    // starts. While held, jobs stay queued (nothing is lost) and the gate
+    // retries every CANARY_RETRY_MS.
+    if (gateHeld && Date.now() - lastCanaryAt < CANARY_RETRY_MS) return;
+    const gate = await ensureClaudeVerified();
+    lastCanaryAt = Date.now();
+    if (!gate.ok) {
+      if (!gateHeld) {
+        gateHeld = true;
+        logEvent('ERR', `Canary FAILED — claude dispatch HELD (${gate.version || 'no version'})`);
+        notify({
+          source: 'orchestrator',
+          level: 'alert',
+          title: `🛑 Claude CLI ${gate.version || '(unknown)'} failed canary — dispatch HELD`,
+          body: `${gate.detail}\nQueued jobs are safe and will run once the canary passes. Retrying every 30 min.`,
+          speech: 'Warning. The Claude command line failed its canary check. Agent dispatch is held until it passes.',
+        }).catch(() => {});
+      }
+      return;
+    }
+    if (gateHeld) {
+      gateHeld = false;
+      logEvent('SYS', `Canary passed — dispatch resumed (${gate.version})`);
+      notify({
+        source: 'orchestrator',
+        title: `✅ Claude CLI canary passed — dispatch resumed (${gate.version})`,
+      }).catch(() => {});
+    }
+
+    // executor='pc' jobs are PULLED by the Windows worker via POST /worker/claim
+    // (it may be asleep, offline, or mid-job) — the scheduler never starts them
+    // itself. reapExpiredPcLeases() below is their only path back to 'queued'.
+    const toStart = queued
+      .filter(r => r.executor !== 'pc')
+      .sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at))
+      .slice(0, slots);
+
+    for (const row of toStart) {
+      await jobTransition(row.id, 'running', 'scheduler start', {
+        started_at: new Date().toISOString(),
+        attempts: row.attempts + 1,
+      });
+      logEvent('DISPATCH', `Job ${row.id.slice(0, 8)} started → ${row.platform} (${row.executor})`);
+      console.log(`[orchestrator] starting job ${row.id} → ${row.platform} (${row.executor})`);
+      executeJob({ ...row, attempts: row.attempts + 1 });  // async — not awaited
+    }
+
+    await reapExpiredPcLeases();
+  } catch (e) {
+    console.error('[scheduler] tick error:', e.message);
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+// A claimed PC job whose lease expired means the worker went to sleep, lost
+// the tailnet, or crashed mid-job — put it back in the queue (or fail it if
+// out of attempts) exactly like the boot-recovery path does for a restart.
+async function reapExpiredPcLeases() {
+  let running;
+  try { running = await dbGet('/memory/jobs?status=running&limit=200'); }
+  catch { return; }
+  const now = new Date().toISOString();
+  for (const row of running) {
+    if (row.executor !== 'pc' || !row.lease_until || row.lease_until > now) continue;
+    const ok = await tryTransition(row.id, 'interrupted', 'pc worker lease expired', {}, 'running');
+    if (!ok) continue; // a heartbeat/result won the race first
+    logEvent('WARN', `PC job ${row.id.slice(0, 8)} lease expired (worker ${row.worker_id || '?'}) — re-queuing`);
+    if (row.attempts < row.max_attempts) {
+      await jobTransition(row.id, 'queued', `re-queued after lease expiry (attempt ${row.attempts}/${row.max_attempts})`);
+    } else {
+      await jobTransition(row.id, 'failed', 'pc worker lease expired, attempts exhausted', {
+        finished_at: new Date().toISOString(),
+        error: 'PC worker lost the job lease and attempts are exhausted',
+      });
+      notify({
+        source: 'orchestrator', level: 'warn',
+        title: `PC job failed — worker unreachable`,
+        body: `Job ${row.id.slice(0, 8)} (${row.task?.slice(0, 100)}) lost its lease and had no attempts left.`,
+      }).catch(() => {});
+    }
+  }
+}
+
+// ── PC worker endpoints (pull-based dispatch, loopback-only) ────────────────
+// Reached via the gateway's tailnet-authenticated proxy (POST /worker/* on
+// :9208, JARVIS_WORKER_TOKEN) — this service itself binds 127.0.0.1 only, so
+// no separate auth check is needed here (same trust boundary as /dispatch).
+
+// POST /worker/claim { worker_id }
+// Atomically claims the oldest queued executor='pc' job, or 204 when none.
+app.post('/worker/claim', async (req, res) => {
+  const workerId = (req.body && req.body.worker_id) || 'unknown';
+  const enabled = await pcWorkerEnabled();
+  if (!enabled) return res.status(204).end();
+  let candidates;
+  try {
+    candidates = await dbGet('/memory/jobs?status=queued&executor=pc&limit=20');
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+  candidates.sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at));
+  const leaseUntil = new Date(Date.now() + PC_LEASE_MS).toISOString();
+  for (const row of candidates) {
+    const ok = await tryTransition(row.id, 'running',
+      `claimed by ${workerId}`,
+      { started_at: new Date().toISOString(), attempts: row.attempts + 1, worker_id: workerId, lease_until: leaseUntil },
+      'queued');
+    if (!ok) continue; // another claim/reap beat us to this one — try the next
+    logEvent('DISPATCH', `PC job ${row.id.slice(0, 8)} claimed by ${workerId}`);
+    return res.json({
+      id: row.id, task: row.task, prompt: row.prompt, path: row.path,
+      timeout_min: row.timeout_min, model: row.model, lease_seconds: PC_LEASE_MS / 1000,
+    });
+  }
+  return res.status(204).end();
+});
+
+// POST /worker/heartbeat { worker_id, job_id? }
+// Keeps the worker's presence known and, when it holds a job, extends the
+// lease so the reaper doesn't reclaim work still genuinely in progress.
+app.post('/worker/heartbeat', async (req, res) => {
+  const { worker_id, job_id } = req.body || {};
+  await dbPost('/memory/kv', { key: `pc-worker-last-seen:${worker_id || 'unknown'}`, value: new Date().toISOString() }).catch(() => {});
+  if (job_id) {
+    await jobTransition(job_id, 'running', 'lease renewed', { lease_until: new Date(Date.now() + PC_LEASE_MS).toISOString() }, 'running').catch(() => {});
+  }
+  res.json({ enabled: await pcWorkerEnabled() });
+});
+
+// POST /worker/result { job_id, code, stdout, stderr, timedOut }
+app.post('/worker/result', async (req, res) => {
+  const { job_id, code, stdout = '', stderr = '', timedOut = false } = req.body || {};
+  if (!job_id) return res.status(400).json({ error: 'job_id required' });
+  let row;
+  try { row = await dbGet(`/memory/jobs/${job_id}`); }
+  catch { return res.status(404).json({ error: 'Job not found' }); }
+  await finishJob(row, { code, stdout, stderr, timedOut });
+  res.json({ ok: true });
+});
+
+async function pcWorkerEnabled() {
+  try {
+    const r = await dbGet('/memory/kv/pc-worker-enabled');
+    return r.value !== '0';
+  } catch { return true; } // no KV entry yet = enabled by default
+}
+
+// Boot recovery: anything left 'running' by a previous process is transitioned
+// to 'interrupted', then re-queued if it has attempts left, else failed.
+async function recoverInterruptedJobs() {
+  try {
+    const running = await dbGet('/memory/jobs?status=running&limit=500');
+    if (!running.length) return;
+    let requeued = 0;
+    let failed = 0;
+    for (const row of running) {
+      await jobTransition(row.id, 'interrupted', 'orchestrator restarted mid-run');
+      if (row.attempts < row.max_attempts) {
+        await jobTransition(row.id, 'queued', `re-queued (attempt ${row.attempts}/${row.max_attempts})`);
+        requeued++;
+      } else {
+        await jobTransition(row.id, 'failed', 'interrupted, attempts exhausted', {
+          finished_at: new Date().toISOString(),
+          error: 'interrupted by orchestrator restart, no attempts left',
+        });
+        failed++;
+      }
+    }
+    logEvent('SYS', `Recovery: ${running.length} interrupted job(s) — ${requeued} re-queued, ${failed} failed`);
+    notify({
+      source: 'orchestrator',
+      level: failed ? 'warn' : 'info',
+      title: `♻️ Orchestrator restarted — recovered ${running.length} job(s)`,
+      body: `${requeued} re-queued and will resume shortly; ${failed} failed (attempts exhausted).`,
+    }).catch(() => {});
+  } catch (e) {
+    console.error('[orchestrator] boot recovery failed:', e.message);
+  }
 }
 
 // POST /dispatch  { platform, task }
 // platform="auto" → scan task text for a known platform name, fall back to "vapron"
 app.post('/dispatch', async (req, res) => {
-  let { platform, task } = req.body || {};
+  let { platform, task, agent, executor: requestedExecutor } = req.body || {};
+
+  // ── Role-agent dispatch: prompt comes from the agent registry, not the
+  // platform boilerplate (no session scripts, no commit/push, cwd sandboxed).
+  if (agent) {
+    let role;
+    try {
+      role = getAgent(agent);
+    } catch (e) {
+      return res.status(500).json({ error: 'failed to load agent registry: ' + e.message });
+    }
+    if (!role) return res.status(404).json({ error: `Unknown agent: ${agent}` });
+    if (role.kind !== 'role') return res.status(400).json({ error: `Agent "${agent}" is ${role.kind}, not a dispatchable role` });
+    if (role.status !== 'active') return res.status(409).json({ error: `Agent "${agent}" is ${role.status}` });
+
+    const jobId = randomUUID();
+    let prompt;
+    try {
+      prompt = buildAgentPrompt(role, task, jobId);
+    } catch (e) {
+      return res.status(500).json({ error: 'failed to build agent prompt: ' + e.message });
+    }
+
+    try {
+      await dbPost('/memory/jobs', {
+        id: jobId,
+        platform: role.platform || null,
+        agent: role.name,
+        task: task || `Scheduled run: ${role.display_name}`,
+        prompt,
+        executor: 'local',
+        runtime: role.runtime || 'claude',
+        model: role.model || null,
+        server: OWN_IP,
+        path: role.permissions.cwd,
+        enqueued_by: (req.body && req.body.enqueued_by) || 'api',
+        parent_job_id: (req.body && req.body.parent_job_id) || null,
+        priority: role.priority ?? 5,
+        timeout_min: role.budget?.timeout_min ?? 20,
+        max_attempts: 2,
+      });
+    } catch (e) {
+      return res.status(500).json({ error: 'failed to enqueue agent job: ' + e.message });
+    }
+
+    logEvent('DISPATCH', `Agent job ${jobId.slice(0, 8)} queued → ${role.name}`);
+    console.log(`[orchestrator] enqueued agent job ${jobId} → ${role.name}`);
+    return res.json({ jobId, status: 'queued', agent: role.name, executor: 'local' });
+  }
 
   if (!platform || !task) {
     return res.status(400).json({ error: 'platform and task are required' });
@@ -227,62 +673,111 @@ app.post('/dispatch', async (req, res) => {
   }
 
   const jobId = randomUUID();
-  const job = {
-    id: jobId,
-    platform,
-    task,
-    status: 'running',
-    isLocal: entry.server === OWN_IP,
-    server: entry.server,
-    path: entry.path,
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    exitCode: null,
-    output: null,
-    error: null,
-  };
-  jobs.set(jobId, job);
+  const isLocal = entry.server === OWN_IP;
 
-  const prompt = buildPrompt(platform, task, job.isLocal ? entry.path : null);
-  const designRefs = job.isLocal ? loadDesignRefs(entry.path) : [];
+  // Choose the executor. With JARVIS_CLOUD_ENABLED unset, pickExecutor returns
+  // exactly the legacy result: 'local' for OWN_IP, 'remote' otherwise.
+  const executor = pickExecutor(platform, entry, task, requestedExecutor);
+  const prompt = buildPrompt(platform, task, isLocal ? entry.path : null, executor);
+
+  const designRefs = isLocal ? loadDesignRefs(entry.path) : [];
   if (designRefs.length > 0) {
     console.log(`[orchestrator] design-refs for ${platform}: ${designRefs.length} file(s)`);
     logEvent('DESIGN', `Found ${designRefs.length} design ref(s) for ${platform}`);
   }
+
+  // Enqueue durably; the scheduler tick starts it within a few seconds.
+  // max_attempts 2 = one automatic retry if a restart interrupts the job.
+  try {
+    await dbPost('/memory/jobs', {
+      id: jobId,
+      platform,
+      task,
+      prompt,
+      executor,
+      server: entry.server,
+      path: entry.path,
+      enqueued_by: (req.body && req.body.enqueued_by) || 'api',
+      parent_job_id: (req.body && req.body.parent_job_id) || null,
+      priority: (req.body && req.body.priority) ?? 5,
+      timeout_min: (req.body && req.body.timeout_min) ?? 30,
+      max_attempts: 2,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'failed to enqueue job: ' + e.message });
+  }
+
   logEvent('DISPATCH', `Job ${jobId.slice(0,8)} queued → ${platform}: ${task.slice(0,80)}`);
-  console.log(`[orchestrator] dispatching job ${jobId} → ${platform} (${entry.server})`);
+  console.log(`[orchestrator] enqueued job ${jobId} → ${platform} (${entry.server}, ${executor})`);
 
   await logToMemory({
     platform,
     status: 'working',
-    notes: `Orchestrator job ${jobId} started: ${task.slice(0, 100)}`,
+    notes: `Orchestrator job ${jobId} queued: ${task.slice(0, 100)}`,
   });
 
-  // Dispatch async — response returns immediately with the job ID
-  if (job.isLocal) {
-    runLocal(platform, entry.path, prompt, job);
-  } else {
-    runRemote(platform, entry.server, entry.path, prompt, job);
-  }
-
-  res.json({ jobId, status: 'running', platform, isLocal: job.isLocal });
+  res.json({ jobId, status: 'queued', platform, isLocal, executor });
 });
 
 // GET /status/:jobId
-app.get('/status/:jobId', (req, res) => {
-  const job = jobs.get(req.params.jobId);
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
+app.get('/status/:jobId', async (req, res) => {
+  try {
+    const row = await dbGet(`/memory/jobs/${req.params.jobId}`);
+    res.json(toApiJob(row));
+  } catch {
+    res.status(404).json({ error: 'Job not found' });
   }
-  res.json(job);
 });
 
-// GET /jobs  — list all jobs (most recent first)
-app.get('/jobs', (req, res) => {
-  const list = Array.from(jobs.values())
-    .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-    .slice(0, 50);
-  res.json(list);
+// POST /dispatch/callback  { jobId, ok, summary }
+// Cloud CCR agents POST here when they finish. Authenticated by the shared
+// X-Jarvis-Token header (must equal JARVIS_CLOUD_TOKEN). Harmless when unused:
+// if JARVIS_CLOUD_TOKEN is not set, every request is rejected with 401.
+app.post('/dispatch/callback', async (req, res) => {
+  const expected = process.env.JARVIS_CLOUD_TOKEN;
+  const provided = req.header('X-Jarvis-Token');
+  if (!expected || !provided || provided !== expected) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+
+  const { jobId, ok, summary } = req.body || {};
+  if (!jobId) return res.status(400).json({ error: 'jobId is required' });
+
+  let row;
+  try {
+    row = await dbGet(`/memory/jobs/${jobId}`);
+  } catch {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+
+  const success = ok === true || ok === 'true';
+  await jobTransition(jobId, success ? 'completed' : 'failed', 'cloud callback', {
+    finished_at: new Date().toISOString(),
+    exit_code: success ? 0 : 1,
+    output: String(summary || '').slice(-4000),
+    ...(success ? {} : { error: String(summary || 'cloud agent reported failure').slice(-2000) }),
+  }).catch((e) => console.error('[orchestrator] callback transition failed:', e.message));
+
+  logEvent(success ? 'JOB' : 'ERR',
+    `Cloud callback — ${jobId.slice(0, 8)} on ${row.platform} ${success ? 'completed' : 'failed'}`);
+  console.log(`[orchestrator] cloud callback for job ${jobId} — ${success ? 'completed' : 'failed'}`);
+  logToMemory({
+    platform: row.platform,
+    status: success ? 'healthy' : 'error',
+    notes: `Orchestrator cloud job ${jobId}: ${success ? 'completed' : 'failed'} (via callback)`,
+  });
+
+  res.json({ ok: true });
+});
+
+// GET /jobs  — list recent jobs (most recent first)
+app.get('/jobs', async (_req, res) => {
+  try {
+    const rows = await dbGet('/memory/jobs?limit=50');
+    res.json(rows.map(toApiJob));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /platforms  — dump the registry
@@ -301,8 +796,20 @@ app.get('/events', (req, res) => {
 });
 
 // GET /health
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', port: PORT, jobs: jobs.size, events: eventLog.length });
+app.get('/health', async (_req, res) => {
+  let queue = null;
+  try {
+    const counts = await dbGet('/memory/jobs/counts?window=today');
+    queue = Object.fromEntries(counts.by_status.map((r) => [r.status, r.count]));
+  } catch {}
+  res.json({
+    status: 'ok',
+    port: PORT,
+    queue,
+    canaryHeld: gateHeld,
+    maxConcurrent: MAX_CONCURRENT_JOBS,
+    events: eventLog.length,
+  });
 });
 
 // ── Cron helpers ─────────────────────────────────────────────────────────────
@@ -315,14 +822,17 @@ async function slackSend(text, level = 'warning', key = null) {
       body: JSON.stringify({ text, level, key }),
     });
   } catch (e) {
-    console.error('[cron] slack send failed:', e.message);
+    console.error('[cron] notify failed:', e.message);
   }
 }
 
 async function cronDailyAudit() {
   logEvent('CRON', 'Daily audit sprint starting — scanning all platforms');
   const registry = loadRegistry();
-  const names = Object.keys(registry).filter(p => p !== 'jarvis');
+  // 'jarvis' (meta-platform) and 'pc'-executor worker nodes (Craig's own
+  // machine — no repo, no build/deploy, nothing a web audit can score) are
+  // not audit targets.
+  const names = Object.keys(registry).filter(p => p !== 'jarvis' && registry[p]?.executor !== 'pc');
 
   // /audit/run is fire-and-forget (audit-runner responds before the audit
   // finishes), so there are no scores to report from here. Per-platform
@@ -367,7 +877,7 @@ async function cronDailyScreenshots() {
     alecrae:  'https://alecrae.com',
     gatetest: 'https://gatetest.ai',
     voxlen:   'https://voxlen.com',
-    bookaride:'https://bookaride.com',
+    bookaride:'https://www.bookaride.co.nz',
   };
 
   for (const [platform, url] of Object.entries(PLATFORM_URLS)) {
@@ -420,7 +930,7 @@ async function cronWeeklySummary() {
     if (unknown.length)  msg += `\n*Not yet audited:* ${unknown.map(p => `❓ ${p.name}`).join('  ')}\n`;
     if (mem.open_issues > 0) msg += `\n⚠️ *${mem.open_issues} open issues across all platforms*\n`;
 
-    const runningJobs = Array.from(jobs.values()).filter(j => j.status === 'running');
+    const runningJobs = await dbGet('/memory/jobs?status=running&limit=100').catch(() => []);
     if (runningJobs.length) msg += `\n⏳ *${runningJobs.length} agent job(s) currently running*`;
 
     await slackSend(msg);
@@ -456,6 +966,9 @@ app.post('/cron/weekly',    (_req, res) => { cronWeeklySummary();    res.json({ 
 
 logEvent('SYS', 'Orchestrator initialized — ready to dispatch agents');
 
-app.listen(PORT, '127.0.0.1', () => {
+app.listen(PORT, '127.0.0.1', async () => {
   console.log(`[orchestrator] listening on http://127.0.0.1:${PORT}`);
+  await recoverInterruptedJobs();
+  setInterval(schedulerTick, SCHEDULER_TICK_MS);
+  console.log(`[orchestrator] scheduler running (tick ${SCHEDULER_TICK_MS}ms, max ${MAX_CONCURRENT_JOBS} concurrent)`);
 });

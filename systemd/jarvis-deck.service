@@ -1,0 +1,16 @@
+[Unit]
+Description=Jarvis Command Deck — tailnet-private HUD + telemetry WebSocket at :9210
+After=network.target jarvis-memory.service jarvis-orchestrator.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/usr/bin/node src/deck-server.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/jarvis/config/secrets.env
+
+[Install]
+WantedBy=multi-user.target

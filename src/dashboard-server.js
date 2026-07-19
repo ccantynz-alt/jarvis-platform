@@ -264,6 +264,12 @@ async function pollAndDiffJobs() {
 
 app.use(express.json());
 
+// CONSOLIDATED (2026-07-17): the Command Deck is the one Jarvis. The old
+// monitoring page now forwards there (before auth, so the hop is frictionless).
+// The /health and /api/* routes below still run for internal callers.
+const DECK_URL = 'https://jarvis.tailbd6217.ts.net:8444/';
+app.get('/', (_req, res) => res.redirect(302, DECK_URL));
+
 // Auth gate — everything below this middleware requires a valid token.
 app.use((req, res, next) => {
   if (req.path === '/health') return next(); // external uptime watcher
@@ -357,7 +363,10 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  // Unauthenticated (external uptime watcher) — status only, no internals.
+  // Unauthenticated, but this route only lives on the loopback/tailnet bind
+  // (see server.listen below) — it is NOT the public liveness signal despite
+  // this comment's old claim. That signal is the separate plain-http
+  // listener on 0.0.0.0:9212 further down this file.
   res.json({ status: 'ok' });
 });
 
@@ -381,7 +390,7 @@ app.get('/api/platform-status', async (req, res) => {
   } catch {}
 
   // Last screenshot per platform
-  const SCREENSHOT_DIR = '/root/jarvis-screenshots';
+  const SCREENSHOT_DIR = '/opt/jarvis/screenshots';
   let latestScreenshots = {};
   try {
     readdirSync(SCREENSHOT_DIR)
@@ -465,7 +474,30 @@ logEvent('SYS', 'JARVIS Mothership initializing...');
 logEvent('SYS', 'Core orchestrator online — awaiting connections');
 
 const PORT = 9206;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[jarvis-dashboard] Serving at http://0.0.0.0:${PORT}`);
-  console.log(`[jarvis-dashboard] Open your browser: http://66.42.121.161:${PORT}`);
+// Loopback only — exposed to the tailnet via `tailscale serve --https=8445`
+// (like the deck/gateway). No longer bound to the public interface.
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`[jarvis-dashboard] Serving at http://127.0.0.1:${PORT}`);
+  console.log(`[jarvis-dashboard] Tailnet: https://jarvis.tailbd6217.ts.net:8445/?token=<TOKEN>`);
+});
+
+// ── Public liveness ping, 9212 (2026-07-19) ──────────────────────────────────
+// The July 18 hardening session moved the dashboard (job-dispatch WS + API)
+// off the public interface — correct, it's a real control surface. But it
+// silently killed the ONLY signal an off-box watcher (KNOWN DEBT #1 / Roadmap
+// move #21) could ever reach, since /health lived on the same bind. This is a
+// SEPARATE, minimal, plain-http (no express, no shared code) listener on its
+// own port: ONE route, ONE static JSON reply, zero internals, zero auth
+// surface to get wrong. Nothing else is ever added here — if it needs a
+// second route, it needs a different design, not a bigger attack surface on
+// this port. UFW must allow 9212/tcp publicly (Rule 4: Jarvis-owned port).
+createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok' }));
+  } else {
+    res.writeHead(404); res.end();
+  }
+}).listen(9212, '0.0.0.0', () => {
+  console.log('[jarvis-dashboard] Public liveness ping on 0.0.0.0:9212/health');
 });

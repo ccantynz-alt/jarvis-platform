@@ -1,0 +1,58 @@
+{
+  "updated": "2026-07-15",
+  "phases": [
+    {
+      "name": "STABILIZE",
+      "subtitle": "kill \"everything breaks\"",
+      "moves": [
+        { "id": 1,  "title": "Restart policies — all jarvis-* + gatetest-mcp Restart=always", "status": "done" },
+        { "id": 2,  "title": "Resource guards — per-container memory limits + pre-OOM alerting", "status": "pending" },
+        { "id": 3,  "title": "Off-box watcher extended to the whole public fleet", "status": "done" },
+        { "id": 4,  "title": "Consolidate the proxy layer (4 front doors → 1)", "status": "pending", "note": "endgame is Vapron (#18)" },
+        { "id": 5,  "title": "Restore-drill passed — backup recovers faithfully", "status": "done" }
+      ]
+    },
+    {
+      "name": "ALIGN",
+      "subtitle": "stop the burning",
+      "moves": [
+        { "id": 6,  "title": "This ledger — every agent reads/updates it", "status": "done" },
+        { "id": 7,  "title": "Point all CLAUDE.mds here; enforce Rule 0", "status": "in_progress", "note": "done for jarvis's own CLAUDE.md; other platforms pending" },
+        { "id": 8,  "title": "Fix registry repo mismatches", "status": "pending" },
+        { "id": 9,  "title": "Enforce session protocol — auto-log repairs to memory", "status": "in_progress", "note": "manual discipline in place; not yet enforced automatically" }
+      ]
+    },
+    {
+      "name": "AUTOMATE",
+      "subtitle": "self-running",
+      "moves": [
+        { "id": 10, "title": "Agent runtime → Claude Agent SDK, scoped permissions", "status": "pending" },
+        { "id": 22, "title": "Durable job queue + CLI canary gate (agent-org Phase 1)", "status": "done", "note": "2026-07-15: jobs/job_transitions in SQLite via :9200, scheduler tick + boot recovery in orchestrator, spawn-agent.js canary holds dispatch on CLI regression. Approved plan: vectorized-skipping-puzzle.md" },
+        { "id": 23, "title": "Agent-org roster + scheduler + Slack retirement (agent-org Phase 2)", "status": "in_progress", "note": "2026-07-19: 44 role agents live via config/agents.json + jarvis-agents :9209 — the original 19 (9 social-media, 5 accountant, 5 legal) plus a REAL C-suite (cto/cmo/cfo/clo/coo/cro, weekly roll-ups) with reports_to rewired to route through them, plus seo-specialist-* and site-medic-* on the same 9-platform roster; verified end-to-end (reports route to inbox, deck Hierarchy tab renders the real tree). jarvis-slack disabled, NOTIFY_SLACK_LEGACY=0, deploy-gate repointed. 158 watchdog alert cutover to gateway /internal/notify is DONE (jarvis-heartbeat.timer on 158, scoped JARVIS_HEARTBEAT_TOKEN_vapron158, verified live). REMAINING: Craig to flip AGENTS_MODE dry-run→live after reviewing one dry-run cycle." },
+        { "id": 11, "title": "Enable cloud executor (after #8 + creds)", "status": "pending" },
+        { "id": 12, "title": "Turn on self-repair (jarvis → cloud)", "status": "pending" },
+        { "id": 13, "title": "Auto-dispatch + guardrail layer", "status": "pending" },
+        { "id": 14, "title": "Intent routing → HTTP API (~300ms vs ~4-10s CLI)", "status": "pending" }
+      ]
+    },
+    {
+      "name": "CONSOLIDATE",
+      "subtitle": "onto Vapron",
+      "moves": [
+        { "id": 15, "title": "Confirm canonical Vapron repo; clean 3-checkout mess", "status": "pending" },
+        { "id": 16, "title": "Add Jarvis SSH key to 158", "status": "superseded", "note": "estate model 2026-07-08: never SSH between boxes — replaced by tailnet handoff brief" },
+        { "id": 17, "title": "Onboard GateTest to Vapron as pilot tenant #1", "status": "in_progress", "note": "VAPRON_BASE_URL wired; awaiting rotated vpk_ key + dispatch secret" },
+        { "id": 18, "title": "Migrate off Coolify → Vapron proxy", "status": "pending" },
+        { "id": 19, "title": "Roll remaining platforms onto Vapron", "status": "pending" }
+      ]
+    },
+    {
+      "name": "INTERFACE",
+      "subtitle": "the product",
+      "moves": [
+        { "id": 20, "title": "Jarvis Gateway MVP — private mesh, streaming brain, voice in/out", "status": "in_progress", "note": "Tailscale mesh + gateway-server live and voice-tested; iPad/phone shakedown ongoing" },
+        { "id": 21, "title": "Embodied Jarvis — lip-synced live avatar + one custom voice (TTS via Vapron)", "status": "in_progress", "note": "custom-voice half LIVE 2026-07-16: ElevenLabs neural voice on the Command Deck (src/lib/tts.js, GET /tts on :9210, cache+budget+TTS_DISABLED kill switch; awaiting valid ELEVENLABS_API_KEY). Avatar half untouched. Vapron-hosted TTS still the end-state per estate model." }
+      ]
+    }
+  ]
+}

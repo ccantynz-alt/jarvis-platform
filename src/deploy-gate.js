@@ -45,13 +45,13 @@ function stripAnsi(text) {
   return String(text || '').replace(ANSI_RE, '');
 }
 import Database from 'better-sqlite3';
+import { notify } from './lib/notify.js';
 
 const PORT = 9207;
 const POLL_INTERVAL_MS = 60_000;
 const SCAN_TIMEOUT_MS = 180_000;
 const GATETEST_PATH = process.env.GATETEST_PATH || '/opt/gatetest';
 const MEMORY_SVC = 'http://127.0.0.1:9200';
-const SLACK_SVC = 'http://127.0.0.1:9203';
 
 // Same platform → live-URL map orchestrator.js's cronDailyScreenshots
 // already uses — single source of truth would need a shared config file,
@@ -63,7 +63,7 @@ const PLATFORM_URLS = {
   alecrae:   'https://alecrae.com',
   gatetest:  'https://gatetest.ai',
   voxlen:    'https://voxlen.com',
-  bookaride: 'https://bookaride.com',
+  bookaride: 'https://www.bookaride.co.nz',
 };
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
@@ -98,7 +98,7 @@ async function slackSend(text, level = 'warning', key = null) {
       body: JSON.stringify({ text, level, key }),
     });
   } catch (e) {
-    logEvent('SLACK_FAIL', e.message);
+    logEvent('NOTIFY_FAIL', e.message);
   }
 }
 

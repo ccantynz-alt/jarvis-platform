@@ -6,6 +6,11 @@ mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
 
 const db = new Database('/opt/jarvis/memory/jarvis.db');
+// WAL so readers never block on a writer — this DB is the spine every Jarvis
+// service reads on a hot path. (Was journal_mode=delete despite the backup
+// script's name; online db.backup() still works fine under WAL.)
+db.pragma('journal_mode = WAL');
+db.pragma('busy_timeout = 5000');
 const app = express();
 app.use(express.json());
 
@@ -51,7 +56,75 @@ db.exec(`
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'jarvis',
+    level TEXT NOT NULL DEFAULT 'info',
+    title TEXT NOT NULL,
+    body TEXT,
+    speech TEXT,
+    read_at TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    platform TEXT,
+    agent TEXT,
+    parent_job_id TEXT,
+    enqueued_by TEXT NOT NULL DEFAULT 'api',
+    task TEXT NOT NULL,
+    prompt TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    executor TEXT,
+    runtime TEXT NOT NULL DEFAULT 'claude',
+    server TEXT,
+    path TEXT,
+    priority INTEGER NOT NULL DEFAULT 5,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 1,
+    timeout_min INTEGER NOT NULL DEFAULT 30,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    exit_code INTEGER,
+    output TEXT,
+    error TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+  CREATE INDEX IF NOT EXISTS idx_jobs_agent ON jobs(agent, created_at);
+
+  CREATE TABLE IF NOT EXISTS agent_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT,
+    agent TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    summary TEXT NOT NULL,
+    details TEXT,
+    routed_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_agent_reports_agent ON agent_reports(agent, ts);
+
+  CREATE TABLE IF NOT EXISTS job_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL,
+    ts TEXT NOT NULL,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    detail TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_job_transitions_job ON job_transitions(job_id);
 `);
+
+// Additive migrations for columns added after a table first shipped.
+try { db.exec('ALTER TABLE jobs ADD COLUMN model TEXT'); } catch { /* already present */ }
+// PC-worker lease (pull-based dispatch, 2026-07-19): a claimed job records
+// WHO holds it and UNTIL WHEN — the orchestrator reaps an expired lease
+// (worker slept/crashed) back to queued instead of waiting forever.
+try { db.exec('ALTER TABLE jobs ADD COLUMN lease_until TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT'); } catch { /* already present */ }
 
 const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
 PLATFORMS.forEach(p => {
@@ -135,6 +208,25 @@ app.post('/memory/session/end', (req, res) => {
   res.json({ ok: true, session_id });
 });
 
+// GET /memory/platform/:name — read side of /memory/platform/update.
+// conversation.js handlePlatformStatus expects {name,status,health_score,
+// last_issue,last_audit,notes}; an unknown platform returns 200 {} so the
+// caller's "no memory data yet" branch runs instead of an error message.
+app.get('/memory/platform/:name', (req, res) => {
+  const row = db.prepare('SELECT * FROM platform_state WHERE platform = ?').get(req.params.name);
+  if (!row) return res.json({});
+  let lastIssue = null;
+  try { lastIssue = JSON.parse(row.last_known_errors || '[]')[0] || null; } catch { /* legacy free-text errors */ }
+  res.json({
+    name: row.platform,
+    status: row.status,
+    health_score: row.health_score,
+    last_issue: lastIssue,
+    last_audit: row.updated_at,
+    notes: row.notes,
+  });
+});
+
 // POST /memory/platform/update
 app.post('/memory/platform/update', (req, res) => {
   const { platform, status, last_known_errors, health_score, notes } = req.body;
@@ -175,6 +267,229 @@ app.post('/memory/repair/verify', (req, res) => {
     UPDATE repair_log SET fix_verified = ?, verified_at = ? WHERE id = ?
   `).run(verified ? 1 : 0, new Date().toISOString(), repair_id);
   res.json({ ok: true });
+});
+
+// ── Notifications (Gateway inbox — durable store, see docs/GATEWAY.md) ──────
+
+// POST /memory/notifications — record a notification
+app.post('/memory/notifications', (req, res) => {
+  const { source = 'jarvis', level = 'info', title, body, speech } = req.body;
+  if (!title) return res.status(400).json({ error: 'title required' });
+  // Dedup: a repeatedly-firing condition (a flapping probe, a stuck job) must
+  // not mint a new row — and a new spoken alert — every time. Collapse an
+  // identical (source, level, title) within a short window onto the last row.
+  const DEDUP_WINDOW_MS = 10 * 60 * 1000;
+  const recent = db.prepare(`
+    SELECT id FROM notifications
+    WHERE source = ? AND level = ? AND title = ?
+      AND ts > ? ORDER BY id DESC LIMIT 1
+  `).get(source, level, title, new Date(Date.now() - DEDUP_WINDOW_MS).toISOString());
+  if (recent) return res.json({ id: recent.id, deduped: true });
+  const result = db.prepare(`
+    INSERT INTO notifications (ts, source, level, title, body, speech)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(new Date().toISOString(), source, level, title, body || null, speech || null);
+  res.json({ id: result.lastInsertRowid });
+});
+
+// GET /memory/notifications?unread=1&limit=50
+app.get('/memory/notifications', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  const rows = req.query.unread
+    ? db.prepare('SELECT * FROM notifications WHERE read_at IS NULL ORDER BY id DESC LIMIT ?').all(limit)
+    : db.prepare('SELECT * FROM notifications ORDER BY id DESC LIMIT ?').all(limit);
+  const unread = db.prepare('SELECT COUNT(*) AS c FROM notifications WHERE read_at IS NULL').get().c;
+  res.json({ notifications: rows, unread });
+});
+
+// POST /memory/notifications/read-all
+app.post('/memory/notifications/read-all', (req, res) => {
+  const r = db.prepare('UPDATE notifications SET read_at = ? WHERE read_at IS NULL')
+    .run(new Date().toISOString());
+  res.json({ ok: true, marked: r.changes });
+});
+
+// POST /memory/notifications/:id/read
+app.post('/memory/notifications/:id/read', (req, res) => {
+  const r = db.prepare('UPDATE notifications SET read_at = ? WHERE id = ? AND read_at IS NULL')
+    .run(new Date().toISOString(), req.params.id);
+  res.json({ ok: true, marked: r.changes });
+});
+
+// ── Durable job queue (orchestrator's system of record — see plan Phase 1) ──
+
+const JOB_STATUSES = ['queued', 'running', 'completed', 'failed', 'interrupted', 'held', 'canceled'];
+// Fields a transition is allowed to update alongside the status change.
+const JOB_MUTABLE = ['executor', 'attempts', 'started_at', 'finished_at', 'exit_code', 'output', 'error', 'lease_until', 'worker_id'];
+
+const insertTransition = db.prepare(`
+  INSERT INTO job_transitions (job_id, ts, from_status, to_status, detail)
+  VALUES (?, ?, ?, ?, ?)
+`);
+
+// requireFrom, when set, makes the UPDATE conditional on the CURRENT status
+// still matching it (single synchronous statement — better-sqlite3 never
+// yields mid-call, so this is atomic across concurrent HTTP requests, e.g.
+// two PC-worker claims racing for the same queued job). Returns false
+// (no-op, no transition row written) when the row had already moved on.
+const transitionJob = db.transaction((job, to, detail, fields, requireFrom) => {
+  const sets = ['status = ?'];
+  const vals = [to];
+  for (const k of JOB_MUTABLE) {
+    if (fields[k] !== undefined) { sets.push(`${k} = ?`); vals.push(fields[k]); }
+  }
+  vals.push(job.id);
+  const where = requireFrom ? ' AND status = ?' : '';
+  if (requireFrom) vals.push(requireFrom);
+  const r = db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?${where}`).run(...vals);
+  if (r.changes === 0) return false;
+  insertTransition.run(job.id, new Date().toISOString(), job.status, to, detail || null);
+  return true;
+});
+
+// POST /memory/jobs — enqueue a job
+app.post('/memory/jobs', (req, res) => {
+  const b = req.body || {};
+  if (!b.id || !b.task) return res.status(400).json({ error: 'id and task required' });
+  try {
+    db.prepare(`
+      INSERT INTO jobs (id, platform, agent, parent_job_id, enqueued_by, task, prompt,
+                        status, executor, runtime, model, server, path, priority, max_attempts,
+                        timeout_min, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      b.id, b.platform || null, b.agent || null, b.parent_job_id || null,
+      b.enqueued_by || 'api', b.task, b.prompt || null,
+      b.executor || null, b.runtime || 'claude', b.model || null, b.server || null, b.path || null,
+      b.priority ?? 5, b.max_attempts ?? 1, b.timeout_min ?? 30,
+      new Date().toISOString()
+    );
+    insertTransition.run(b.id, new Date().toISOString(), null, 'queued', b.enqueued_by || 'api');
+    res.json({ id: b.id, status: 'queued' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /memory/jobs/counts?window=today — per-agent job counts (budget checks)
+app.get('/memory/jobs/counts', (req, res) => {
+  const since = req.query.window === 'today'
+    ? new Date(new Date().setHours(0, 0, 0, 0)).toISOString()
+    : (req.query.since || new Date(Date.now() - 86400_000).toISOString());
+  const rows = db.prepare(`
+    SELECT COALESCE(agent, '(none)') AS agent, COUNT(*) AS count
+    FROM jobs WHERE created_at >= ? AND status != 'canceled'
+    GROUP BY agent
+  `).all(since);
+  const byStatus = db.prepare(`SELECT status, COUNT(*) AS count FROM jobs GROUP BY status`).all();
+  res.json({ since, by_agent: rows, by_status: byStatus });
+});
+
+// GET /memory/jobs?status=&agent=&platform=&limit=
+app.get('/memory/jobs', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const where = [];
+  const vals = [];
+  for (const f of ['status', 'agent', 'platform', 'executor']) {
+    if (req.query[f]) { where.push(`${f} = ?`); vals.push(req.query[f]); }
+  }
+  const rows = db.prepare(`
+    SELECT * FROM jobs ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY created_at DESC LIMIT ?
+  `).all(...vals, limit);
+  res.json(rows);
+});
+
+// GET /memory/jobs/:id
+app.get('/memory/jobs/:id', (req, res) => {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const transitions = db.prepare('SELECT * FROM job_transitions WHERE job_id = ? ORDER BY id').all(job.id);
+  res.json({ ...job, transitions });
+});
+
+// POST /memory/jobs/:id/transition — { to, detail, fields, from }
+// `from`: guard the write to only apply if the job is still in that status —
+// the atomic-claim primitive for anything that competes for queued jobs
+// (e.g. multiple PC workers polling /worker/claim at once). A guard miss is
+// NOT an error: it means someone else claimed it first, so this returns
+// 409 with the row's actual current status for the caller to react to.
+app.post('/memory/jobs/:id/transition', (req, res) => {
+  const { to, detail, fields = {}, from } = req.body || {};
+  if (!JOB_STATUSES.includes(to)) {
+    return res.status(400).json({ error: `to must be one of: ${JOB_STATUSES.join(', ')}` });
+  }
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  try {
+    const applied = transitionJob(job, to, detail, fields, from);
+    if (!applied) {
+      const now = db.prepare('SELECT status FROM jobs WHERE id = ?').get(req.params.id);
+      return res.status(409).json({ error: 'status changed since read', expected: from, actual: now?.status });
+    }
+    res.json({ ok: true, id: job.id, from: job.status, to });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── Agent reports (role agents file these as their mandatory last step) ────
+
+// POST /memory/agent-report — { agent, job_id, status, summary, details }
+app.post('/memory/agent-report', (req, res) => {
+  const { agent, job_id, status = 'ok', summary, details } = req.body || {};
+  if (!agent || !summary) return res.status(400).json({ error: 'agent and summary required' });
+  if (!['ok', 'action_needed', 'escalate'].includes(status)) {
+    return res.status(400).json({ error: 'status must be ok|action_needed|escalate' });
+  }
+  const result = db.prepare(`
+    INSERT INTO agent_reports (job_id, agent, ts, status, summary, details)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(job_id || null, agent, new Date().toISOString(), status, summary, details || null);
+  res.json({ id: result.lastInsertRowid });
+});
+
+// GET /memory/agent-reports?agent=&status=&since=&unrouted=1&limit=
+app.get('/memory/agent-reports', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const where = [];
+  const vals = [];
+  if (req.query.agent)  { where.push('agent = ?');  vals.push(req.query.agent); }
+  if (req.query.status) { where.push('status = ?'); vals.push(req.query.status); }
+  if (req.query.since)  { where.push('ts >= ?');    vals.push(req.query.since); }
+  if (req.query.unrouted) where.push('routed_at IS NULL');
+  const rows = db.prepare(`
+    SELECT * FROM agent_reports ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY id DESC LIMIT ?
+  `).all(...vals, limit);
+  res.json(rows);
+});
+
+// POST /memory/agent-reports/:id/routed — scheduler marks a report as handled
+app.post('/memory/agent-reports/:id/routed', (req, res) => {
+  const r = db.prepare('UPDATE agent_reports SET routed_at = ? WHERE id = ? AND routed_at IS NULL')
+    .run(new Date().toISOString(), req.params.id);
+  res.json({ ok: true, marked: r.changes });
+});
+
+// ── agent_context key/value API (canary gate state, etc.) ──────────────────
+
+// GET /memory/kv/:key
+app.get('/memory/kv/:key', (req, res) => {
+  const row = db.prepare('SELECT * FROM agent_context WHERE key = ?').get(req.params.key);
+  if (!row) return res.status(404).json({ error: 'key not found' });
+  res.json(row);
+});
+
+// POST /memory/kv — { key, value }
+app.post('/memory/kv', (req, res) => {
+  const { key, value } = req.body || {};
+  if (!key || value === undefined) return res.status(400).json({ error: 'key and value required' });
+  db.prepare(`
+    INSERT INTO agent_context (key, value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).run(key, String(value), new Date().toISOString());
+  res.json({ ok: true, key });
 });
 
 // GET /memory/summary — human-readable summary for Slack

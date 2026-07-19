@@ -1,6 +1,11 @@
 /**
  * Jarvis Slack Bridge — src/slack-bridge.js
  *
+ * ⚠️ FROZEN LEGACY (decision 2026-07-08, see docs/ROADMAP.md + docs/GATEWAY.md):
+ * zero new features. The intent engine + handlers live in src/lib/conversation.js,
+ * shared with the Jarvis Gateway; this file is only the Slack transport wrapper.
+ * Retirement: NOTIFY_SLACK_LEGACY=0 → disable jarvis-slack → delete.
+ *
  * Receives commands from #jarvis via Socket Mode (preferred) or HTTP Events.
  * Routes to the orchestrator for dispatching Claude Code agents.
  *
@@ -591,7 +596,8 @@ async function handleUnclear(rawText, channel) {
 
 /**
  * Unified entry point — called from both Socket Mode listener and HTTP events.
- * Returns immediately after dispatching (fire-and-forget for slow operations).
+ * Intent resolution + handlers come from lib/conversation.js; this wrapper
+ * only maps {text} results (and interim onEvent messages) to Slack posts.
  */
 async function handleCommand(rawText, channel) {
   const t0 = Date.now();
@@ -607,7 +613,7 @@ async function handleCommand(rawText, channel) {
     }
   }
 
-  console.log(`[slack] intent via ${via} (${Date.now() - t0}ms)`);
+  console.log(`[slack] intent via ${via} (${ms}ms)`);
   console.log(`[slack] intent=${JSON.stringify(intent)} text="${rawText.replace(/<[^>]+>/g, '').slice(0, 60)}"`);
 
   switch (intent.type) {

@@ -4,17 +4,17 @@ import { writeFileSync, readFileSync, mkdirSync, readdirSync, existsSync, copyFi
 import { join } from 'path';
 import { createHash } from 'crypto';
 import express from 'express';
+import { notify } from './lib/notify.js';
 
-mkdirSync('/root/jarvis-screenshots', { recursive: true });
-mkdirSync('/root/jarvis-baselines', { recursive: true });
+mkdirSync('/opt/jarvis/screenshots', { recursive: true });
+mkdirSync('/opt/jarvis/visual-baselines', { recursive: true });
 
-const SLACK_BRIDGE = 'http://127.0.0.1:9203';
-const BASELINE_DIR = '/root/jarvis-baselines';
+const BASELINE_DIR = '/opt/jarvis/visual-baselines';
 
 const app = express();
 app.use(express.json());
 
-const SCREENSHOT_DIR = '/root/jarvis-screenshots';
+const SCREENSHOT_DIR = '/opt/jarvis/screenshots';
 
 function detectChromium() {
   for (const bin of ['google-chrome', 'google-chrome-stable', 'chromium-browser', 'chromium']) {
@@ -180,24 +180,18 @@ app.post('/screenshot/compare', async (req, res) => {
     return res.json({ ok: true, regression: false, url });
   }
 
-  // Visual change detected — alert Slack with the new screenshot
+  // Visual change detected — raise it through the durable notification inbox
+  // (memory + gateway/deck), not the retired Slack bridge which silently ate it.
   const label = platform || safeName;
-  console.log(`[screenshot] Regression detected for ${label} — alerting Slack`);
+  console.log(`[screenshot] Regression detected for ${label} — notifying`);
 
-  try {
-    await fetch(`${SLACK_BRIDGE}/slack/image-alert`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        platform: label,
-        message: `📸 Visual change detected on *${label}* — screenshot attached`,
-        filepath: current.filepath,
-        filename: current.filename,
-      }),
-    });
-  } catch (e) {
-    console.error('[screenshot] Slack alert failed:', e.message);
-  }
+  await notify({
+    source: 'screenshot',
+    level: 'warn',
+    title: `Visual change on ${label}`,
+    body: `A visual change was detected on ${label}. New screenshot: ${current.filename}`,
+    speech: `Sir, a visual change was detected on ${label}.`,
+  }).catch((e) => console.error('[screenshot] notify failed:', e.message));
 
   // Update baseline to current
   copyFileSync(current.filepath, baselinePath);

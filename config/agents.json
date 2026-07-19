@@ -1,0 +1,75 @@
+{
+  "_comment": "Jarvis agent-org registry. Roles are rows, not processes: an entry costs nothing until its cron fires, then one bounded worker spawns, files a report, and dies. Hot-reloaded on every read like platforms.json. Kill any agent instantly with status:'inactive' or 'held'. Schedules are UTC (server time); 18:00 UTC = 6am NZST. C-suite (2026-07-19): real dispatchable roll-up agents (cto/cmo/cfo/clo/coo/cro), weekly, staggered after the roles that feed them — draft-only like every role agent, may_dispatch stays false, real dispatch is Jarvis's confirmation-gated dispatch_job. seo-specialist-* and site-medic-* share the social-media 9-platform roster, weekly (Fri/Thu) since they're audit+proposal work, not daily content; site-medic findings feed dispatch_job, it never edits code itself.",
+  "defaults": {
+    "kind": "role",
+    "runtime": "claude",
+    "model": "sonnet",
+    "reports_to": "ceo",
+    "priority": 5,
+    "concurrency": 1,
+    "budget": { "max_jobs_per_day": 2, "timeout_min": 20 },
+    "permissions": { "cwd": "/opt/jarvis/reports/agents", "may_dispatch": false, "may_push": false },
+    "escalation": "reports_to",
+    "status": "active"
+  },
+  "agents": {
+    "ceo": {
+      "display_name": "Jarvis (CEO)",
+      "kind": "resident",
+      "runtime": "api",
+      "reports_to": null,
+      "persona": "config/personas/ceo.md",
+      "escalation": "craig",
+      "_note": "The always-on gateway brain (src/lib/brain-claude.js, subscription). Never spawned by the scheduler."
+    },
+
+    "cto": { "display_name": "CTO — Chief Technology Officer", "persona": "config/personas/cto.md", "schedule": "0 17 * * 6",  "budget": { "max_jobs_per_day": 1, "timeout_min": 25 } },
+    "cmo": { "display_name": "CMO — Chief Marketing Officer",  "persona": "config/personas/cmo.md", "schedule": "10 17 * * 6", "budget": { "max_jobs_per_day": 1, "timeout_min": 25 } },
+    "cfo": { "display_name": "CFO — Chief Financial Officer",  "persona": "config/personas/cfo.md", "schedule": "50 17 * * 1", "budget": { "max_jobs_per_day": 1, "timeout_min": 25 }, "professional_review_required": true, "escalation": "craig" },
+    "clo": { "display_name": "CLO — Chief Legal Officer",      "persona": "config/personas/clo.md", "schedule": "50 17 * * 2", "budget": { "max_jobs_per_day": 1, "timeout_min": 25 }, "professional_review_required": true, "escalation": "craig" },
+    "coo": { "display_name": "COO — Chief Operating Officer",  "persona": "config/personas/coo.md", "schedule": "0 17 * * 0",  "budget": { "max_jobs_per_day": 1, "timeout_min": 25 } },
+    "cro": { "display_name": "CRO — Chief Research Officer",   "persona": "config/personas/cro.md", "schedule": "10 17 * * 0", "budget": { "max_jobs_per_day": 1, "timeout_min": 25 } },
+
+    "social-media-zoobicon":  { "display_name": "Social Media — Zoobicon",  "platform": "zoobicon",  "persona": "config/personas/social-media.md", "schedule": "0 18 * * *",  "reports_to": "cmo" },
+    "social-media-vapron":    { "display_name": "Social Media — Vapron",    "platform": "vapron",    "persona": "config/personas/social-media.md", "schedule": "10 18 * * *", "reports_to": "cmo" },
+    "social-media-bookaride": { "display_name": "Social Media — BookARide", "platform": "bookaride", "persona": "config/personas/social-media.md", "schedule": "20 18 * * *", "reports_to": "cmo" },
+    "social-media-gatetest":  { "display_name": "Social Media — GateTest",  "platform": "gatetest",  "persona": "config/personas/social-media.md", "schedule": "30 18 * * *", "reports_to": "cmo" },
+    "social-media-alecrae":   { "display_name": "Social Media — AlecRae",   "platform": "alecrae",   "persona": "config/personas/social-media.md", "schedule": "40 18 * * *", "reports_to": "cmo" },
+    "social-media-voxlen":    { "display_name": "Social Media — Voxlen",    "platform": "voxlen",    "persona": "config/personas/social-media.md", "schedule": "50 18 * * *", "reports_to": "cmo" },
+    "social-media-gluecron":  { "display_name": "Social Media — Gluecron",  "platform": "gluecron",  "persona": "config/personas/social-media.md", "schedule": "0 19 * * *",  "reports_to": "cmo" },
+    "social-media-marcoreid": { "display_name": "Social Media — MarcoReid", "platform": "marcoreid", "persona": "config/personas/social-media.md", "schedule": "10 19 * * *", "reports_to": "cmo" },
+    "social-media-davenroe":  { "display_name": "Social Media — DavenRoe",  "platform": "davenroe",  "persona": "config/personas/social-media.md", "schedule": "20 19 * * *", "reports_to": "cmo" },
+
+    "seo-specialist-zoobicon":  { "display_name": "SEO — Zoobicon",  "platform": "zoobicon",  "persona": "config/personas/seo-specialist.md", "schedule": "5 18 * * 5",  "reports_to": "cmo" },
+    "seo-specialist-vapron":    { "display_name": "SEO — Vapron",    "platform": "vapron",    "persona": "config/personas/seo-specialist.md", "schedule": "15 18 * * 5", "reports_to": "cmo" },
+    "seo-specialist-bookaride": { "display_name": "SEO — BookARide", "platform": "bookaride", "persona": "config/personas/seo-specialist.md", "schedule": "25 18 * * 5", "reports_to": "cmo" },
+    "seo-specialist-gatetest":  { "display_name": "SEO — GateTest",  "platform": "gatetest",  "persona": "config/personas/seo-specialist.md", "schedule": "35 18 * * 5", "reports_to": "cmo" },
+    "seo-specialist-alecrae":   { "display_name": "SEO — AlecRae",   "platform": "alecrae",   "persona": "config/personas/seo-specialist.md", "schedule": "45 18 * * 5", "reports_to": "cmo" },
+    "seo-specialist-voxlen":    { "display_name": "SEO — Voxlen",    "platform": "voxlen",    "persona": "config/personas/seo-specialist.md", "schedule": "55 18 * * 5", "reports_to": "cmo" },
+    "seo-specialist-gluecron":  { "display_name": "SEO — Gluecron",  "platform": "gluecron",  "persona": "config/personas/seo-specialist.md", "schedule": "5 19 * * 5",  "reports_to": "cmo" },
+    "seo-specialist-marcoreid": { "display_name": "SEO — MarcoReid", "platform": "marcoreid", "persona": "config/personas/seo-specialist.md", "schedule": "15 19 * * 5", "reports_to": "cmo" },
+    "seo-specialist-davenroe":  { "display_name": "SEO — DavenRoe",  "platform": "davenroe",  "persona": "config/personas/seo-specialist.md", "schedule": "25 19 * * 5", "reports_to": "cmo" },
+
+    "site-medic-zoobicon":  { "display_name": "Site Medic — Zoobicon",  "platform": "zoobicon",  "persona": "config/personas/site-medic.md", "schedule": "2 18 * * 4",  "reports_to": "cto" },
+    "site-medic-vapron":    { "display_name": "Site Medic — Vapron",    "platform": "vapron",    "persona": "config/personas/site-medic.md", "schedule": "12 18 * * 4", "reports_to": "cto" },
+    "site-medic-bookaride": { "display_name": "Site Medic — BookARide", "platform": "bookaride", "persona": "config/personas/site-medic.md", "schedule": "22 18 * * 4", "reports_to": "cto" },
+    "site-medic-gatetest":  { "display_name": "Site Medic — GateTest",  "platform": "gatetest",  "persona": "config/personas/site-medic.md", "schedule": "32 18 * * 4", "reports_to": "cto" },
+    "site-medic-alecrae":   { "display_name": "Site Medic — AlecRae",   "platform": "alecrae",   "persona": "config/personas/site-medic.md", "schedule": "42 18 * * 4", "reports_to": "cto" },
+    "site-medic-voxlen":    { "display_name": "Site Medic — Voxlen",    "platform": "voxlen",    "persona": "config/personas/site-medic.md", "schedule": "52 18 * * 4", "reports_to": "cto" },
+    "site-medic-gluecron":  { "display_name": "Site Medic — Gluecron",  "platform": "gluecron",  "persona": "config/personas/site-medic.md", "schedule": "2 19 * * 4",  "reports_to": "cto" },
+    "site-medic-marcoreid": { "display_name": "Site Medic — MarcoReid", "platform": "marcoreid", "persona": "config/personas/site-medic.md", "schedule": "12 19 * * 4", "reports_to": "cto" },
+    "site-medic-davenroe":  { "display_name": "Site Medic — DavenRoe",  "platform": "davenroe",  "persona": "config/personas/site-medic.md", "schedule": "22 19 * * 4", "reports_to": "cto" },
+
+    "accountant-nz": { "display_name": "Accountant — New Zealand", "jurisdiction": "NZ", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-nz", "schedule": "0 17 * * 1",  "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "cfo" },
+    "accountant-au": { "display_name": "Accountant — Australia",   "jurisdiction": "AU", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-au", "schedule": "10 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "cfo" },
+    "accountant-us": { "display_name": "Accountant — United States", "jurisdiction": "US", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-us", "schedule": "20 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "cfo" },
+    "accountant-uk": { "display_name": "Accountant — United Kingdom", "jurisdiction": "UK", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-uk", "schedule": "30 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "cfo" },
+    "accountant-sg": { "display_name": "Accountant — Singapore",    "jurisdiction": "SG", "persona": "config/personas/accountant.md", "knowledge_pack": "config/knowledge/accounting-sg", "schedule": "40 17 * * 1", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "cfo" },
+
+    "legal-nz": { "display_name": "Legal — New Zealand", "jurisdiction": "NZ", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-nz", "schedule": "0 17 * * 2",  "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
+    "legal-au": { "display_name": "Legal — Australia",   "jurisdiction": "AU", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-au", "schedule": "10 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
+    "legal-us": { "display_name": "Legal — United States", "jurisdiction": "US", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-us", "schedule": "20 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
+    "legal-uk": { "display_name": "Legal — United Kingdom", "jurisdiction": "UK", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-uk", "schedule": "30 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
+    "legal-sg": { "display_name": "Legal — Singapore",    "jurisdiction": "SG", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-sg", "schedule": "40 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" }
+  }
+}

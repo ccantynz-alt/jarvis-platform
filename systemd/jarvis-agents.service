@@ -1,0 +1,22 @@
+[Unit]
+Description=Jarvis Agent Scheduler — dispatches role agents from config/agents.json (kill switch: AGENTS_MODE)
+After=network.target jarvis-memory.service jarvis-orchestrator.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/usr/bin/node src/agent-scheduler.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+# live: agents actually dispatch (still draft-only per the reporting
+# protocol — nothing posts/files/spends without Craig's confirmation).
+# Flipped live 2026-07-19 per Craig's explicit go-ahead.
+Environment=AGENTS_MODE=live
+EnvironmentFile=/opt/jarvis/config/secrets.env
+
+[Install]
+WantedBy=multi-user.target

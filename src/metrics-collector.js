@@ -3,6 +3,7 @@ import { execSync } from 'child_process';
 import { createServer } from 'http';
 import express from 'express';
 import { WebSocketServer } from 'ws';
+import { notify } from './lib/notify.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 
@@ -58,16 +59,11 @@ function collectMetrics() {
       memory: checkPort(9200),
       screenshot: checkPort(9201),
       metrics: 'ONLINE',
-      slack: checkPort(9203),
       audit: checkPort(9204)
     },
-    vapron: {
-      web: checkPort(3000),
-      api: checkPort(3001),
-      gateway: checkPort(8090),
-      deploy_agent: checkPort(9099),
-      caddy: checkPort(443)
-    },
+    // NOTE: no local `vapron` port block — vapron runs on box 158, not here.
+    // Local port checks matched unrelated co-tenant processes (:3000/:443) and
+    // reported false health. vapron health comes from fleet-check/the heartbeat.
     platforms: platformHealth
   };
 }
@@ -128,6 +124,45 @@ setInterval(() => {
 // Platform health check every 60 seconds
 setInterval(checkPlatformHealthAsync, 60000);
 checkPlatformHealthAsync();
+
+// ── Resource guards / pre-OOM alerting (2026-07-19, Roadmap move #2) ────────
+// Runs on ITS OWN interval, independent of WS client count — the whole point
+// is catching a leak at 3am when nobody has the deck open, not just painting
+// a number nobody's watching. Sustained-over-N-checks filters a transient
+// spike (a build job's brief CPU/mem burst is normal); memory-server's own
+// 10-min notification dedup keeps a persisting condition from spamming.
+const MEM_WARN = 85, MEM_CRIT = 95;
+const DISK_WARN = 85, DISK_CRIT = 95;
+const GUARD_INTERVAL_MS = 30_000;
+const SUSTAIN_CHECKS = 3; // ~90s sustained before alerting
+
+function makeGuard(label, warnAt, critAt) {
+  let streak = 0, alertedLevel = null;
+  return (value) => {
+    const level = value >= critAt ? 'crit' : value >= warnAt ? 'warn' : null;
+    streak = level ? streak + 1 : 0;
+    if (level && streak >= SUSTAIN_CHECKS && level !== alertedLevel) {
+      alertedLevel = level;
+      notify({
+        source: 'metrics', level: level === 'crit' ? 'alert' : 'warn',
+        title: `${level === 'crit' ? '🔴' : '⚠️'} ${label} at ${value}% — ${level === 'crit' ? 'critical' : 'climbing'}`,
+        body: `Sustained for ${Math.round(streak * GUARD_INTERVAL_MS / 1000)}s.`,
+        speech: level === 'crit' ? `Sir, ${label.toLowerCase()} is critically high at ${value} percent.` : undefined,
+      }).catch(() => {});
+    } else if (!level && alertedLevel) {
+      notify({ source: 'metrics', title: `✅ ${label} back to normal (${value}%)` }).catch(() => {});
+      alertedLevel = null;
+    }
+  };
+}
+const memGuard = makeGuard('Memory', MEM_WARN, MEM_CRIT);
+const diskGuard = makeGuard('Disk', DISK_WARN, DISK_CRIT);
+
+setInterval(() => {
+  const m = collectMetrics();
+  memGuard(m.mem);
+  diskGuard(m.disk);
+}, GUARD_INTERVAL_MS);
 
 // HTTP endpoints
 app.get('/metrics/current', (req, res) => res.json(collectMetrics()));

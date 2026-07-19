@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Jarvis">
+<meta name="theme-color" content="#06090f">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<title>JARVIS</title>
+<style>
+  :root {
+    --bg: #06090f; --panel: #0b1220; --panel2: #101a2e; --line: #1b2a45;
+    --text: #d7e2f4; --dim: #6b7f9e; --accent: #37b7ff; --accent2: #7ef0c0;
+    --warn: #ffcc66; --alert: #ff6b7a; --user: #16283f;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.45 -apple-system, "SF Pro Text", Segoe UI, Roboto, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+
+  /* Scene experiments (video avatar, orb) removed 2026-07-10 — clean UI won.
+     The embodied Jarvis is roadmap move 21, to be done properly. */
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+    background: #0b1220cc; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  }
+  .logo { font-weight: 800; letter-spacing: .18em; font-size: 15px; color: var(--accent); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--alert); transition: background .3s; }
+  .dot.on { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+  header .spacer { flex: 1; }
+  .hbtn {
+    position: relative; border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+    border-radius: 10px; padding: 7px 12px; font-size: 14px; cursor: pointer;
+  }
+  .hbtn.active { border-color: var(--accent); color: var(--accent); }
+  #inboxBadge {
+    position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; border-radius: 9px;
+    background: var(--alert); color: #fff; font-size: 11px; font-weight: 700;
+    display: none; align-items: center; justify-content: center; padding: 0 5px;
+  }
+  #transcript { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 86%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: #16283fd9; border: 1px solid #23405f; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .msg.jarvis { align-self: flex-start; background: #101a2ed9; border: 1px solid var(--line); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .msg.jarvis.interim { opacity: .8; }
+  .msg .meta { font-size: 11px; color: var(--dim); margin-top: 6px; }
+  .msg.notify { align-self: stretch; max-width: none; background: #101d16; border: 1px solid #1e4635; }
+  .msg.notify.warn { background: #201a0e; border-color: #4d3d1a; }
+  .msg.notify.alert { background: #241014; border-color: #5c2430; }
+  footer { border-top: 1px solid var(--line); background: #0b1220cc;
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); padding: 10px 12px 14px; }
+  .inputrow { display: flex; gap: 10px; align-items: center; }
+  #textIn {
+    flex: 1; background: var(--panel2); border: 1px solid var(--line); border-radius: 12px;
+    color: var(--text); padding: 12px 14px; font-size: 16px; outline: none;
+  }
+  #textIn:focus { border-color: var(--accent); }
+  #micBtn {
+    width: 64px; height: 64px; border-radius: 50%; border: 2px solid var(--accent);
+    background: radial-gradient(circle at 35% 30%, #123, #0a1524); color: var(--accent);
+    font-size: 26px; cursor: pointer; flex: none; transition: all .15s;
+  }
+  #micBtn.listening {
+    background: radial-gradient(circle at 35% 30%, #ff5f6d33, #2a0f16);
+    border-color: var(--alert); color: var(--alert); animation: pulse 1.2s infinite;
+  }
+  #micBtn:disabled { opacity: .35; border-color: var(--dim); color: var(--dim); }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 #ff6b7a44; } 50% { box-shadow: 0 0 0 14px #ff6b7a00; } }
+  #hint { text-align: center; color: var(--dim); font-size: 12px; margin-top: 8px; min-height: 15px; }
+  #sendBtn { border: 1px solid var(--line); background: var(--panel2); color: var(--accent);
+    border-radius: 12px; padding: 12px 16px; font-size: 15px; cursor: pointer; }
+  /* Drawer overlays (Inbox, Roadmap) */
+  .drawer-overlay {
+    position: fixed; inset: 0; background: #04070ccc; display: none; z-index: 40;
+  }
+  .drawer-overlay.open { display: block; }
+  #inboxPanel {
+    position: absolute; right: 0; top: 0; bottom: 0; width: min(420px, 92vw);
+    background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column;
+  }
+  #inboxPanel h2 { font-size: 14px; letter-spacing: .12em; color: var(--accent);
+    padding: 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; }
+  #inboxPanel h2 .spacer { flex: 1; }
+  #inboxList { flex: 1; overflow-y: auto; }
+  .nitem { padding: 12px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .nitem.unread { background: #0e1930; border-left: 3px solid var(--accent); }
+  .nitem .t { font-weight: 600; font-size: 14px; }
+  .nitem .b { color: var(--dim); font-size: 13px; margin-top: 3px; white-space: pre-wrap; }
+  .nitem .ts { color: var(--dim); font-size: 11px; margin-top: 4px; }
+
+  /* Roadmap drawer */
+  #roadmapPanel { position: absolute; right: 0; top: 0; bottom: 0; width: min(460px, 92vw);
+    background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+  #roadmapPanel h2 { font-size: 14px; letter-spacing: .12em; color: var(--accent);
+    padding: 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; }
+  #roadmapPanel h2 .spacer { flex: 1; }
+  #roadmapBody { flex: 1; overflow-y: auto; padding: 20px 16px 30px; }
+  .rm-hero { text-align: center; padding: 6px 0 22px; }
+  .rm-pct { font-size: 44px; font-weight: 800; color: var(--accent2); letter-spacing: -.02em; }
+  .rm-sub { color: var(--dim); font-size: 13px; margin-top: 2px; }
+  .rm-bar { height: 10px; border-radius: 6px; background: var(--panel2); border: 1px solid var(--line);
+    overflow: hidden; margin-top: 16px; }
+  .rm-bar-fill { height: 100%; width: 0%; border-radius: 6px;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    transition: width 1.1s cubic-bezier(.16,1,.3,1); }
+  .rm-current { margin-top: 14px; font-size: 13px; color: var(--warn);
+    background: #1a1608; border: 1px solid #4d3d1a; border-radius: 10px; padding: 8px 12px; }
+  .rm-phase { margin-top: 6px; }
+  .rm-phase summary { cursor: pointer; list-style: none; padding: 12px 0; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
+  .rm-phase summary::-webkit-details-marker { display: none; }
+  .rm-phase summary .car { color: var(--dim); font-size: 11px; transition: transform .2s; }
+  .rm-phase[open] summary .car { transform: rotate(90deg); }
+  .rm-phase summary .rp-name { flex: 1; }
+  .rm-phase summary .rp-count { color: var(--dim); font-size: 12px; font-weight: 400; }
+  .rm-move { display: flex; gap: 10px; padding: 9px 4px 9px 22px; font-size: 13px; align-items: flex-start; }
+  .rm-move .icon { flex: none; font-size: 14px; margin-top: 1px; }
+  .rm-move .body .title { color: var(--text); }
+  .rm-move.done .title { color: var(--dim); text-decoration: line-through; text-decoration-color: #2a3a52; }
+  .rm-move .body .note { color: var(--dim); font-size: 12px; margin-top: 2px; }
+</style>
+</head>
+<body data-jstate="idle">
+<header>
+  <span class="dot" id="connDot"></span>
+  <span class="logo">JARVIS</span>
+  <span class="spacer"></span>
+  <button class="hbtn" id="muteBtn" title="Toggle speech">🔊</button>
+  <button class="hbtn" id="convBtn" title="Hands-free conversation">💬</button>
+  <button class="hbtn" id="roadmapBtn">Roadmap</button>
+  <button class="hbtn" id="inboxBtn">Inbox<span id="inboxBadge"></span></button>
+</header>
+
+<div id="transcript"></div>
+
+<footer>
+  <div class="inputrow">
+    <button id="micBtn" title="Push to talk">🎙</button>
+    <input id="textIn" type="text" placeholder="Talk or type to Jarvis…" autocomplete="off">
+    <button id="sendBtn">Send</button>
+  </div>
+  <div id="hint"></div>
+</footer>
+
+<div id="inbox" class="drawer-overlay">
+  <div id="inboxPanel">
+    <h2>NOTIFICATIONS <span class="spacer"></span>
+      <button class="hbtn" id="readAllBtn">Mark all read</button>
+      <button class="hbtn" id="closeInbox" style="margin-left:8px">✕</button>
+    </h2>
+    <div id="inboxList"></div>
+  </div>
+</div>
+
+<div id="roadmap" class="drawer-overlay">
+  <div id="roadmapPanel">
+    <h2>JARVIS ROADMAP <span class="spacer"></span>
+      <button class="hbtn" id="closeRoadmap">✕</button>
+    </h2>
+    <div id="roadmapBody">
+      <div class="rm-hero">
+        <div class="rm-pct" id="rmPct">–</div>
+        <div class="rm-sub" id="rmSub">loading…</div>
+        <div class="rm-bar"><div class="rm-bar-fill" id="rmBarFill"></div></div>
+      </div>
+      <div id="rmCurrentWrap"></div>
+      <div id="rmPhases"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const transcript = $('transcript'), hint = $('hint');
+
+  // ── Mute / TTS ─────────────────────────────────────────────────────────────
+  let muted = localStorage.getItem('jarvis_muted') === '1';
+  let ttsPrimed = false;
+  const muteBtn = $('muteBtn');
+  const renderMute = () => { muteBtn.textContent = muted ? '🔇' : '🔊'; muteBtn.classList.toggle('active', !muted); };
+  renderMute();
+  muteBtn.onclick = () => {
+    muted = !muted; localStorage.setItem('jarvis_muted', muted ? '1' : '0'); renderMute();
+    if (muted) { speechSynthesis.cancel(); document.body.dataset.jstate = 'idle'; }
+    else { ttsPrimed = true; speak('Jarvis voice is on.'); } // in-gesture speech: unlocks iOS audio + audible device test
+  };
+
+  // iOS quirk: getVoices() is empty until voiceschanged fires — cache when ready.
+  let voiceCache = [];
+  const loadVoices = () => { const v = speechSynthesis.getVoices(); if (v && v.length) voiceCache = v; };
+  if ('speechSynthesis' in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
+
+  function primeTTS() { // iOS: speech must be unlocked by a user gesture
+    if (ttsPrimed || !('speechSynthesis' in window)) return;
+    const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
+  }
+  function setJState(s) { document.body.dataset.jstate = s; }
+
+  function speak(text) {
+    if (muted || !text || !('speechSynthesis' in window)) return;
+    speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.0; u.pitch = 0.85; u.volume = 1; // measured, slightly deep — closest browser TTS gets to a Jarvis timbre
+    // Prefer iOS's British male voices (Daniel is the classic butler voice); enhanced variants win when installed
+    const prefer = ['daniel', 'arthur', 'oliver', 'jamie'];
+    u.voice = prefer.map(n => voiceCache.find(v => v.name.toLowerCase().includes(n) && /premium|enhanced/i.test(v.name)))
+        .find(Boolean)
+      || prefer.map(n => voiceCache.find(v => v.name.toLowerCase().includes(n))).find(Boolean)
+      || voiceCache.find(v => /en[-_]GB/i.test(v.lang))
+      || voiceCache.find(v => /en[-_](AU|NZ)/i.test(v.lang))
+      || voiceCache.find(v => /^en/i.test(v.lang)) || null;
+    u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
+    u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; if (conversationMode) scheduleRelisten(); };
+    u.onerror = (e) => { setJState('idle'); hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`; };
+    speechSynthesis.speak(u);
+  }
+
+  // ── Transcript rendering ───────────────────────────────────────────────────
+  function bubble(cls, text) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + cls;
+    div.textContent = text;
+    transcript.appendChild(div);
+    transcript.scrollTop = transcript.scrollHeight;
+    return div;
+  }
+  function meta(div, s) {
+    const m = document.createElement('div'); m.className = 'meta'; m.textContent = s; div.appendChild(m);
+  }
+
+  // ── WebSocket ──────────────────────────────────────────────────────────────
+  let ws, streamDiv = null, reconnectDelay = 1000;
+  function connect() {
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    ws.onopen = () => { $('connDot').classList.add('on'); hint.textContent = ''; reconnectDelay = 1000; };
+    ws.onclose = () => {
+      $('connDot').classList.remove('on');
+      hint.textContent = 'reconnecting…';
+      setTimeout(connect, reconnectDelay = Math.min(reconnectDelay * 2, 15000));
+    };
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { return; }
+      if (m.type === 'reply') {
+        const div = bubble('jarvis' + (m.interim ? ' interim' : ''), m.text || '');
+        if (!m.interim && m.intent) meta(div, `${m.intent} · ${m.via} · ${m.ms}ms`);
+        speak(m.speech);
+        if (!m.interim && muted) scheduleRelisten(); // muted → no TTS onend to drive the loop
+      } else if (m.type === 'reply_chunk') {
+        if (!streamDiv) streamDiv = bubble('jarvis', '');
+        streamDiv.textContent += m.text;
+        transcript.scrollTop = transcript.scrollHeight;
+      } else if (m.type === 'reply_done') {
+        if (streamDiv) { meta(streamDiv, `${m.via || 'converse'} · ${m.ms}ms`); }
+        speak(m.speech); streamDiv = null;
+        if (muted) scheduleRelisten();
+      } else if (m.type === 'notify') {
+        const n = m.notification;
+        bubble('notify ' + (n.level || 'info'), `${n.title}${n.body && n.body !== n.title ? '\n' + n.body : ''}`);
+        // Notifications render silently here — the Command Deck (:8444) is the
+        // one voice of Jarvis now; two apps must never speak the same alert.
+        refreshInbox();
+      } else if (m.type === 'job_update') {
+        const j = m.payload;
+        bubble('notify ' + (j.status === 'completed' ? 'info' : 'warn'), `Job ${String(j.id).slice(0,8)} on ${j.platform}: ${j.status}`);
+      }
+    };
+  }
+  connect();
+
+  // ── Sending ────────────────────────────────────────────────────────────────
+  function send(text) {
+    text = (text || '').trim();
+    if (!text || !ws || ws.readyState !== 1) return;
+    bubble('user', text);
+    ws.send(JSON.stringify({ type: 'utterance', text, mode: 'auto' }));
+  }
+  $('sendBtn').onclick = () => { primeTTS(); send($('textIn').value); $('textIn').value = ''; };
+  $('textIn').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { primeTTS(); send($('textIn').value); $('textIn').value = ''; }
+  });
+
+  // ── Voice — push-to-talk + hands-free conversation loop ─────────────────────
+  // Push-to-talk: tap mic → one utterance. Conversation mode (💬): after Jarvis
+  // finishes speaking, the mic auto-reopens for the next turn — tap once, then
+  // talk back and forth. iOS grants the mic only to a foreground tab, so this is
+  // hands-free with the app open (the phone-call path is the eyes-free story).
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const micBtn = $('micBtn'), convBtn = $('convBtn');
+  let conversationMode = false, rec = null, listening = false, relistenTimer = null;
+
+  function startListening() {
+    if (!SR || listening) return;
+    speechSynthesis.cancel();
+    rec = new SR();
+    rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
+    let finalText = '';
+    rec.onstart = () => { listening = true; micBtn.classList.add('listening'); hint.textContent = 'listening…'; setJState('listening'); };
+    rec.onresult = (e) => {
+      let interim = '';
+      for (const r of e.results) (r.isFinal ? (finalText += r[0].transcript) : (interim += r[0].transcript));
+      hint.textContent = interim || finalText || 'listening…';
+    };
+    rec.onerror = (e) => {
+      if (e.error === 'no-speech') return; // handled in onend (may relisten)
+      hint.textContent = e.error === 'not-allowed' ? '⚠ Mic permission denied — check Safari settings' : `voice error: ${e.error}`;
+      if (e.error === 'not-allowed') setConversation(false);
+    };
+    rec.onend = () => {
+      listening = false; micBtn.classList.remove('listening'); setJState('idle');
+      const said = finalText.trim();
+      if (said) { hint.textContent = ''; send(said); } // relisten happens after Jarvis replies (speak.onend)
+      else if (conversationMode) { hint.textContent = 'say something…'; scheduleRelisten(); }
+      else if (!hint.textContent.startsWith('⚠')) hint.textContent = '';
+    };
+    try { rec.start(); } catch { /* rapid restart can race — ignore */ }
+  }
+
+  // Re-open the mic a beat after Jarvis stops talking (called from speak.onend).
+  function scheduleRelisten() {
+    if (!conversationMode) return;
+    clearTimeout(relistenTimer);
+    relistenTimer = setTimeout(() => { if (conversationMode && !listening) startListening(); }, 400);
+  }
+
+  function setConversation(on) {
+    conversationMode = on;
+    convBtn.classList.toggle('active', on);
+    if (on) { primeTTS(); hint.textContent = 'hands-free on — tap 💬 to stop'; if (!listening) startListening(); }
+    else { clearTimeout(relistenTimer); hint.textContent = ''; if (listening) rec?.stop(); }
+  }
+
+  if (!SR) {
+    micBtn.disabled = true; convBtn.disabled = true;
+    hint.textContent = location.protocol === 'https:'
+      ? 'Voice not supported in this browser — use the text box'
+      : '⚠ Voice needs the https ts.net address, not http';
+  } else {
+    micBtn.onclick = () => { primeTTS(); if (listening) rec?.stop(); else startListening(); };
+    convBtn.onclick = () => setConversation(!conversationMode);
+  }
+
+  // ── Inbox ──────────────────────────────────────────────────────────────────
+  const badge = $('inboxBadge');
+  async function refreshInbox(render = false) {
+    try {
+      const d = await fetch('/api/inbox').then(r => r.json());
+      badge.style.display = d.unread ? 'flex' : 'none';
+      badge.textContent = d.unread;
+      if (render) {
+        const list = $('inboxList'); list.innerHTML = '';
+        for (const n of d.notifications || []) {
+          const div = document.createElement('div');
+          div.className = 'nitem' + (n.read_at ? '' : ' unread');
+          div.innerHTML = `<div class="t"></div><div class="b"></div><div class="ts"></div>`;
+          div.querySelector('.t').textContent = n.title;
+          div.querySelector('.b').textContent = n.body && n.body !== n.title ? n.body : '';
+          div.querySelector('.ts').textContent = `${n.source} · ${new Date(n.ts).toLocaleString()}`;
+          div.onclick = async () => {
+            if (!n.read_at) { await fetch(`/api/inbox/${n.id}/read`, { method: 'POST' }); refreshInbox(true); }
+          };
+          list.appendChild(div);
+        }
+      }
+    } catch { /* offline */ }
+  }
+  $('inboxBtn').onclick = () => { $('inbox').classList.add('open'); refreshInbox(true); };
+  $('closeInbox').onclick = () => $('inbox').classList.remove('open');
+  $('inbox').onclick = (e) => { if (e.target.id === 'inbox') $('inbox').classList.remove('open'); };
+  $('readAllBtn').onclick = async () => { await fetch('/api/inbox/all/read', { method: 'POST' }); refreshInbox(true); };
+  refreshInbox();
+  setInterval(() => refreshInbox(false), 60000);
+
+  // ── Roadmap ("are we done yet") ───────────────────────────────────────────
+  const ICONS = { done: '✅', in_progress: '🔨', superseded: '➖', pending: '⬜' };
+  async function loadRoadmapPanel() {
+    $('rmBarFill').style.width = '0%';
+    try {
+      const d = await fetch('/api/roadmap').then(r => r.json());
+      $('rmSub').textContent = `${d.doneCount} of ${d.totalCount} moves shipped`;
+      $('rmCurrentWrap').innerHTML = d.current
+        ? `<div class="rm-current">🔨 Currently: ${d.current.title} <span style="opacity:.7">(${d.current.phase})</span></div>` : '';
+      const phasesEl = $('rmPhases');
+      phasesEl.innerHTML = '';
+      d.phases.forEach((phase, i) => {
+        const doneInPhase = phase.moves.filter(m => m.status === 'done').length;
+        const det = document.createElement('details');
+        det.className = 'rm-phase';
+        det.open = phase.moves.some(m => m.status === 'in_progress') || i === 0;
+        const moves = phase.moves.map(m => `
+          <div class="rm-move ${m.status === 'done' ? 'done' : ''}">
+            <span class="icon">${ICONS[m.status] || '⬜'}</span>
+            <div class="body"><div class="title"></div>${m.note ? '<div class="note"></div>' : ''}</div>
+          </div>`).join('');
+        det.innerHTML = `<summary><span class="car">▶</span><span class="rp-name">${phase.name}</span><span class="rp-count">${doneInPhase}/${phase.moves.length}</span></summary>${moves}`;
+        // text content set via textContent to avoid any HTML injection from config
+        det.querySelectorAll('.rm-move').forEach((el, idx) => {
+          el.querySelector('.title').textContent = phase.moves[idx].title;
+          const noteEl = el.querySelector('.note');
+          if (noteEl) noteEl.textContent = phase.moves[idx].note;
+        });
+        phasesEl.appendChild(det);
+      });
+      requestAnimationFrame(() => { $('rmPct').textContent = d.percent + '%'; $('rmBarFill').style.width = d.percent + '%'; });
+    } catch {
+      $('rmSub').textContent = 'unavailable';
+    }
+  }
+  $('roadmapBtn').onclick = () => { $('roadmap').classList.add('open'); loadRoadmapPanel(); };
+  $('closeRoadmap').onclick = () => $('roadmap').classList.remove('open');
+  $('roadmap').onclick = (e) => { if (e.target.id === 'roadmap') $('roadmap').classList.remove('open'); };
+
+  bubble('jarvis', 'Jarvis online. Tap 🎙 and just talk — ask me anything or tell me to sort something out. Tap 💬 for hands-free back-and-forth.');
+})();
+</script>
+</body>
+</html>

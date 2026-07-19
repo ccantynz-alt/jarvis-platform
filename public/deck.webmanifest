@@ -1,0 +1,14 @@
+{
+  "name": "JARVIS Command Deck",
+  "short_name": "JARVIS",
+  "description": "Multi-agent command deck — talk to Jarvis, watch the fleet.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#04060c",
+  "theme_color": "#04060c",
+  "icons": [
+    { "src": "/icons/deck-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/deck-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
