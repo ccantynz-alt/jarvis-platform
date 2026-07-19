@@ -343,7 +343,11 @@ async function pollOrg() {
     jget(`${SCHEDULER}/health`),
   ]);
   const agents = org?.agents || {};
-  const roles = Object.values(agents).filter(a => a.kind !== 'resident');
+  // The C-suite (cto/cmo/cfo/clo/coo/cro) are now REAL dispatchable agents in
+  // config/agents.json (2026-07-19), not a cosmetic display map — they're
+  // shown as their own tier below, so exclude them from the plain role roster.
+  const CSUITE_KEYS = ['cto', 'cmo', 'cfo', 'clo', 'coo', 'cro'];
+  const roles = Object.values(agents).filter(a => a.kind !== 'resident' && !CSUITE_KEYS.includes(a.name));
   const running = (Array.isArray(jobs) ? jobs : []).filter(j => j.status === 'running');
   const queuedJobs = (Array.isArray(jobs) ? jobs : []).filter(j => j.status === 'queued');
   const maxConc = orch?.maxConcurrent || 3;
@@ -364,6 +368,20 @@ async function pollOrg() {
       load: Math.min(100, Math.round(100 * jobsToday / Math.max(1, list.length * 2))),
     };
   };
+  // Overlay the REAL c-suite agent's own weekly brief onto a department/live
+  // tile: their filed report is the authoritative "what does this exec
+  // actually think" — a fresh action_needed/escalate always wins the tile;
+  // otherwise the live operational signal (self-heal, dispatch queue, cron
+  // mode) stays primary since it updates far more often than a weekly cron.
+  const csuite = (key, tile) => {
+    const real = agents[key];
+    const rep = real?.last_report;
+    if (real && real.status !== 'active') return { ...tile, state: 'HELD', task: `Agent ${real.status}` };
+    if (rep && ['action_needed', 'escalate'].includes(rep.status)) {
+      return { ...tile, task: rep.summary.slice(0, 90), state: 'REVIEW' };
+    }
+    return tile;
+  };
 
   const selfHealMode = (() => {
     const env = readFileSync('/opt/jarvis/config/self-heal.env', 'utf8');
@@ -372,27 +390,27 @@ async function pollOrg() {
   const selfHealRuns = running.filter(j => (j.task || '').includes('[self-heal]'));
 
   state.agents = [
-    {
+    csuite('cto', {
       name: 'CTO', role: 'Engineering · dispatch, builds, deploys',
       task: running[0] ? `${running[0].platform}: ${running[0].task.replace(/^\[self-heal\]\s*/, '').slice(0, 80)}` : 'Dispatch queue clear',
       state: orch?.canaryHeld ? 'REVIEW' : (running.length ? 'ACTIVE' : 'IDLE'),
       load: Math.min(100, Math.round(100 * running.length / maxConc)),
-    },
-    {
+    }),
+    csuite('coo', {
       name: 'COO', role: 'Operations · self-heal, backups, fleet',
       task: selfHealRuns.length ? `Repairing ${selfHealRuns.map(j => j.platform).join(', ')}` : `Self-heal ${selfHealMode.toUpperCase()} — watching fleet`,
       state: selfHealRuns.length ? 'ACTIVE' : (selfHealMode === 'live' ? 'ACTIVE' : 'IDLE'),
       load: selfHealRuns.length ? 70 : (selfHealMode === 'live' ? 25 : 5),
-    },
-    deptTile('CFO', 'Accountancy · ledgers, filings, budgets', dept(['accountant']), 'Awaiting scheduled review cycle'),
-    deptTile('CLO', 'Legal · contracts, compliance, filings', dept(['legal']), 'Awaiting scheduled review cycle'),
-    deptTile('CMO', 'Marketing · social, campaigns, outreach', dept(['social-media']), 'Next posting window on cron'),
-    {
+    }),
+    csuite('cfo', deptTile('CFO', 'Accountancy · ledgers, filings, budgets', dept(['accountant']), 'Awaiting scheduled review cycle')),
+    csuite('clo', deptTile('CLO', 'Legal · contracts, compliance, filings', dept(['legal']), 'Awaiting scheduled review cycle')),
+    csuite('cmo', deptTile('CMO', 'Marketing · social, SEO, campaigns', dept(['social-media', 'seo-specialist']), 'Next posting window on cron')),
+    csuite('cro', {
       name: 'CRO', role: 'Research · monitoring, audits, intel',
       task: `Watching ${platformNames().length} platforms · scheduler ${schedHealth?.mode || 'off'}`,
       state: schedHealth?.mode === 'live' ? 'ACTIVE' : 'IDLE',
       load: schedHealth?.mode === 'live' ? 30 : 10,
-    },
+    }),
   ];
 
   // Hierarchy view — real registry + real services
