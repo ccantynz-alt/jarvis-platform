@@ -85,10 +85,22 @@ function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); 
 // Run `claude --print` on the PC's own login (whatever account is signed in
 // under this Windows user's %USERPROFILE%\.claude — never IS_SANDBOX/HOME
 // overrides, this is not root and not the server's env).
+//
+// claude ships as claude.cmd on Windows, which only cmd.exe can execute
+// directly — that needs shell:true. But shell:true + an ARGS ARRAY is a
+// documented Node foot-gun (and an explicit deprecation warning): the args
+// get joined with spaces and re-tokenized by cmd.exe, silently mangling any
+// prompt containing punctuation cmd treats specially. A prompt with a colon
+// and periods was observed splitting apart and reaching claude as an empty
+// stdin, so it replied with its generic no-input greeting instead of running
+// the task. Fix: build ONE command string ourselves with JSON.stringify()
+// (produces a well-formed double-quoted, backslash-escaped token both cmd.exe
+// and the underlying argv parser accept) and pass that single string with
+// shell:true — Node's documented-safe form.
 function runClaude(prompt, cwd, timeoutMin) {
   return new Promise((resolve) => {
-    // claude ships as claude.cmd on Windows — needs a shell to resolve it.
-    const proc = spawn('claude', ['--dangerously-skip-permissions', '--print', prompt], {
+    const cmdStr = 'claude --dangerously-skip-permissions --print ' + JSON.stringify(prompt);
+    const proc = spawn(cmdStr, {
       cwd, shell: true,
       env: { ...process.env, DISABLE_AUTOUPDATER: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
