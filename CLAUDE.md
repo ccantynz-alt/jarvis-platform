@@ -15,7 +15,7 @@ stay healthy without human intervention.
 Jarvis serves Craig Canty / MarcoReid Intelligence Systems.
 
 Platforms Jarvis monitors (source of truth: `config/platforms.json` —
-read it, don't trust this list). As of 2026-07-17 the registry contains 12:
+read it, don't trust this list). As of 2026-07-12 the registry contains:
 zoobicon, vapron, bookaride, gatetest, alecrae, jarvis, voxlen, gluecron,
 universal-ai-operator, marcoreid, davenroe, screenshot-to-code.
 Notes:
@@ -24,8 +24,9 @@ Notes:
 - Gluecron **runs on THIS box** as a Docker container behind
   Coolify/Traefik (see Gotchas below)
 - GateTest has a local checkout at `/opt/gatetest`
-- MarcoReid is registered as a Vercel-hosted platform; Jarvis monitors its
-  live site and repo rather than a local checkout.
+- The eSIM MVNO is talked about but NOT yet in the registry — Haiku
+  intent routing can't target a platform that isn't registered. Add it
+  when it's real. (MarcoReid was registered 2026-07-08.)
 
 ---
 
@@ -291,49 +292,60 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   creds; Coolify owns the gluecron deploy now). The cups snap was disabled
   the same day (it exposed cupsd publicly on :631). Don't re-enable either
   without a reason.
-- **Retired Slack intent routing was two-tier**: keyword fast-path for confident
-  short commands, Haiku CLI classification (~3-10s) for ambiguous natural
-  phrasing, silent keyword fallback on any classifier failure. Debug with
+- **Slack intent routing is two-tier**: keyword fast-path (src/intent.js —
+  pure functions, unit-tested in test/) for confident commands, Haiku
+  classification for ambiguous natural phrasing, silent keyword fallback on
+  any classifier failure. Haiku uses the HTTP Messages API (~300ms) when
+  ANTHROPIC_API_KEY is set in secrets.env, else the local `claude` CLI
+  (~3-10s cold start). Debug with
   `curl 'http://127.0.0.1:9203/slack/test?text=...'` — it returns
-  {keyword, haiku, chosen, haiku_ms}. Haiku can only route to platforms
-  present in platforms.json.
-- **Memory hygiene:** `repair_log` table exists but is mostly empty — sessions
-  skip the mid-session logging in the protocol below. The memory is only as
-  smart as what gets written to it.
-- **Jobs are durable (2026-07-15):** orchestrator jobs live in the SQLite
-  `jobs` + `job_transitions` tables (memory :9200 `/memory/jobs*`), NOT in
-  process memory. A restart re-queues interrupted jobs automatically (one
-  retry, `max_attempts=2`). Debug a "silent" job with
-  `curl -s http://127.0.0.1:9200/memory/jobs/<id> | jq .transitions`.
-- **Worker spawns go through `src/lib/spawn-agent.js` ONLY.** It centralizes
-  `IS_SANDBOX=1` (claude ≥2.1.207 refuses skip-permissions as root without
-  it), `DISABLE_AUTOUPDATER=1`, timeout kill timers, and it STRIPS
-  `ANTHROPIC_API_KEY` from worker envs — CLI workers must bill the flat-rate
-  claude.ai subscription, never the metered key (that key is only for the
-  gateway's Messages-API brain). Never add a raw `spawn('claude', ...)`
-  anywhere else.
-- **Canary gate:** when the installed claude CLI version differs from
-  `agent_context.claude_verified_version`, the scheduler runs a CANARY-OK
-  probe before starting ANY job. If it fails, dispatch is HELD (jobs stay
-  queued, alert notification fires, retry every 30 min) — a CLI regression
-  can no longer silently kill the fleet. Check `curl :9205/health | jq
-  .canaryHeld`.
+  {keyword, normalized, haiku, chosen, haiku_ms}. Haiku can only route to
+  platforms present in platforms.json. "hey jarvis" address prefixes and
+  polite lead-ins ("can you", "please") are stripped BEFORE matching, so
+  addressing the bot no longer routes to the `jarvis` platform. Unclear
+  messages get a "didn't catch that" reply — they are NEVER auto-dispatched
+  to the orchestrator (the old passthrough fallback caused spurious agent
+  runs and "Which platform?" spam).
+- **All unsolicited Slack notifications go through the NotifyCenter**
+  (src/notify-center.js; state persisted at memory/notify-state.json).
+  Levels: critical (immediate, bypasses quiet hours/mute), warning
+  (immediate but deduped + rate-limited), info (batched into a periodic
+  digest). Backstop: max N immediate posts/hour, overflow demotes to the
+  digest. Quiet hours 22:00–07:00 NZ hold non-critical. Craig controls it
+  from Slack: `mute`, `mute 2h`, `mute all`, `unmute`, `digest`,
+  `notifications`. Services posting to :9203 pass {level, key};
+  /slack/send defaults to "warning", /slack/report levels itself from
+  audit status (healthy → digest only). Replies to Craig's own commands
+  bypass all of this by design — mute never mutes answers. Tuning vars in
+  secrets.env.example. If Slack floods again, find the caller posting
+  with level=critical or a constantly-changing dedupe key.
+- **Memory hygiene:** `repair_log` and `agent_context` tables exist but are
+  empty — sessions skip the mid-session logging in the protocol below. The
+  memory is only as smart as what gets written to it.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
-1. Haiku intent classification runs via CLI cold-start (~3-10s per
-   ambiguous message). An ANTHROPIC_API_KEY in secrets.env + switching
-   classifyIntent to the HTTP Messages API would cut that to ~300ms.
-2. Orchestrator still runs agents as root with
+1. No external watcher: Jarvis monitors the platforms but nothing off-box
+   monitors Jarvis. If this box dies, the reporter dies with it.
+   (`:9206/health` is intentionally unauthenticated for this purpose.)
+2. ANTHROPIC_API_KEY not yet set in secrets.env on the box — the fast
+   HTTP classifier path shipped 2026-07-12 but stays dormant until the
+   key is added (falls back to the 3-10s CLI meanwhile). Add the key,
+   `systemctl restart jarvis-slack`, verify with /slack/health
+   (classifier should read "http-api").
+3. Orchestrator still runs agents as root with
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
+4. eSIM MVNO not in platforms.json (see WHAT JARVIS IS).
+5. audit-runner's PLATFORM_CONFIG only covers 4 of the 12 registered
+   platforms — the daily sprint now skips the rest silently (logged, not
+   Slacked). Add PLATFORM_CONFIG entries for platforms that should be
+   audited.
 
-Cleared 2026-07-06: dashboard auth (was #1), cupsd exposure (was #2),
-keyword-only intents (was #3), no DB backups (was #5) — see git log.
-Cleared 2026-07-19: resource guards / pre-OOM alerting (metrics-collector.js);
-no external watcher (was silently broken by the July 18 dashboard hardening —
-see :9212 in PORTS ON THIS BOX — a cloud-scheduled routine now pings it hourly
-and alerts Craig on a state change, see docs/OFF-BOX-WATCHDOG.md).
+Cleared 2026-07-06: dashboard auth, cupsd exposure, keyword-only intents,
+no DB backups. Cleared 2026-07-12: Slack notification firehose (NotifyCenter:
+digest/mute/rate-limit) and misrouted Slack commands (src/intent.js rewrite)
+— see git log.
 
 ---
 

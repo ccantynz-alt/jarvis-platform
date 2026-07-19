@@ -814,11 +814,13 @@ app.get('/health', async (_req, res) => {
 
 // ── Cron helpers ─────────────────────────────────────────────────────────────
 
-// Kept name for the cron callers; now fans out via lib/notify.js
-// (durable inbox → gateway push → Slack only while NOTIFY_SLACK_LEGACY=1).
-async function slackSend(text) {
+async function slackSend(text, level = 'warning', key = null) {
   try {
-    await notify({ source: 'orchestrator-cron', title: text.split('\n')[0].slice(0, 120), body: text });
+    await fetch(`${SLACK_BRIDGE}/slack/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, level, key }),
+    });
   } catch (e) {
     console.error('[cron] notify failed:', e.message);
   }
@@ -832,6 +834,16 @@ async function cronDailyAudit() {
   // not audit targets.
   const names = Object.keys(registry).filter(p => p !== 'jarvis' && registry[p]?.executor !== 'pc');
 
+  // /audit/run is fire-and-forget (audit-runner responds before the audit
+  // finishes), so there are no scores to report from here. Per-platform
+  // results arrive via audit-runner's own /slack/report calls, which the
+  // bridge levels by status (healthy → digest, warning/critical → posted).
+  // This cron therefore sends at most ONE message — and only on failure.
+  // The old version posted one line per platform every morning, always
+  // showing "score ?/100" because of the async response. Pure spam.
+  let triggered = 0;
+  const skipped = [];
+  const failures = [];
   for (const platform of names) {
     try {
       logEvent('CRON', `Audit: ${platform}`);
@@ -841,15 +853,20 @@ async function cronDailyAudit() {
         body: JSON.stringify({ platform }),
       });
       const data = await r.json();
-      const score  = data.health_score ?? '?';
-      const issues = (data.issues || []).length;
-      const emoji  = score > 80 ? '✅' : score > 50 ? '⚠️' : '🔴';
-      await slackSend(`${emoji} *${platform}* audit — score ${score}/100, ${issues} issue(s)`);
+      if (data.error) skipped.push(platform);  // no audit config — not a failure
+      else triggered++;
     } catch (e) {
-      await slackSend(`❌ *${platform}* audit failed: ${e.message}`);
+      failures.push(`${platform}: ${e.message}`);
     }
   }
-  logEvent('CRON', 'Daily audit sprint complete');
+  if (failures.length) {
+    await slackSend(
+      `❌ Daily audit sprint — could not start audits for:\n${failures.map(f => `• ${f}`).join('\n')}`,
+      'warning',
+      'cron-daily-audit',
+    );
+  }
+  logEvent('CRON', `Daily audit sprint: ${triggered} triggered, ${skipped.length} unconfigured, ${failures.length} failed`);
 }
 
 async function cronDailyScreenshots() {
@@ -875,7 +892,11 @@ async function cronDailyScreenshots() {
       console.error(`[cron] screenshot ${platform} failed:`, e.message);
     }
   }
-  await slackSend(`📸 Daily screenshot baselines captured for ${Object.keys(PLATFORM_URLS).length} platforms`);
+  await slackSend(
+    `📸 Daily screenshot baselines captured for ${Object.keys(PLATFORM_URLS).length} platforms`,
+    'info',
+    'cron-daily-screenshots',
+  );
   logEvent('CRON', 'Daily screenshot baseline run complete');
 }
 

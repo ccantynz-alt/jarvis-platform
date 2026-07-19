@@ -90,16 +90,12 @@ function logEvent(category, message) {
   console.log(line.trim());
 }
 
-// Kept name for the call site; now fans out via lib/notify.js (durable inbox
-// + gateway push; Slack only while NOTIFY_SLACK_LEGACY=1). Slack retirement
-// 2026-07-15: this was the last hard-coded :9203 caller.
-async function slackSend(text) {
+async function slackSend(text, level = 'warning', key = null) {
   try {
-    await notify({
-      source: 'deploy-gate',
-      level: 'warn',
-      title: text.split('\n')[0].replace(/\*/g, '').slice(0, 120),
-      body: text,
+    await fetch(`${SLACK_SVC}/slack/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, level, key }),
     });
   } catch (e) {
     logEvent('NOTIFY_FAIL', e.message);
@@ -223,7 +219,9 @@ async function processSession(session) {
       `🚨 *DEPLOY GATE — ${platform}*\n` +
       `A deploy just went out (session ${session.id}) and GateTest found ${result.criticalCount} critical issue(s) on ${url}.\n` +
       `${result.summary}\n` +
-      `_Advisory only — this does not block live traffic. Wire the GitHub Actions deploy gate on this repo for hard enforcement._`
+      `_Advisory only — this does not block live traffic. Wire the GitHub Actions deploy gate on this repo for hard enforcement._`,
+      'critical',
+      `deploy-gate-${platform}`,
     );
   } else {
     recordRun(session.id, platform, url, 'passed', 0, null);
