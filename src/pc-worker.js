@@ -20,7 +20,7 @@
  */
 
 import { spawn } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statSync, readdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
 
@@ -123,6 +123,39 @@ function runClaude(prompt, cwd, timeoutMin) {
   });
 }
 
+// Bounded recursive mtime snapshot — used to tell Craig WHAT a PC job
+// touched. Deliberately a listing, not a content upload (that needs a real
+// artifact store, tracked separately) — but a listing already answers "did
+// it actually make the file it said it would" without him having to go
+// check the machine himself. Skips node_modules/.git/hidden dirs; caps
+// depth and count so a big repo doesn't turn a job report into a novel.
+const SNAPSHOT_SKIP_DIRS = new Set(['node_modules', '.git', '.next', 'dist', 'build']);
+function snapshotFiles(root, maxEntries = 5000, maxDepth = 8) {
+  const out = new Map(); // path -> mtimeMs
+  const stack = [[root, 0]];
+  while (stack.length && out.size < maxEntries) {
+    const [dir, depth] = stack.pop();
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (e.name.startsWith('.') || SNAPSHOT_SKIP_DIRS.has(e.name)) continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { if (depth < maxDepth) stack.push([full, depth + 1]); continue; }
+      try { out.set(full, statSync(full).mtimeMs); } catch { /* transient */ }
+      if (out.size >= maxEntries) break;
+    }
+  }
+  return out;
+}
+function diffChangedFiles(before, after, cap = 25) {
+  const changed = [];
+  for (const [p, mtime] of after) {
+    if (!before.has(p) || before.get(p) !== mtime) changed.push(p);
+    if (changed.length >= cap) break;
+  }
+  return changed;
+}
+
 async function runJob(job) {
   currentJobId = job.id;
   log(`claimed job ${job.id.slice(0, 8)}: ${String(job.task).slice(0, 100)}`);
@@ -136,9 +169,21 @@ async function runJob(job) {
     return;
   }
 
+  const before = snapshotFiles(cwd);
   const result = await runClaude(job.prompt || job.task, cwd, job.timeout_min || DEFAULT_TIMEOUT_MIN);
-  log(`job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
-  await api('result', { job_id: job.id, ...result }).catch(e => log(`result post failed: ${e.message}`));
+  const changed = diffChangedFiles(before, snapshotFiles(cwd));
+  log(`job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}${changed.length ? `, ${changed.length} file(s) touched` : ''}`);
+
+  // File LISTING only, not content upload (that needs a real artifact store
+  // — tracked separately). Still answers "did it actually make what it
+  // said" without Craig having to go check the PC himself. Appended to
+  // stdout so it survives through the existing job.output column with no
+  // schema change.
+  const stdout = changed.length
+    ? `${result.stdout}\n\n[pc-worker] files touched under ${cwd}:\n${changed.map(f => '  ' + path.relative(cwd, f)).join('\n')}`
+    : result.stdout;
+
+  await api('result', { job_id: job.id, ...result, stdout }).catch(e => log(`result post failed: ${e.message}`));
   currentJobId = null;
 }
 
