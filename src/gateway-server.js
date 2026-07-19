@@ -121,11 +121,26 @@ app.post('/internal/notify', (req, res) => {
 
 // POST /internal/heartbeat — dead-man's signal from tailnet peers (e.g. box 158).
 // State-change transitions raise durable notifications; steady-state is silent.
+// A peer box gets its OWN scoped, revocable token (JARVIS_HEARTBEAT_TOKEN_<name>)
+// rather than the master gateway login — a peer never needs (or gets) the
+// power to drive the brain or dispatch fleet jobs, just to say "I'm alive".
 const heartbeats = new Map(); // source → { last: ms-epoch, alerted: bool }
 const HEARTBEAT_STALE_MS = 15 * 60 * 1000;
 
+function heartbeatAuthed(req) {
+  const provided = String(req.headers['x-jarvis-heartbeat-token'] || '');
+  if (!provided) return false;
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!k.startsWith('JARVIS_HEARTBEAT_TOKEN_') || !v) continue;
+    const a = createHash('sha256').update(provided).digest();
+    const b = createHash('sha256').update(v).digest();
+    if (a.length === b.length && timingSafeEqual(a, b)) return true;
+  }
+  return false;
+}
+
 app.post('/internal/heartbeat', (req, res) => {
-  if (!isLocalService(req) && !isAuthed(req)) return res.status(403).json({ error: 'forbidden' });
+  if (!isLocalService(req) && !isAuthed(req) && !heartbeatAuthed(req)) return res.status(403).json({ error: 'forbidden' });
   const { source, status = 'ok' } = req.body || {};
   if (!source) return res.status(400).json({ error: 'source required' });
   const prev = heartbeats.get(source);
