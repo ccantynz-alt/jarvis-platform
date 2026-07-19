@@ -136,6 +136,36 @@ app.post('/internal/heartbeat', (req, res) => {
   res.json({ ok: true, status });
 });
 
+// ── PC worker proxy (Craig's Windows box pulls jobs over the tailnet) ───────
+// The orchestrator's /worker/* endpoints stay loopback-only like everything
+// else in the fleet (Rule 4 posture); this is the one tailnet-reachable door,
+// gated by its OWN bearer token (never the general gateway login) so a leaked
+// worker token can't also drive the conversational brain or dispatch fleet
+// jobs directly.
+const WORKER_TOKEN = process.env.JARVIS_WORKER_TOKEN || '';
+function workerAuthed(req) {
+  if (!WORKER_TOKEN) return false; // fail closed if unconfigured
+  const header = String(req.headers['x-jarvis-worker-token'] || '');
+  if (!header) return false;
+  const a = createHash('sha256').update(header).digest();
+  const b = createHash('sha256').update(WORKER_TOKEN).digest();
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+app.post('/worker/:action(claim|heartbeat|result)', async (req, res) => {
+  if (!workerAuthed(req)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${ORCHESTRATOR}/worker/${req.params.action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body || {}),
+    });
+    if (r.status === 204) return res.status(204).end();
+    res.status(r.status).json(await r.json());
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 setInterval(() => {
   const now = Date.now();
   for (const [source, hb] of heartbeats) {

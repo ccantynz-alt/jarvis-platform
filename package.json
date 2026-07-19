@@ -9,6 +9,7 @@
     "metrics": "node src/metrics-collector.js",
     "slack": "node src/slack-bridge.js",
     "audit": "node src/audit-runner.js",
+    "pc-worker": "node src/pc-worker.js",
     "health": "bash scripts/health-check.sh"
   },
   "dependencies": {

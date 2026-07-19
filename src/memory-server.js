@@ -120,6 +120,11 @@ db.exec(`
 
 // Additive migrations for columns added after a table first shipped.
 try { db.exec('ALTER TABLE jobs ADD COLUMN model TEXT'); } catch { /* already present */ }
+// PC-worker lease (pull-based dispatch, 2026-07-19): a claimed job records
+// WHO holds it and UNTIL WHEN — the orchestrator reaps an expired lease
+// (worker slept/crashed) back to queued instead of waiting forever.
+try { db.exec('ALTER TABLE jobs ADD COLUMN lease_until TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT'); } catch { /* already present */ }
 
 const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
 PLATFORMS.forEach(p => {
@@ -315,22 +320,31 @@ app.post('/memory/notifications/:id/read', (req, res) => {
 
 const JOB_STATUSES = ['queued', 'running', 'completed', 'failed', 'interrupted', 'held', 'canceled'];
 // Fields a transition is allowed to update alongside the status change.
-const JOB_MUTABLE = ['executor', 'attempts', 'started_at', 'finished_at', 'exit_code', 'output', 'error'];
+const JOB_MUTABLE = ['executor', 'attempts', 'started_at', 'finished_at', 'exit_code', 'output', 'error', 'lease_until', 'worker_id'];
 
 const insertTransition = db.prepare(`
   INSERT INTO job_transitions (job_id, ts, from_status, to_status, detail)
   VALUES (?, ?, ?, ?, ?)
 `);
 
-const transitionJob = db.transaction((job, to, detail, fields) => {
+// requireFrom, when set, makes the UPDATE conditional on the CURRENT status
+// still matching it (single synchronous statement — better-sqlite3 never
+// yields mid-call, so this is atomic across concurrent HTTP requests, e.g.
+// two PC-worker claims racing for the same queued job). Returns false
+// (no-op, no transition row written) when the row had already moved on.
+const transitionJob = db.transaction((job, to, detail, fields, requireFrom) => {
   const sets = ['status = ?'];
   const vals = [to];
   for (const k of JOB_MUTABLE) {
     if (fields[k] !== undefined) { sets.push(`${k} = ?`); vals.push(fields[k]); }
   }
   vals.push(job.id);
-  db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  const where = requireFrom ? ' AND status = ?' : '';
+  if (requireFrom) vals.push(requireFrom);
+  const r = db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?${where}`).run(...vals);
+  if (r.changes === 0) return false;
   insertTransition.run(job.id, new Date().toISOString(), job.status, to, detail || null);
+  return true;
 });
 
 // POST /memory/jobs — enqueue a job
@@ -376,7 +390,7 @@ app.get('/memory/jobs', (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
   const where = [];
   const vals = [];
-  for (const f of ['status', 'agent', 'platform']) {
+  for (const f of ['status', 'agent', 'platform', 'executor']) {
     if (req.query[f]) { where.push(`${f} = ?`); vals.push(req.query[f]); }
   }
   const rows = db.prepare(`
@@ -394,16 +408,25 @@ app.get('/memory/jobs/:id', (req, res) => {
   res.json({ ...job, transitions });
 });
 
-// POST /memory/jobs/:id/transition — { to, detail, fields }
+// POST /memory/jobs/:id/transition — { to, detail, fields, from }
+// `from`: guard the write to only apply if the job is still in that status —
+// the atomic-claim primitive for anything that competes for queued jobs
+// (e.g. multiple PC workers polling /worker/claim at once). A guard miss is
+// NOT an error: it means someone else claimed it first, so this returns
+// 409 with the row's actual current status for the caller to react to.
 app.post('/memory/jobs/:id/transition', (req, res) => {
-  const { to, detail, fields = {} } = req.body || {};
+  const { to, detail, fields = {}, from } = req.body || {};
   if (!JOB_STATUSES.includes(to)) {
     return res.status(400).json({ error: `to must be one of: ${JOB_STATUSES.join(', ')}` });
   }
   const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   try {
-    transitionJob(job, to, detail, fields);
+    const applied = transitionJob(job, to, detail, fields, from);
+    if (!applied) {
+      const now = db.prepare('SELECT status FROM jobs WHERE id = ?').get(req.params.id);
+      return res.status(409).json({ error: 'status changed since read', expected: from, actual: now?.status });
+    }
     res.json({ ok: true, id: job.id, from: job.status, to });
   } catch (e) {
     res.status(500).json({ error: e.message });

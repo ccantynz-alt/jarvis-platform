@@ -54,6 +54,10 @@ const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || 'claude-fable-5'
 const MAX_CONCURRENT_JOBS = parseInt(process.env.MAX_CONCURRENT_JOBS, 10) || 3;
 const SCHEDULER_TICK_MS = 4000;
 const CANARY_RETRY_MS = 30 * 60_000;
+// PC-worker lease: how long a claimed job is reserved before an unrenewed
+// lease is reaped back to queued (worker slept, lost network, or crashed).
+// The worker's heartbeat (POST /worker/heartbeat) renews it while a job runs.
+const PC_LEASE_MS = 120_000;
 
 async function dbGet(path) {
   const r = await fetch(`${MEMORY_URL}${path}`);
@@ -71,8 +75,22 @@ async function dbPost(path, body) {
   return r.json();
 }
 
-function jobTransition(id, to, detail, fields = {}) {
-  return dbPost(`/memory/jobs/${id}/transition`, { to, detail, fields });
+function jobTransition(id, to, detail, fields = {}, from = undefined) {
+  return dbPost(`/memory/jobs/${id}/transition`, { to, detail, fields, from });
+}
+
+// POST the transition and return true/false instead of throwing on a 409
+// (guard miss — someone else already moved the row). Used by the atomic
+// PC-worker claim race.
+async function tryTransition(id, to, detail, fields, from) {
+  const r = await fetch(`${MEMORY_URL}/memory/jobs/${id}/transition`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to, detail, fields, from }),
+  });
+  if (r.status === 409) return false;
+  if (!r.ok) throw new Error(`POST transition → ${r.status}: ${(await r.text()).slice(0, 200)}`);
+  return true;
 }
 
 // Map a DB row to the camelCase shape /jobs and /status/:id always returned,
@@ -126,7 +144,12 @@ function loadDesignRefs(platformPath) {
   }
 }
 
-function buildPrompt(platform, task, platformPath) {
+function buildPrompt(platform, task, platformPath, executor = null) {
+  // PC-worker jobs run on Craig's Windows machine, not the Linux fleet box —
+  // none of the session-start.sh / CLAUDE.md / git-push boilerplate applies
+  // (no /opt/jarvis there, no platform repo to push).
+  if (executor === 'pc') return task;
+
   const parts = [
     `Read CLAUDE.md.`,
     `Run bash /opt/jarvis/scripts/session-start.sh ${platform}.`,
@@ -360,6 +383,9 @@ async function executeJob(row) {
   try {
     if (row.executor === 'cloud') return await runCloud(row);
     if (row.executor === 'local') return await runLocalJob(row);
+    // 'pc' jobs are pulled via /worker/claim, never started here — the
+    // scheduler filter above keeps them out of toStart. Defensive-only.
+    if (row.executor === 'pc') return;
     return await runRemoteJob(row);
   } catch (e) {
     await failJobRow(row, e.message);
@@ -406,7 +432,11 @@ async function schedulerTick() {
       }).catch(() => {});
     }
 
+    // executor='pc' jobs are PULLED by the Windows worker via POST /worker/claim
+    // (it may be asleep, offline, or mid-job) — the scheduler never starts them
+    // itself. reapExpiredPcLeases() below is their only path back to 'queued'.
     const toStart = queued
+      .filter(r => r.executor !== 'pc')
       .sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at))
       .slice(0, slots);
 
@@ -419,11 +449,106 @@ async function schedulerTick() {
       console.log(`[orchestrator] starting job ${row.id} → ${row.platform} (${row.executor})`);
       executeJob({ ...row, attempts: row.attempts + 1 });  // async — not awaited
     }
+
+    await reapExpiredPcLeases();
   } catch (e) {
     console.error('[scheduler] tick error:', e.message);
   } finally {
     tickInFlight = false;
   }
+}
+
+// A claimed PC job whose lease expired means the worker went to sleep, lost
+// the tailnet, or crashed mid-job — put it back in the queue (or fail it if
+// out of attempts) exactly like the boot-recovery path does for a restart.
+async function reapExpiredPcLeases() {
+  let running;
+  try { running = await dbGet('/memory/jobs?status=running&limit=200'); }
+  catch { return; }
+  const now = new Date().toISOString();
+  for (const row of running) {
+    if (row.executor !== 'pc' || !row.lease_until || row.lease_until > now) continue;
+    const ok = await tryTransition(row.id, 'interrupted', 'pc worker lease expired', {}, 'running');
+    if (!ok) continue; // a heartbeat/result won the race first
+    logEvent('WARN', `PC job ${row.id.slice(0, 8)} lease expired (worker ${row.worker_id || '?'}) — re-queuing`);
+    if (row.attempts < row.max_attempts) {
+      await jobTransition(row.id, 'queued', `re-queued after lease expiry (attempt ${row.attempts}/${row.max_attempts})`);
+    } else {
+      await jobTransition(row.id, 'failed', 'pc worker lease expired, attempts exhausted', {
+        finished_at: new Date().toISOString(),
+        error: 'PC worker lost the job lease and attempts are exhausted',
+      });
+      notify({
+        source: 'orchestrator', level: 'warn',
+        title: `PC job failed — worker unreachable`,
+        body: `Job ${row.id.slice(0, 8)} (${row.task?.slice(0, 100)}) lost its lease and had no attempts left.`,
+      }).catch(() => {});
+    }
+  }
+}
+
+// ── PC worker endpoints (pull-based dispatch, loopback-only) ────────────────
+// Reached via the gateway's tailnet-authenticated proxy (POST /worker/* on
+// :9208, JARVIS_WORKER_TOKEN) — this service itself binds 127.0.0.1 only, so
+// no separate auth check is needed here (same trust boundary as /dispatch).
+
+// POST /worker/claim { worker_id }
+// Atomically claims the oldest queued executor='pc' job, or 204 when none.
+app.post('/worker/claim', async (req, res) => {
+  const workerId = (req.body && req.body.worker_id) || 'unknown';
+  const enabled = await pcWorkerEnabled();
+  if (!enabled) return res.status(204).end();
+  let candidates;
+  try {
+    candidates = await dbGet('/memory/jobs?status=queued&executor=pc&limit=20');
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+  candidates.sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at));
+  const leaseUntil = new Date(Date.now() + PC_LEASE_MS).toISOString();
+  for (const row of candidates) {
+    const ok = await tryTransition(row.id, 'running',
+      `claimed by ${workerId}`,
+      { started_at: new Date().toISOString(), attempts: row.attempts + 1, worker_id: workerId, lease_until: leaseUntil },
+      'queued');
+    if (!ok) continue; // another claim/reap beat us to this one — try the next
+    logEvent('DISPATCH', `PC job ${row.id.slice(0, 8)} claimed by ${workerId}`);
+    return res.json({
+      id: row.id, task: row.task, prompt: row.prompt, path: row.path,
+      timeout_min: row.timeout_min, model: row.model, lease_seconds: PC_LEASE_MS / 1000,
+    });
+  }
+  return res.status(204).end();
+});
+
+// POST /worker/heartbeat { worker_id, job_id? }
+// Keeps the worker's presence known and, when it holds a job, extends the
+// lease so the reaper doesn't reclaim work still genuinely in progress.
+app.post('/worker/heartbeat', async (req, res) => {
+  const { worker_id, job_id } = req.body || {};
+  await dbPost('/memory/kv', { key: `pc-worker-last-seen:${worker_id || 'unknown'}`, value: new Date().toISOString() }).catch(() => {});
+  if (job_id) {
+    await jobTransition(job_id, 'running', 'lease renewed', { lease_until: new Date(Date.now() + PC_LEASE_MS).toISOString() }, 'running').catch(() => {});
+  }
+  res.json({ enabled: await pcWorkerEnabled() });
+});
+
+// POST /worker/result { job_id, code, stdout, stderr, timedOut }
+app.post('/worker/result', async (req, res) => {
+  const { job_id, code, stdout = '', stderr = '', timedOut = false } = req.body || {};
+  if (!job_id) return res.status(400).json({ error: 'job_id required' });
+  let row;
+  try { row = await dbGet(`/memory/jobs/${job_id}`); }
+  catch { return res.status(404).json({ error: 'Job not found' }); }
+  await finishJob(row, { code, stdout, stderr, timedOut });
+  res.json({ ok: true });
+});
+
+async function pcWorkerEnabled() {
+  try {
+    const r = await dbGet('/memory/kv/pc-worker-enabled');
+    return r.value !== '0';
+  } catch { return true; } // no KV entry yet = enabled by default
 }
 
 // Boot recovery: anything left 'running' by a previous process is transitioned
@@ -549,17 +674,17 @@ app.post('/dispatch', async (req, res) => {
 
   const jobId = randomUUID();
   const isLocal = entry.server === OWN_IP;
-  const prompt = buildPrompt(platform, task, isLocal ? entry.path : null);
+
+  // Choose the executor. With JARVIS_CLOUD_ENABLED unset, pickExecutor returns
+  // exactly the legacy result: 'local' for OWN_IP, 'remote' otherwise.
+  const executor = pickExecutor(platform, entry, task, requestedExecutor);
+  const prompt = buildPrompt(platform, task, isLocal ? entry.path : null, executor);
 
   const designRefs = isLocal ? loadDesignRefs(entry.path) : [];
   if (designRefs.length > 0) {
     console.log(`[orchestrator] design-refs for ${platform}: ${designRefs.length} file(s)`);
     logEvent('DESIGN', `Found ${designRefs.length} design ref(s) for ${platform}`);
   }
-
-  // Choose the executor. With JARVIS_CLOUD_ENABLED unset, pickExecutor returns
-  // exactly the legacy result: 'local' for OWN_IP, 'remote' otherwise.
-  const executor = pickExecutor(platform, entry, task, requestedExecutor);
 
   // Enqueue durably; the scheduler tick starts it within a few seconds.
   // max_attempts 2 = one automatic retry if a restart interrupts the job.
@@ -702,7 +827,10 @@ async function slackSend(text) {
 async function cronDailyAudit() {
   logEvent('CRON', 'Daily audit sprint starting — scanning all platforms');
   const registry = loadRegistry();
-  const names = Object.keys(registry).filter(p => p !== 'jarvis');
+  // 'jarvis' (meta-platform) and 'pc'-executor worker nodes (Craig's own
+  // machine — no repo, no build/deploy, nothing a web audit can score) are
+  // not audit targets.
+  const names = Object.keys(registry).filter(p => p !== 'jarvis' && registry[p]?.executor !== 'pc');
 
   for (const platform of names) {
     try {

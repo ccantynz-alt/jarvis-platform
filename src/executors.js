@@ -38,8 +38,13 @@ function legacyChoice(entry) {
   return entry && entry.server === OWN_IP ? 'local' : 'remote';
 }
 
-// pickExecutor(platform, entry, task, requested) → 'local' | 'cloud' | 'remote'
+// pickExecutor(platform, entry, task, requested) → 'local' | 'cloud' | 'remote' | 'pc'
 export function pickExecutor(platform, entry, task, requested) {
+  // PC-worker jobs (Craig's own machine, pulled over the tailnet by
+  // src/pc-worker.js) are an explicit, additive routing — never inferred, so
+  // every existing platform's behaviour is untouched.
+  if (requested === 'pc' || entry?.executor === 'pc') return 'pc';
+
   const cloudEnabled = process.env.JARVIS_CLOUD_ENABLED === '1';
 
   if (!cloudEnabled) {

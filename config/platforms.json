@@ -1,5 +1,14 @@
 {
   "platforms": {
+    "craig-pc": {
+      "name": "craig-pc",
+      "display_name": "Craig's PC",
+      "server": "pc",
+      "executor": "pc",
+      "path": "C:\\dev",
+      "status": "active",
+      "notes": "Windows 11 worker node (this machine). Jobs run via src/pc-worker.js pulling over the tailnet — see docs/PC-WORKER.md. Not part of the platform fleet; no repo, no build/push."
+    },
     "zoobicon": {
       "name": "zoobicon",
       "display_name": "Zoobicon",
