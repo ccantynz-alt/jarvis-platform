@@ -654,7 +654,7 @@ function stopAllAudio() {
   speechQ.length = 0; updatePendingBadge();
   try { jarvisAudio.pause(); jarvisAudio.currentTime = 0; } catch {}
   if (window.speechSynthesis) speechSynthesis.cancel();
-  S.speaking = false;
+  S.speaking = false; lastSpeechEndAt = Date.now();
   updateOrbLabel();
 }
 
@@ -668,6 +668,7 @@ const speechQ = [];
 let speechActive = false;
 let voiceEngine = 'neural'; // 'neural' | 'backup' (sticky; re-probes after 10 min)
 let backupSince = 0, ttsFailStreak = 0;
+let lastSpeechEndAt = 0; // Date.now() when Jarvis last stopped talking — see MIC_COOLDOWN_MS
 
 function speak(text) {
   if (qs.get('voice') === '0' || voiceMode === 'off') return;
@@ -744,7 +745,7 @@ function playNeural(blob) {
     let done = false;
     const finish = () => {
       if (done) return; done = true;
-      S.speaking = false; updateOrbLabel();
+      S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel();
       URL.revokeObjectURL(url);
       resolve();
     };
@@ -764,7 +765,7 @@ function speakBrowserAsync(text) {
     if (v) u.voice = v;
     u.rate = 1.02; u.pitch = 0.9;
     let done = false;
-    const finish = () => { if (done) return; done = true; S.speaking = false; updateOrbLabel(); resolve(); };
+    const finish = () => { if (done) return; done = true; S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel(); resolve(); };
     u.onstart = () => { S.speaking = true; updateOrbLabel(); };
     u.onend = u.onerror = finish;
     setTimeout(finish, 1500 + text.length * 90); // belt & braces: never wedge the queue
@@ -903,6 +904,7 @@ function showHeard(text, ignored) { // failures must never be silent
 
 function startListening() {
   if (!SRCls || listening || voiceMode === 'off' || !armed || S.speaking || speechActive) return;
+  if (Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return; // acoustic-tail cooldown, see scheduleRelisten
   if (qs.get('core')) return; // screenshot/QA state-forcing — no real mic
   const gen = ++recGen;
   rec = new SRCls();
@@ -986,10 +988,20 @@ function handleUtterance(said) {
   showHeard(said, true);
 }
 
+// Floor on the relisten delay (2026-07-20, Craig reported "bouncing and
+// echoing" on voice). The S.speaking/speechActive flags flip false the
+// instant the browser fires its end/error event, but the room's acoustic
+// tail (speaker reverb, Bluetooth latency) can outlast that by a couple
+// hundred ms — reopening the mic on that exact instant risks catching the
+// tail of Jarvis's own voice and re-triggering. This does not replace a
+// real fix (a headset with hardware AEC is the actual cure for a fully
+// open mic+speaker setup) but it removes the software-side race.
+const MIC_COOLDOWN_MS = 600;
 function scheduleRelisten() {
   if (voiceMode === 'off' || !armed) return;
   clearTimeout(relistenTimer);
-  relistenTimer = setTimeout(() => { if (!listening && !S.speaking && !speechActive) startListening(); }, srBackoff);
+  const delay = Math.max(srBackoff, MIC_COOLDOWN_MS);
+  relistenTimer = setTimeout(() => { if (!listening && !S.speaking && !speechActive) startListening(); }, delay);
 }
 
 // Chrome quietly kills long recognizer sessions; the watchdog reopens the ear.

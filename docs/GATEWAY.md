@@ -39,7 +39,11 @@ with a user gesture on iOS — the UI primes it on the first mic tap.
 ## WS protocol (`/ws`)
 
 Client → server:
-- `{type:'utterance', text, mode}` — mode `auto` (intent pipeline) or `converse` (force streaming Claude)
+- `{type:'utterance', text}` — always routed through the agent brain
+  (tool-calling, full status/memory/dispatch access) with a fallback to the
+  intent pipeline. The old `mode:'converse'` bypass (forced streaming Claude
+  with no tools, no standing context) was removed 2026-07-20 — no client
+  used it, and it was a silent-downgrade footgun.
 - `{type:'dispatch', platform, task}` — same shape the dashboard uses
 
 Server → client:

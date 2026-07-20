@@ -14,5 +14,12 @@ StandardError=journal
 Environment=NODE_ENV=production
 EnvironmentFile=/opt/jarvis/config/secrets.env
 
+# Rule 4 safety net (2026-07-20) — spawns a Chromium CDP process per
+# capture; headless Chromium is memory-hungry, so this gets more headroom
+# than a pure API service. See jarvis-memory.service for the general
+# rationale.
+MemoryMax=1536M
+CPUQuota=200%
+
 [Install]
 WantedBy=multi-user.target

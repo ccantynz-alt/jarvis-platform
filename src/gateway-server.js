@@ -21,17 +21,22 @@
  *     services hitting /internal/*) carry neither.
  *
  * WS protocol (docs/GATEWAY.md):
- *   in : {type:'utterance', text, mode:'auto'|'converse'} | {type:'dispatch', platform, task} | {type:'ping'}
+ *   in : {type:'utterance', text} | {type:'dispatch', platform, task} | {type:'ping'}
  *   out: {type:'reply', text, speech, intent, via, ms} | {type:'reply_chunk', text} |
  *        {type:'reply_done', speech} | {type:'notify', notification} |
  *        {type:'dispatch_result', payload} | {type:'job_update', payload} | {type:'pong'}
+ *
+ * There is deliberately only ONE conversational path (the agent brain via
+ * hasAgent()/runAgent(), falling back to the intent pipeline) — an earlier
+ * revision had a second `mode:'converse'` path that bypassed all tools and
+ * standing context (removed 2026-07-20; no client ever sent it, but it was
+ * a footgun any future client could trigger into a silently dumber Jarvis).
  */
 
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
-import { spawn } from 'child_process';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, loadRoadmap } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { notify } from './lib/notify.js';
@@ -231,77 +236,6 @@ app.post('/api/inbox/:id/read', async (req, res) => {
   }
 });
 
-// ── Open-ended conversation (streamed Claude) ────────────────────────────────
-//
-// With ANTHROPIC_API_KEY: Messages API streaming (fast first token).
-// Without: locally-authenticated `claude` CLI, non-streaming fallback.
-
-const CONVERSE_MODEL = 'claude-fable-5'; // top-tier brain — Craig's call, 2026-07-16
-const CONVERSE_SYSTEM = () => [
-  'You are Jarvis, the ops assistant for Craig\'s platform estate, spoken to by voice.',
-  `Platforms you manage: ${platformNames().join(', ')}.`,
-  'Jarvis services run on this box (memory, metrics, screenshot, audit, orchestrator, gateway).',
-  'Be concise and conversational — answers are read aloud. Prefer 1-3 sentences unless asked for detail.',
-].join(' ');
-
-async function converseStream(transcript, onChunk) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (apiKey) {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: CONVERSE_MODEL,
-        max_tokens: 1000,
-        stream: true,
-        system: CONVERSE_SYSTEM(),
-        messages: transcript,
-      }),
-    });
-    if (!r.ok) throw new Error(`Anthropic API ${r.status}: ${(await r.text()).slice(0, 200)}`);
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let full = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const ev = JSON.parse(line.slice(6));
-          const delta = ev?.delta?.text;
-          if (delta) { full += delta; onChunk(delta); }
-        } catch { /* keepalives / non-JSON lines */ }
-      }
-    }
-    return full;
-  }
-
-  // CLI fallback — single shot, no streaming
-  const prompt = `${CONVERSE_SYSTEM()}\n\nConversation so far:\n` +
-    transcript.map(t => `${t.role === 'user' ? 'Craig' : 'Jarvis'}: ${t.content}`).join('\n') +
-    '\nJarvis:';
-  const full = await new Promise((resolve) => {
-    let out = '';
-    const proc = spawn('claude', ['--model', CONVERSE_MODEL, '--print', prompt],
-      { env: { ...process.env, HOME: '/root' }, stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => { proc.kill('SIGKILL'); resolve(out || 'Sorry, that took too long.'); }, 60000);
-    proc.stdout.on('data', d => { out += d.toString(); });
-    proc.on('error', () => { clearTimeout(timer); resolve('Sorry, my conversation engine is unavailable.'); });
-    proc.on('close', () => { clearTimeout(timer); resolve(out.trim() || 'Sorry, I have no answer.'); });
-  });
-  onChunk(full);
-  return full;
-}
-
 // ── WebSocket hub ────────────────────────────────────────────────────────────
 
 const server = createServer(app);
@@ -354,7 +288,7 @@ async function watchJob(jobId, platform) {
 wss.on('connection', (ws, req) => {
   const user = req.headers['tailscale-user-login'] || 'local';
   console.log(`[gateway] client connected (${user}) — ${wss.clients.size} online`);
-  const transcript = []; // per-connection conversational memory (converse mode)
+  const transcript = []; // per-connection conversational memory (agent brain)
   const dispatchGate = { turn: 0, pending: null }; // dispatch confirmation gate (per connection)
 
   ws.send(JSON.stringify({ type: 'hello', platforms: platformNames() }));
@@ -392,16 +326,6 @@ wss.on('connection', (ws, req) => {
       const t0 = Date.now();
 
       try {
-        // Forced open-ended conversation
-        if (msg.mode === 'converse') {
-          transcript.push({ role: 'user', content: text });
-          const full = await converseStream(transcript, (chunk) =>
-            ws.send(JSON.stringify({ type: 'reply_chunk', text: chunk })));
-          transcript.push({ role: 'assistant', content: full });
-          if (transcript.length > 20) transcript.splice(0, transcript.length - 20);
-          return ws.send(JSON.stringify({ type: 'reply_done', speech: full.slice(0, 400), ms: Date.now() - t0 }));
-        }
-
         // "switch brain to GPT / Claude" — handled before any brain runs
         const switched = await maybeBrainSwitch(text);
         if (switched) {

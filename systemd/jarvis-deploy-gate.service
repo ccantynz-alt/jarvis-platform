@@ -15,5 +15,10 @@ Environment=NODE_ENV=production
 Environment=GATETEST_PATH=/opt/gatetest
 EnvironmentFile=/opt/jarvis/config/secrets.env
 
+# Rule 4 safety net (2026-07-20) — runs GateTest scans, give it a bit more
+# headroom than a pure API service. See jarvis-memory.service for rationale.
+MemoryMax=768M
+CPUQuota=150%
+
 [Install]
 WantedBy=multi-user.target

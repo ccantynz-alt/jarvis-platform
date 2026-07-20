@@ -34,7 +34,7 @@
  */
 
 import { MEMORY } from './conversation.js';
-import { TOOLS, runTool, systemPrompt } from './brain-tools.js';
+import { TOOLS, runTool, systemPrompt, statusDigest } from './brain-tools.js';
 import { runClaudeBrain, hasClaudeBrain, warmupClaudeBrain, restartClaudeBrain, setBrainModel } from './brain-claude.js';
 import { switchProfile } from './claude-auth.js';
 import { notify } from './notify.js';
@@ -203,13 +203,16 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
 async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null) {
   const ctx = { pending: null, dispatched: null, gate };
   let finalText = '';
+  // Computed once per turn (not per internal tool round-trip) — same live
+  // awareness the primary 'claude' provider gets, see brain-claude.js.
+  const digest = await statusDigest().catch(() => '');
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const { text, toolUses } = provider === 'openai'
-      ? await streamOnceOpenAI(apiKey, transcript, onChunk)
+      ? await streamOnceOpenAI(apiKey, transcript, onChunk, digest)
       : provider === 'gemini'
-      ? await callGemini(apiKey, transcript, onChunk)
-      : await streamOnce(apiKey, transcript, onChunk);
+      ? await callGemini(apiKey, transcript, onChunk, digest)
+      : await streamOnce(apiKey, transcript, onChunk, digest);
     if (text) finalText = text;
 
     if (!toolUses.length) break; // model gave a plain answer — done
@@ -256,7 +259,7 @@ function sanitizeForAnthropic(transcript) {
 }
 
 // ── One streaming Messages API call; returns final text + any tool_use blocks ─
-async function streamOnce(apiKey, transcript, onChunk) {
+async function streamOnce(apiKey, transcript, onChunk, digest = '') {
   const r = await fetch(API_URL, {
     method: 'POST',
     headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
@@ -264,7 +267,7 @@ async function streamOnce(apiKey, transcript, onChunk) {
       model: AGENT_MODEL,
       max_tokens: MAX_TOKENS,
       stream: true,
-      system: systemPrompt(),
+      system: systemPrompt(digest),
       tools: TOOLS,
       messages: sanitizeForAnthropic(transcript),
     }),
@@ -311,8 +314,8 @@ const OPENAI_TOOLS = TOOLS.map(t => ({
   function: { name: t.name, description: t.description, parameters: t.input_schema },
 }));
 
-function toOpenAIMessages(transcript) {
-  const msgs = [{ role: 'system', content: systemPrompt() }];
+function toOpenAIMessages(transcript, digest = '') {
+  const msgs = [{ role: 'system', content: systemPrompt(digest) }];
   // OpenAI is strict: a `tool` message must immediately follow an assistant
   // message whose tool_calls include its id. When the rolling transcript is
   // trimmed mid-exchange it can orphan a tool_result (its assistant tool_use got
@@ -349,7 +352,7 @@ function toOpenAIMessages(transcript) {
 }
 
 // One streaming chat-completions call; same return shape as streamOnce().
-async function streamOnceOpenAI(apiKey, transcript, onChunk) {
+async function streamOnceOpenAI(apiKey, transcript, onChunk, digest = '') {
   const r = await fetch(OPENAI_URL, {
     method: 'POST',
     headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
@@ -362,7 +365,7 @@ async function streamOnceOpenAI(apiKey, transcript, onChunk) {
       // wants fast answers anyway; flip via OPENAI_BRAIN_EFFORT only if we
       // ever migrate to /v1/responses.
       ...(openaiModel().startsWith('gpt-5') ? { reasoning_effort: 'none' } : {}),
-      messages: toOpenAIMessages(transcript),
+      messages: toOpenAIMessages(transcript, digest),
       tools: OPENAI_TOOLS,
     }),
   });
@@ -450,12 +453,12 @@ function toGeminiContents(transcript) {
   return contents;
 }
 
-async function callGemini(apiKey, transcript, onChunk) {
+async function callGemini(apiKey, transcript, onChunk, digest = '') {
   const r = await fetch(geminiUrl(geminiModel()), {
     method: 'POST',
     headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
     body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt() }] },
+      systemInstruction: { parts: [{ text: systemPrompt(digest) }] },
       contents: toGeminiContents(transcript),
       tools: GEMINI_TOOLS,
       generationConfig: { maxOutputTokens: MAX_TOKENS },

@@ -21,7 +21,7 @@
 
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
-import { TOOLS, runTool, systemPrompt } from './brain-tools.js';
+import { TOOLS, runTool, systemPrompt, statusDigest } from './brain-tools.js';
 import {
   hasClaudeAuth, getActiveProfile, profileEnv,
   classifyFailure, reportExhausted, reportAuthFailure,
@@ -244,6 +244,10 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
   const run = async () => {
     const userMsg = transcript[transcript.length - 1];
     const userText = typeof userMsg?.content === 'string' ? userMsg.content : '';
+    // The persistent session's systemPrompt is fixed at session start (can
+    // live for hours), so live status can't ride on it without going stale —
+    // it's freshened here instead, per turn, the same way recap works below.
+    const digest = await statusDigest().catch(() => '');
 
     let escalateTo = null; // set when a turn fails non-fatally → retry on a higher tier
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -254,7 +258,7 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
       currentCtx = ctx;
 
       try {
-        const text = await runTurn(s, (fresh ? recapFrom(transcript) : '') + userText, onChunk);
+        const text = await runTurn(s, (fresh ? recapFrom(transcript) : '') + (digest ? digest + ' ' : '') + userText, onChunk);
         transcript.push({ role: 'assistant', content: text });
         if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
         // An escalated session served its one hard turn — drop back to the

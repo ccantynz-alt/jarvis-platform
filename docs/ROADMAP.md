@@ -24,7 +24,7 @@
 | Cloud executor (`runCloud`) | 🔒 OFF | Stays off until registry repos are fixed (#8) + cloud creds confirmed. |
 | Canonical Vapron repo | 🟡 RECOMMEND `/root/Vapron` (`ccantynz-alt/Vapron`, branch `Main`) | Craig to confirm which GitHub repo he actually pushes to. |
 | GateTest canonical repo | 🟡 INFER `crclabs-hq/GateTest` | All tonight's work came from there; registry wrongly says `ccantynz-alt/gatetest`. Craig to confirm. |
-| **Slack** — keep or drop | ✅ RETIRED 2026-07-15 | jarvis-slack is disabled and `NOTIFY_SLACK_LEGACY=0`; deploy-gate now uses `notify()`. **Agents: do NOT build on or recommend Slack.** The Gateway inbox is the notification channel. |
+| **Slack** — keep or drop | 🟡 **STILL ACTIVE, this line was wrong** (corrected 2026-07-20) | This said "retired 2026-07-15", but PR #1 (merged 2026-07-19, "Slack overhaul: kill the notification firehose + fix command understanding") describes Craig actively getting hundreds of live Slack notifications and needing commands fixed — jarvis-slack was never actually disabled. Frozen-legacy retirement criteria are in docs/GATEWAY.md ("Slack: frozen legacy + retirement criteria") and have NOT been met. **Agents: do NOT delete or disable Slack code based on this file's past claim.** |
 | Registry repo fixes (gatetest/alecrae/bookaride) | ⏳ PENDING Craig confirm | Blocks safe cloud dispatch. |
 
 ## BANKED (done — do not redo)
@@ -39,7 +39,7 @@ live (`mcp.gatetest.ai`).
 
 ### Phase 1 — STABILIZE (kill "everything breaks")
 1. ✅ Restart policies — all jarvis-* + gatetest-mcp = `Restart=always`, alecrae = `on-failure`. (Container autoheal deferred — could conflict with Coolify; Craig call.)
-2. ⬜ Resource guards — per-container memory limits + pre-OOM alerting.
+2. ✅ **DONE 2026-07-20** — Resource guards: all 15 jarvis-* systemd units now set `MemoryMax`/`CPUQuota` (was previously just metrics-collector.js's software pre-OOM alerting, no hard cgroup cap) — one runaway service (Chromium in browser-service/screenshot-service, or orchestrator's spawned Claude agents) can no longer OOM the box and starve AlecRae/Gluecron/GateTest. Also created the previously-missing `jarvis-browser.service` unit (browser-service.js existed in src/ but had no systemd unit at all).
 3. ✅ Off-box watcher extended to the whole public fleet (`jarvis-fleet-watcher`, hourly, deduped GitHub-issue alerts, known-down list to avoid noise).
 4. ⬜ Consolidate the proxy layer (4 front doors → 1) — endgame is Vapron (#18).
 5. ✅ Restore-drill passed — backup recovers faithfully (all tables match, integrity ok).
@@ -55,8 +55,8 @@ live (`mcp.gatetest.ai`).
 22. ✅ **DONE 2026-07-15** — Durable job queue + CLI canary gate (agent-org Phase 1): jobs survive restarts in SQLite (`jobs`/`job_transitions` via :9200), scheduler tick with `MAX_CONCURRENT_JOBS` + timeouts, boot recovery re-queues interrupted jobs, and `spawn-agent.js` holds all dispatch behind a CANARY-OK probe whenever the claude CLI version changes (kills the 2.1.207-class silent-failure mode).
 23. 🔄 **IN PROGRESS 2026-07-19** — Agent-org roster + scheduler + Slack retirement (Phase 2): 44 role agents registered — the original 19 (social-media × 9 platforms; accountant + legal × NZ/AU/US/UK/SG, DRAFT-only honesty framing) plus a REAL C-suite (cto/cmo/cfo/clo/coo/cro — weekly roll-up agents, not the deck's old cosmetic tiles) that `reports_to` now actually routes through, plus seo-specialist-* and site-medic-* on the same 9-platform roster. `jarvis-agents` (:9209) cron-dispatches them budget-capped and routes reports up the escalation ladder into the Gateway inbox. Verified end-to-end; deck Hierarchy tab renders the real tree. jarvis-slack disabled; deploy-gate repointed to notify(). 158 watchdog alert cutover is **done** (`jarvis-heartbeat.timer` on 158 posts to `/internal/heartbeat` every 5 min on a scoped `JARVIS_HEARTBEAT_TOKEN_vapron158`, verified live). Remaining: flip `AGENTS_MODE` dry-run→live (Craig's call, after reviewing one dry-run cycle).
 11. ⬜ Enable cloud executor (after #8 + creds).
-12. ⬜ Turn on self-repair (jarvis → cloud).
-13. ⬜ Auto-dispatch + guardrail layer.
+12. 🔄 **IN PROGRESS 2026-07-20** — Self-repair: `deploy-gate.js` now auto-dispatches a fix job (via the existing LOCAL/remote `/dispatch` path, not yet the cloud executor — #11 is still off) when a post-deploy GateTest scan finds critical issues, instead of only posting an advisory alert. Guarded by `consecutiveBlockedRuns()` — caps at `AUTO_FIX_MAX_ATTEMPTS` (2) consecutive auto-fix attempts per platform before escalating to a human alert instead of re-dispatching forever (the exact DavenRoe-style stuck-loop failure mode found elsewhere this session). Craig's ruling 2026-07-20: "deploy, push, merge = healthy up to date system" — don't wait on him to notice a broken deploy.
+13. ⬜ Auto-dispatch + guardrail layer (the guardrail piece is now partly covered by #12's consecutiveBlockedRuns cap + the new `/jobs/loops` stuck-dispatch detector in orchestrator.js, added the same session).
 14. ⬜ Intent routing → HTTP API (~300ms vs ~4-10s CLI).
 
 ### Phase 4 — CONSOLIDATE onto Vapron

@@ -50,7 +50,11 @@ Health paths are namespaced for memory (`/memory/health`), screenshot
 (`/screenshot/health`), metrics (`/metrics/health`), deploy-gate
 (`/deploy-gate/health`), audit (`/audit/health`), and browser
 (`/browser/health`). Agents, deck, dashboard, gateway, and orchestrator use
-plain `/health`. Retired Slack code uses `/slack/health` when run.
+plain `/health`. Slack (`slack-bridge.js`, :9203) is frozen-legacy but
+**still actively used** — a 2026-07-20 correction to docs/ROADMAP.md's
+decisions-locked table found the earlier "retired 2026-07-15" claim was
+wrong (never touch/delete this file on the strength of that claim). Uses
+`/slack/health`.
 
 **The brain runs on Craig's claude.ai SUBSCRIPTIONS, not metered APIs
 (2026-07-19).** Provider `claude` = a persistent Claude Agent SDK session
@@ -158,6 +162,25 @@ No Playwright. No Puppeteer. No Vercel SDK. No Cloudflare SDK.
 Screenshots use raw Chromium CDP only.
 If you need browser automation, extend src/screenshot-service.js.
 
+**Documented, narrow exception (2026-07-20):** `src/browser-service.js`
+imports `playwright-core` (not full `playwright` — no bundled browser
+download, drives the box's own system Chrome via `executablePath`) for its
+`/browser/render` endpoint. This was found to violate the letter of this
+rule during a leanness/reliability pass. It was NOT rewritten to raw CDP
+because `screenshot-service.js`'s existing approach (spawning Chromium with
+`--headless=new --screenshot=...` CLI flags, no DevTools protocol
+connection at all) is architecturally insufficient for what render needs:
+DOM text/title/link extraction (`Runtime.evaluate`-equivalent) and
+per-sub-request SSRF blocking (`Network`/`Fetch`-domain interception)
+require genuine CDP WebSocket scripting — essentially reimplementing
+Playwright's automation layer by hand, untested, in a security-sensitive
+SSRF-guard code path. That risk (a real SSRF regression) was judged worse
+than the doctrine inconsistency. If someone wants to close this gap
+properly: write raw CDP session handling (Network.setRequestInterception
+or the Fetch domain) into browser-service.js or a shared lib, test it
+against real outbound requests to private IPs before trusting it, then
+remove this exception.
+
 ---
 
 ## ARCHITECTURE
@@ -200,8 +223,10 @@ Public (0.0.0.0):
   no auth surface, no other route ever. The July 18 hardening session moved
   the real dashboard (:9206, job-dispatch WS + API) to loopback-only —
   correct, that's a real control surface — but silently killed the public
-  `:9206/health` signal that KNOWN DEBT #1 / Roadmap move #21's off-box
-  watcher depends on. This port exists ONLY to restore that liveness signal.
+  `:9206/health` signal that the off-box watcher (docs/OFF-BOX-WATCHDOG.md —
+  not tied to any specific KNOWN DEBT # or roadmap move #, an earlier
+  revision of this file mislabeled it as both) depends on. This port exists
+  ONLY to restore that liveness signal.
   If you ever need more than a static "ok" here, that's a sign to build a
   proper endpoint elsewhere, not extend this one.
 
@@ -227,7 +252,9 @@ jarvis-platform/
 │   ├── memory-server.js       — SQLite memory + REST API
 │   ├── screenshot-service.js  — CDP screenshot capture
 │   ├── metrics-collector.js   — server metrics + WebSocket
-│   ├── slack-bridge.js        — Slack Socket Mode, intent routing (largest file)
+│   ├── slack-bridge.js        — frozen-legacy Slack transport, still active (see Rule 0 note above)
+│   ├── notify-center.js       — severity levels/dedupe/digest gate for unsolicited Slack notifications
+│   ├── intent.js              — Slack's own keyword-tier intent classifier (unit-tested)
 │   ├── audit-runner.js        — build/test/screenshot audit loop
 │   ├── orchestrator.js        — /dispatch API, spawns Claude agents, cron sprints
 │   ├── dashboard-server.js    — tailnet status panel + /screenshots browser
@@ -325,14 +352,35 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
-1. No external watcher: Jarvis monitors the platforms but nothing off-box
-   monitors Jarvis. If this box dies, the reporter dies with it.
-   (`:9206/health` is intentionally unauthenticated for this purpose.)
+1. **No external watcher — STILL NOT ACTUALLY TRUSTED, despite two separate
+   redesign attempts on 2026-07-20.** Full messy history in
+   docs/OFF-BOX-WATCHDOG.md, but the short version: two different Claude
+   Code sessions worked on this in parallel without knowing about each
+   other, reached different root-cause theories, and neither could fully
+   verify their fix from inside the constrained tool. Session A found the
+   symptom (any 2nd tool-call step in a CCR run silently fails) and
+   rebuilt the routine as one single Bash call posting to ntfy.sh — but
+   only tested delivery from an interactive session, not the actual
+   unattended CCR sandbox. Session B independently found what looks like
+   the deeper cause: CCR sandboxes egress through an allowlisting proxy
+   that rejects `ntfy.sh` outright (403) and may block the raw `:9212`
+   health check too — meaning session A's "verified" fix may not actually
+   work in production. Session B's real fix (join the tailnet from the
+   routine itself, hit the gateway's `/internal/notify` instead of ntfy)
+   needs two Craig-only prerequisites neither session could do: allowlist
+   `*.tailscale.com` + `pkgs.tailscale.com` in the cloud environment's
+   network policy, and add an ephemeral tagged `TS_AUTHKEY`. Until those
+   land, don't trust ANY cloud-routine watchdog design, and don't spin up
+   yet another redesign attempt without those prerequisites in place first
+   — that's how this got to two contradictory "fixes" already.
 2. ANTHROPIC_API_KEY not yet set in secrets.env on the box — the fast
    HTTP classifier path shipped 2026-07-12 but stays dormant until the
    key is added (falls back to the 3-10s CLI meanwhile). Add the key,
    `systemctl restart jarvis-slack`, verify with /slack/health
-   (classifier should read "http-api").
+   (classifier should read "http-api"). (A second, separate fast-path for
+   the Gateway/voice brain's own classifier — src/lib/conversation.js,
+   unrelated code path — shipped 2026-07-20 and has the same "needs the
+   key added" caveat.)
 3. Orchestrator still runs agents as root with
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
@@ -346,6 +394,19 @@ Cleared 2026-07-06: dashboard auth, cupsd exposure, keyword-only intents,
 no DB backups. Cleared 2026-07-12: Slack notification firehose (NotifyCenter:
 digest/mute/rate-limit) and misrouted Slack commands (src/intent.js rewrite)
 — see git log.
+Cleared 2026-07-19: resource guards / pre-OOM alerting (metrics-collector.js).
+Cleared 2026-07-20 (code side, Gateway/voice path only): Haiku intent
+classification's ~3-10s CLI cold-start in `classifyIntent`
+(src/lib/conversation.js) now tries the HTTP Messages API first (~300ms),
+falling back to the CLI path if `ANTHROPIC_API_KEY` is unset or the HTTP
+call fails. **Craig still needs to add `ANTHROPIC_API_KEY` to
+`/opt/jarvis/config/secrets.env`** for the speed-up to take effect — until
+then this silently keeps using the CLI path as before, correctly, just
+without the win. (The Slack bridge's own classifier fast-path, KNOWN DEBT
+#2 above, is a separate, earlier piece of code needing the same key.)
+NOT cleared, despite an earlier claim in this file to the contrary: no
+external watcher — see KNOWN DEBT #1 above, this is still actively broken
+and being fought over by two uncoordinated redesign attempts.
 
 ---
 

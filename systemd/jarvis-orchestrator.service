@@ -14,5 +14,16 @@ StandardError=journal
 Environment=NODE_ENV=production
 EnvironmentFile=/opt/jarvis/config/secrets.env
 
+# Rule 4 safety net (2026-07-20) — this unit's cgroup also holds every
+# `claude` CLI process it spawns via spawn-agent.js (children inherit the
+# parent's cgroup under systemd), so this cap bounds orchestrator +
+# ALL concurrently-running spawned agents combined, not just the Node
+# process itself. Sized generously since MAX_CONCURRENT_JOBS controls
+# concurrency — if legitimate job runs start getting OOM-killed, raise
+# this rather than removing it (removing it defeats the whole point:
+# unbounded spawn concurrency taking down co-tenants, Rule 4).
+MemoryMax=2048M
+CPUQuota=300%
+
 [Install]
 WantedBy=multi-user.target

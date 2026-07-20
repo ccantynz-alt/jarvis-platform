@@ -14,5 +14,11 @@ StandardError=journal
 Environment=NODE_ENV=production
 EnvironmentFile=/opt/jarvis/config/secrets.env
 
+# Rule 4 safety net (2026-07-20) — audit runs build/test loops, give it a
+# bit more headroom than a pure API service. See jarvis-memory.service for
+# the general rationale.
+MemoryMax=1024M
+CPUQuota=150%
+
 [Install]
 WantedBy=multi-user.target

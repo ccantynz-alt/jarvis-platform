@@ -45,13 +45,21 @@ function stripAnsi(text) {
   return String(text || '').replace(ANSI_RE, '');
 }
 import Database from 'better-sqlite3';
-import { notify } from './lib/notify.js';
 
 const PORT = 9207;
 const POLL_INTERVAL_MS = 60_000;
 const SCAN_TIMEOUT_MS = 180_000;
 const GATETEST_PATH = process.env.GATETEST_PATH || '/opt/gatetest';
 const MEMORY_SVC = 'http://127.0.0.1:9200';
+const SLACK_SVC = 'http://127.0.0.1:9203';
+const ORCHESTRATOR = 'http://127.0.0.1:9205';
+// Guardrail on the auto-fix loop below (Craig's ruling 2026-07-20: "deploy,
+// push, merge = healthy up to date system" — don't wait on him to notice a
+// broken deploy, dispatch the fix automatically). Capped so a genuinely
+// unfixable regression escalates to a human alert instead of re-dispatching
+// forever — the exact DavenRoe-style failure mode this session found
+// elsewhere gets caught here instead of repeating it.
+const AUTO_FIX_MAX_ATTEMPTS = 2;
 
 // Same platform → live-URL map orchestrator.js's cronDailyScreenshots
 // already uses — single source of truth would need a shared config file,
@@ -215,14 +223,29 @@ async function processSession(session) {
   if (result.blocked) {
     recordRun(session.id, platform, url, 'blocked', result.criticalCount, result.summary);
     await updatePlatformState(platform, 'deploy-gate-blocked', 0, [result.summary], `Deploy gate flagged ${result.criticalCount} critical issue(s) after session ${session.id}`);
-    await slackSend(
-      `🚨 *DEPLOY GATE — ${platform}*\n` +
-      `A deploy just went out (session ${session.id}) and GateTest found ${result.criticalCount} critical issue(s) on ${url}.\n` +
-      `${result.summary}\n` +
-      `_Advisory only — this does not block live traffic. Wire the GitHub Actions deploy gate on this repo for hard enforcement._`,
-      'critical',
-      `deploy-gate-${platform}`,
-    );
+
+    const priorBlocked = consecutiveBlockedRuns(platform); // includes the run just recorded above
+    if (priorBlocked <= AUTO_FIX_MAX_ATTEMPTS) {
+      const jobId = await dispatchAutoFix(platform, url, result.summary);
+      await slackSend(
+        `🚨 *DEPLOY GATE — ${platform}*\n` +
+        `A deploy just went out (session ${session.id}) and GateTest found ${result.criticalCount} critical issue(s) on ${url}.\n` +
+        `${result.summary}\n` +
+        (jobId ? `Auto-fix dispatched (job ${jobId}), attempt ${priorBlocked}/${AUTO_FIX_MAX_ATTEMPTS} — no action needed unless it fails again.`
+               : `Auto-fix dispatch FAILED — this needs a human look.`),
+        'critical',
+        `deploy-gate-${platform}`,
+      );
+    } else {
+      await slackSend(
+        `🚨🚨 *DEPLOY GATE — ${platform} — ESCALATED, NOT RE-DISPATCHING*\n` +
+        `${AUTO_FIX_MAX_ATTEMPTS} consecutive auto-fix attempts on ${platform} still failed GateTest after session ${session.id}.\n` +
+        `${result.summary}\n` +
+        `This needs a human look — stopping automatic re-dispatch to avoid a fix-loop that never lands.`,
+        'critical',
+        `deploy-gate-${platform}-escalated`,
+      );
+    }
   } else {
     recordRun(session.id, platform, url, 'passed', 0, null);
     await updatePlatformState(platform, 'deploy-gate-passed', 100, [], `Deploy gate clean after session ${session.id}`);
@@ -235,6 +258,49 @@ function recordRun(sessionId, platform, url, status, criticalCount, summary) {
     INSERT INTO deploy_gate_runs (session_id, platform, url, status, critical_count, summary, ran_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(sessionId, platform, url, status, criticalCount, summary, new Date().toISOString());
+}
+
+// How many CONSECUTIVE 'blocked' runs this platform has had, most-recent
+// first, stopping at the first non-blocked run. Used to cap auto-fix
+// re-dispatch so a genuinely unfixable regression escalates instead of
+// looping forever.
+function consecutiveBlockedRuns(platform) {
+  const rows = db.prepare(
+    `SELECT status FROM deploy_gate_runs WHERE platform = ? ORDER BY id DESC LIMIT ?`
+  ).all(platform, AUTO_FIX_MAX_ATTEMPTS + 1);
+  let n = 0;
+  for (const r of rows) {
+    if (r.status !== 'blocked') break;
+    n++;
+  }
+  return n;
+}
+
+// Self-repair (Roadmap moves #11-13, Craig's ruling 2026-07-20): don't just
+// alert on a broken deploy and wait for a human to notice — dispatch the fix
+// autonomously through the SAME job pipeline any conversational dispatch
+// uses, so it inherits the same commit+push-to-default-branch behavior
+// (buildPrompt() in orchestrator.js). Guarded by consecutiveBlockedRuns so a
+// regression GateTest can't actually fix (or a flaky scan) escalates to a
+// human alert after AUTO_FIX_MAX_ATTEMPTS instead of re-dispatching forever.
+async function dispatchAutoFix(platform, url, summary) {
+  const task = `The last deploy to ${platform} (${url}) failed a GateTest scan. Findings: ${summary}. ` +
+    `Investigate and fix the actual regression this describes, verify with the project's own type-check/build, ` +
+    `then commit and push as usual. Do not just silence or skip the check.`;
+  try {
+    const r = await fetch(`${ORCHESTRATOR}/dispatch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform, task, enqueued_by: 'deploy-gate-auto-fix' }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body?.error || `dispatch ${r.status}`);
+    logEvent('AUTO_FIX', `${platform}: dispatched fix job ${body.jobId}`);
+    return body.jobId;
+  } catch (e) {
+    logEvent('AUTO_FIX_FAIL', `${platform}: ${e.message}`);
+    return null;
+  }
 }
 
 async function pollOnce() {

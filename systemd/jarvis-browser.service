@@ -1,0 +1,27 @@
+[Unit]
+Description=Jarvis Browser — SSRF-guarded search/fetch/render bridge at :9211
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/jarvis
+ExecStart=/usr/bin/node src/browser-service.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/jarvis/config/secrets.env
+
+# Rule 4 safety net (2026-07-20) — this was previously missing entirely
+# (browser-service.js existed in src/ with no systemd unit, so it wasn't
+# deployed as a persistent service despite CLAUDE.md listing it as one of
+# the eleven core services). Chromium via playwright-core (see Rule 5
+# exception in CLAUDE.md) is the heaviest single process in the fleet, so
+# it gets the most headroom.
+MemoryMax=1536M
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

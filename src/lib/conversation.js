@@ -1,12 +1,16 @@
 /**
  * Jarvis conversation engine — src/lib/conversation.js
  *
- * Transport-neutral intent detection + command handlers, extracted verbatim
- * from slack-bridge.js (2026-07-08, Gateway build — see docs/GATEWAY.md).
- * Consumed by BOTH:
- *   - src/slack-bridge.js  (FROZEN LEGACY — thin mrkdwn wrappers)
- *   - src/gateway-server.js (the Jarvis Gateway, voice/text over tailnet)
- * Sharing this module is what makes behavior drift between the two impossible.
+ * Transport-neutral intent detection + command handlers, originally
+ * extracted verbatim from slack-bridge.js (2026-07-08, Gateway build — see
+ * docs/GATEWAY.md). CORRECTION 2026-07-20: an earlier revision of this
+ * comment claimed slack-bridge.js was deleted/retired — wrong, see
+ * docs/ROADMAP.md's decisions-locked table for the correction. slack-bridge.js
+ * is alive, frozen-legacy, and now has its OWN separate keyword-tier
+ * classifier (src/intent.js, added by PR #1 2026-07-19) — this module is
+ * consumed by src/gateway-server.js (the Jarvis Gateway, voice/text over
+ * tailnet) only; the two intent systems are parallel, not shared, despite
+ * this file's own history.
  *
  * Handlers return { text, speech, data }:
  *   text   — full formatted reply (Slack mrkdwn strings, unchanged from the
@@ -216,6 +220,35 @@ function buildClassifyPrompt(text) {
   ].join('\n');
 }
 
+// HTTP Messages API path (KNOWN DEBT #1 fix, 2026-07-20): cuts classify
+// latency from a ~3-10s CLI cold-start to ~300ms. Only runs when
+// ANTHROPIC_API_KEY is configured (the same key agent.js's metered fallback
+// providers use — never the CLI workers' subscription login, see
+// spawn-agent.js). Falls through to the CLI path on any failure (missing
+// key, network issue, bad key) so behavior never regresses versus before.
+async function runClaudeHttp(prompt) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return null;
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: HAIKU_MODEL, max_tokens: 300, messages: [{ role: 'user', content: prompt }] }),
+      signal: AbortSignal.timeout(CLASSIFY_TIMEOUT_MS),
+    });
+    if (!r.ok) {
+      console.warn(`[conversation] haiku HTTP classify ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      return null;
+    }
+    const j = await r.json();
+    const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    return text || null;
+  } catch (e) {
+    console.warn('[conversation] haiku HTTP classify failed, falling back to CLI:', e.message);
+    return null;
+  }
+}
+
 function runClaudeCli(prompt) {
   return new Promise((resolve) => {
     let stdout = '';
@@ -258,7 +291,8 @@ function runClaudeCli(prompt) {
 }
 
 export async function classifyIntent(text) {
-  const output = await runClaudeCli(buildClassifyPrompt(text));
+  const prompt = buildClassifyPrompt(text);
+  const output = (await runClaudeHttp(prompt)) ?? (await runClaudeCli(prompt));
   if (!output) return null;
 
   // Defensive parse: strip markdown fences, isolate the first {...} object

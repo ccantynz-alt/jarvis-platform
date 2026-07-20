@@ -16,6 +16,15 @@ STATE_DIR="/var/lib/jarvis/fleet-check"
 mkdir -p "$STATE_DIR"
 STRIKES_TO_FAIL=2
 
+# Loop/flap detection (2026-07-20, Craig's "scan for loops" ask): a platform
+# that keeps oscillating healthy<->error is a DIFFERENT problem than one that's
+# just down (crash-restart loop, flapping upstream dependency, etc.) — worth
+# surfacing separately even while individual checks look "fine" on their own.
+# Keeps the last FLAP_HISTORY statuses per platform; flags when more than
+# FLAP_THRESHOLD distinct up/down transitions happened in that window.
+FLAP_HISTORY=8
+FLAP_THRESHOLD=3
+
 # platform|probe-url   — probes the platform's REAL public presence (the site
 # the owner cares about), so dashboard numbers match reality.
 FLEET="
@@ -52,7 +61,22 @@ while IFS='|' read -r name url expected; do
       fi
       ;;
   esac
+  # Flap history: append this check's up/down verdict, keep only the last
+  # FLAP_HISTORY entries, count transitions between them.
+  flap_file="$STATE_DIR/${name}.flaphist"
+  updown="up"; [ "$status" = "error" ] && updown="down"
+  hist="$( { [ -f "$flap_file" ] && cat "$flap_file"; echo "$updown"; } | tail -n "$FLAP_HISTORY")"
+  echo "$hist" > "$flap_file"
+  transitions=0
+  prev=""
+  while IFS= read -r h; do
+    [ -n "$prev" ] && [ "$prev" != "$h" ] && transitions=$((transitions + 1))
+    prev="$h"
+  done <<< "$hist"
   note="fleet-check $TS: $url -> HTTP ${code:-000}"
+  if [ "$transitions" -ge "$FLAP_THRESHOLD" ]; then
+    note="$note | FLAPPING: $transitions transitions in last $FLAP_HISTORY checks"
+  fi
   curl -s -X POST "$MEM" -H 'Content-Type: application/json' \
     -d "{\"platform\":\"$name\",\"status\":\"$status\",\"health_score\":$score,\"notes\":\"$note\"}" \
     -o /dev/null 2>/dev/null

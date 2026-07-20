@@ -14,5 +14,9 @@ StandardError=journal
 Environment=NODE_ENV=production
 EnvironmentFile=/opt/jarvis/config/secrets.env
 
+# Rule 4 safety net (2026-07-20) — see jarvis-memory.service for rationale.
+MemoryMax=512M
+CPUQuota=100%
+
 [Install]
 WantedBy=multi-user.target

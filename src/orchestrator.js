@@ -780,6 +780,53 @@ app.get('/jobs', async (_req, res) => {
   }
 });
 
+// ── Loop detection (2026-07-20, Craig's "scan for loops" ask) ────────────────
+// Catches Jarvis's OWN dispatched work getting stuck re-doing the same thing
+// without ever landing — the failure mode found the same session in an
+// unrelated Anthropic cloud routine (a PR check-in that self-re-armed
+// hourly for 147+ hours without progress). This is the on-box analogue for
+// orchestrator jobs: if a platform has repeated dispatches recently and NONE
+// of them ever reached 'completed', that's a stuck loop, not just a busy
+// platform. (Platform-side flapping/instability is fleet-check.sh's job —
+// see its STATE_DIR flap counter — surfaced together via get_loop_alerts in
+// brain-tools.js.)
+const LOOP_WINDOW_MS = 12 * 60 * 60 * 1000; // 12h lookback
+const LOOP_MIN_COUNT = 3;                   // this many dispatches to the same platform...
+async function detectLoops() {
+  const rows = await dbGet('/memory/jobs?limit=300');
+  const cutoff = Date.now() - LOOP_WINDOW_MS;
+  const byPlatform = new Map();
+  for (const r of rows) {
+    if (!r.platform || r.platform === 'auto') continue;
+    if (new Date(r.created_at).getTime() < cutoff) continue;
+    if (!byPlatform.has(r.platform)) byPlatform.set(r.platform, []);
+    byPlatform.get(r.platform).push(r);
+  }
+  const loops = [];
+  for (const [platform, jobs] of byPlatform) {
+    if (jobs.length < LOOP_MIN_COUNT) continue;
+    const everCompleted = jobs.some(j => j.status === 'completed');
+    if (everCompleted) continue; // it eventually landed — not stuck, just busy
+    loops.push({
+      platform,
+      count: jobs.length,
+      window_hours: LOOP_WINDOW_MS / 3600000,
+      statuses: [...new Set(jobs.map(j => j.status))],
+      tasks: jobs.slice(0, 5).map(j => j.task),
+    });
+  }
+  return loops;
+}
+
+// GET /jobs/loops — platforms with repeated recent dispatches, none completed
+app.get('/jobs/loops', async (_req, res) => {
+  try {
+    res.json({ loops: await detectLoops() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /platforms  — dump the registry
 app.get('/platforms', (req, res) => {
   try {
@@ -963,6 +1010,29 @@ cron.schedule('0 19 * * 1', () => {
 app.post('/cron/audit',     (_req, res) => { cronDailyAudit();       res.json({ triggered: 'audit' }); });
 app.post('/cron/screenshots',(_req, res) => { cronDailyScreenshots(); res.json({ triggered: 'screenshots' }); });
 app.post('/cron/weekly',    (_req, res) => { cronWeeklySummary();    res.json({ triggered: 'weekly' }); });
+
+// Loop watch — periodic check, notify only when a platform NEWLY enters the
+// stuck-loop set (not every tick — that would just be the DavenRoe problem
+// again, wearing a Jarvis badge). Clears from notifiedLoops once it drops out
+// of the detected set so a genuinely recurring issue can re-alert later.
+const notifiedLoops = new Set();
+setInterval(async () => {
+  try {
+    const loops = await detectLoops();
+    const current = new Set(loops.map(l => l.platform));
+    for (const l of loops) {
+      if (notifiedLoops.has(l.platform)) continue;
+      notifiedLoops.add(l.platform);
+      notify({
+        source: 'orchestrator-loopwatch', level: 'warn',
+        title: `🔁 Possible stuck loop: ${l.platform}`,
+        body: `${l.count} dispatches to ${l.platform} in the last ${l.window_hours}h, none completed. Statuses seen: ${l.statuses.join(', ')}.`,
+        speech: `Sir, ${l.platform} looks stuck — ${l.count} attempts in the last ${l.window_hours} hours with nothing landing.`,
+      }).catch(() => {});
+    }
+    for (const p of [...notifiedLoops]) if (!current.has(p)) notifiedLoops.delete(p);
+  } catch (e) { console.error('[loopwatch] check failed:', e.message); }
+}, 30 * 60 * 1000);
 
 logEvent('SYS', 'Orchestrator initialized — ready to dispatch agents');
 

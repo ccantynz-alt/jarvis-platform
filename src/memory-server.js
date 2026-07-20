@@ -503,7 +503,8 @@ app.get('/memory/summary', (req, res) => {
       name: p.platform,
       status: p.status,
       health_score: p.health_score,
-      last_audit: p.last_audit
+      last_audit: p.last_audit,
+      notes: p.notes
     })),
     open_issues: openCount,
     last_session: lastSession || null

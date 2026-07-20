@@ -14,5 +14,12 @@ StandardOutput=journal
 StandardError=journal
 Environment=NODE_ENV=production
 
+# Rule 4 safety net (2026-07-20) — conservative starting values so one
+# runaway service can't OOM the box and starve AlecRae/Gluecron/GateTest.
+# Tune up via `systemctl status jarvis-memory` / journalctl if this ever
+# gets OOM-killed under legitimate load.
+MemoryMax=512M
+CPUQuota=100%
+
 [Install]
 WantedBy=multi-user.target
