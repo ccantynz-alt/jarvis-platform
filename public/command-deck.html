@@ -411,23 +411,49 @@ $('btn-history').onclick = () => {
   $('btn-history').textContent = collapsed ? '☰ HISTORY' : '✕ HIDE HISTORY';
 };
 
-// Streaming reply bubble — text appears as the brain thinks, spoken when done.
+// Streaming reply bubble — text appears as the brain thinks, spoken AS IT
+// STREAMS (2026-07-21, latency audit): previously TTS waited for the whole
+// turn to finish (full LLM generation + full ElevenLabs render) before a
+// single word was heard, even though the text was visibly streaming the
+// entire time. Now each completed sentence is queued for speech the moment
+// it's formed — speechQ (see below) already serializes playback in order,
+// so queueing several sentences in quick succession just plays them in turn.
 let streamEl = null;
+let streamSpokenLen = 0; // chars of the current streaming reply already queued for speech
+const SENTENCE_END_RE = /[.!?]["')\]]?(?:\s|$)/g;
+function speakCompletedSentences() {
+  if (!streamEl) return;
+  const unspoken = streamEl.textContent.slice(streamSpokenLen);
+  let lastBreak = -1, m;
+  SENTENCE_END_RE.lastIndex = 0;
+  while ((m = SENTENCE_END_RE.exec(unspoken))) lastBreak = m.index + m[0].length;
+  if (lastBreak > 0) {
+    const toSpeak = unspoken.slice(0, lastBreak).trim();
+    if (toSpeak) speak(toSpeak);
+    streamSpokenLen += lastBreak;
+  }
+}
 function onChatChunk(chunk) {
   S.thinking = false;
-  if (!streamEl) streamEl = addChat('JARVIS', '', null);
+  if (!streamEl) { streamEl = addChat('JARVIS', '', null); streamSpokenLen = 0; }
   streamEl.textContent += chunk;
   $('latest-reply').textContent = streamEl.textContent; // reply forms live under the core
   $('chat').scrollTop = $('chat').scrollHeight;
   updateOrbLabel();
+  speakCompletedSentences();
 }
 function onChatFinal(m) {
   S.thinking = false;
   if (streamEl) {
     streamEl.textContent = m.text;
     $('latest-reply').textContent = m.text;
-    streamEl = null;
-    speak(m.speech || m.text);
+    // Speak only whatever trailing fragment wasn't already queued sentence-
+    // by-sentence — comparing against the full m.text (not the whitespace-
+    // collapsed, 400-char-capped m.speech) so a long reply's tail is never
+    // silently dropped the way the old single-shot speak(m.speech) was.
+    const remaining = m.text.length > streamSpokenLen ? m.text.slice(streamSpokenLen).trim() : '';
+    streamEl = null; streamSpokenLen = 0;
+    if (remaining) speak(remaining);
   } else {
     addChat('JARVIS', m.text, m.speech);
   }
@@ -833,7 +859,7 @@ let wakeHintUntil = 0;   // interim transcript matched the wake word — attenti
 // Fuzzy on purpose: STT regularly mangles "Jarvis" — every variant here has
 // been seen in the wild or is a near-neighbour. Watch the HEARD line for new
 // mishears and add them.
-const WAKE_RE = /^(?:(?:hey|hi|ok|okay|oi)\s+)?(?:jarvis|javas?|jarvas|jarvi|jarvish?|jarves|jervis|gervais|harvis|drivers|davis)\b[,.!?]?\s*(.*)$/i;
+const WAKE_RE = /^(?:(?:hey|hi|ok|okay|oi)\s+)?(?:wake\s*up[,]?\s+)?(?:jarvis|javas?|jarvas|jarvi|jarvish?|jarves|jervis|gervais|harvis|drivers|davis)\b[,.!?]?\s*(.*)$/i;
 
 function armVoice() {
   if (armed || voiceMode === 'off') return;

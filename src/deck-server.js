@@ -134,6 +134,30 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'jarvis-deck', clients: wss?.clients?.size ?? 0, link: 'ready', tts: ttsEnabled() });
 });
 
+// POST /internal/notify — instant push, mirrors gateway-server.js's own
+// /internal/notify (2026-07-21: the Deck previously only found out about
+// notifications via pollActivity()'s 5s poll of memory — the Gateway got
+// an instant push, the Deck (what Craig actually watches) did not, for no
+// reason other than the two servers being built separately). Loopback-only,
+// same trust model as gateway's version — called by lib/notify.js.
+app.post('/internal/notify', (req, res) => {
+  if (!isLocalDirect(req) && !isAuthed(req)) return res.status(403).json({ error: 'forbidden' });
+  const { id, source = 'jarvis', level = 'info', title, body, speech } = req.body || {};
+  if (!title) return res.status(400).json({ error: 'title required' });
+  const ts = new Date().toISOString();
+  pushFeed(LEVEL_COLOR[level] || '#00e5ff', title, ts);
+  // Advance the poll cursor so pollActivity()'s next tick doesn't re-announce
+  // this same notification a few seconds later — the durable memory write
+  // (lib/notify.js posts there first) is still the source of truth if this
+  // push is ever missed (deck restarting, a dropped connection, etc).
+  if (typeof id === 'number') state.lastNotifId = Math.max(state.lastNotifId, id);
+  if (['warn', 'alert', 'error'].includes(level)) {
+    synthesize(speech || title).catch(() => {});
+    broadcast({ type: 'notify', level, title, speech: speech || title });
+  }
+  res.json({ ok: true, clients: wss?.clients?.size ?? 0 });
+});
+
 // PWA identity — manifest + icons (same auth as the page; loopback allowed
 // so the screenshot service can render/verify them).
 app.get('/deck.webmanifest', (req, res) => {

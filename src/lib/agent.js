@@ -205,7 +205,12 @@ async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null) 
   let finalText = '';
   // Computed once per turn (not per internal tool round-trip) — same live
   // awareness the primary 'claude' provider gets, see brain-claude.js.
-  const digest = await statusDigest().catch(() => '');
+  // Bounded to 150ms (2026-07-21, latency audit) — see brain-claude.js for
+  // why this must never add to first-token latency.
+  const digest = await Promise.race([
+    statusDigest().catch(() => ''),
+    new Promise((resolve) => setTimeout(() => resolve(''), 150)),
+  ]);
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     const { text, toolUses } = provider === 'openai'

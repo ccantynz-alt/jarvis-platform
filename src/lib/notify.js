@@ -3,10 +3,17 @@
  *
  * Order matters:
  *   1. jarvis-memory (:9200) — DURABLE inbox write; never skipped. This is the
- *      source of truth for missed notifications.
+ *      source of truth for missed notifications. Its assigned row id is
+ *      threaded through to steps 2/3 below so each live-push target can
+ *      dedupe against its own later poll of the same memory table.
  *   2. jarvis-gateway (:9208) /internal/notify — best-effort live push to
  *      connected devices (renders + optionally speaks).
- *   3. jarvis-slack (:9203) — ONLY while NOTIFY_SLACK_LEGACY=1 (secrets.env).
+ *   3. jarvis-deck (:9210) /internal/notify — same live push, for the
+ *      Command Deck. Added 2026-07-21: the Deck previously had NO push path
+ *      at all and only found out via its own 5s poll of memory — instant
+ *      for the Gateway, laggy for the actual UI Craig watches, for no
+ *      reason other than the two servers never having been wired together.
+ *   4. jarvis-slack (:9203) — ONLY while NOTIFY_SLACK_LEGACY=1 (secrets.env).
  *      Flip to 0 to start Slack retirement; delete this branch when the bridge
  *      is removed.
  *
@@ -16,6 +23,7 @@
 
 const MEMORY  = 'http://127.0.0.1:9200';
 const GATEWAY = 'http://127.0.0.1:9208';
+const DECK    = 'http://127.0.0.1:9210';
 const SLACK   = 'http://127.0.0.1:9203';
 
 async function post(url, payload, label) {
@@ -27,10 +35,10 @@ async function post(url, payload, label) {
       signal: AbortSignal.timeout(5000),
     });
     if (!r.ok) console.warn(`[notify] ${label} responded ${r.status}`);
-    return r.ok;
+    return r.ok ? r : null;
   } catch (e) {
     console.warn(`[notify] ${label} failed: ${e.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -47,15 +55,20 @@ export async function notify({ source = 'jarvis', level = 'info', title, body, s
   body = body ?? title;
   speech = speech ?? title;
 
-  const stored = await post(`${MEMORY}/memory/notifications`,
+  const memRes = await post(`${MEMORY}/memory/notifications`,
     { source, level, title, body, speech }, 'memory');
+  let id;
+  try { id = memRes && (await memRes.json())?.id; } catch { /* best-effort */ }
 
   await post(`${GATEWAY}/internal/notify`,
-    { source, level, title, body, speech }, 'gateway');
+    { id, source, level, title, body, speech }, 'gateway');
+
+  await post(`${DECK}/internal/notify`,
+    { id, source, level, title, body, speech }, 'deck');
 
   if (process.env.NOTIFY_SLACK_LEGACY === '1') {
     await post(`${SLACK}/slack/send`, { text: body }, 'slack-legacy');
   }
 
-  return { ok: stored };
+  return { ok: !!memRes };
 }

@@ -172,6 +172,13 @@ function disposeSession(reason) {
     try { s.q.interrupt?.().catch?.(() => {}); } catch {}
     try { s.q.return?.(); } catch {}
   }
+  // Re-warm immediately (2026-07-21, latency audit) — without this, the very
+  // next real turn after ANY dispose (failure, watchdog, model/account
+  // switch) paid a full CLI cold-start on top of whatever just went wrong,
+  // right when the user was already waiting on a retry. Fire-and-forget;
+  // warmupClaudeBrain() already no-ops if a session exists or auth is
+  // missing, and swallows its own errors.
+  warmupClaudeBrain().catch(() => {});
 }
 
 /** Kill the live session (next turn starts fresh under the active profile). */
@@ -247,7 +254,15 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
     // The persistent session's systemPrompt is fixed at session start (can
     // live for hours), so live status can't ride on it without going stale —
     // it's freshened here instead, per turn, the same way recap works below.
-    const digest = await statusDigest().catch(() => '');
+    // Bounded to 150ms (2026-07-21, latency audit): statusDigest() already
+    // races its own fetches internally, but that raced worst case (up to
+    // ~2.5s) was still fully serial in front of EVERY turn's first token,
+    // including plain chit-chat that never touches the fleet. A slow/down
+    // dependency degrades to "no digest this turn," never to added lag.
+    const digest = await Promise.race([
+      statusDigest().catch(() => ''),
+      new Promise((resolve) => setTimeout(() => resolve(''), 150)),
+    ]);
 
     let escalateTo = null; // set when a turn fails non-fatally → retry on a higher tier
     for (let attempt = 0; attempt < 2; attempt++) {
