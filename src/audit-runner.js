@@ -33,13 +33,6 @@ const PLATFORM_CONFIG = {
     testCmd: 'npm test',
     checkCmd: null
   },
-  vapron: {
-    path: process.env.VAPRON_PATH || '/var/www/vapron',
-    urls: ['https://vapron.ai'],
-    buildCmd: 'bun run build',
-    testCmd: 'bun test',
-    checkCmd: 'bun run check-links'
-  },
   // Added 2026-07-22 (Craig: audit the other 8 platforms). Path/tech-stack
   // from config/platforms.json; build/test commands inferred from tech
   // stack (npm for TS/React, bun for the Bun-based stack), matching the
@@ -122,9 +115,23 @@ const PLATFORM_CONFIG = {
 // can't push a fix for a platform with no local path either. Lighter
 // variant: screenshot + live-URL health check only, no build/test, no
 // auto-fix-dispatch (there is no local repo to dispatch a fix against).
+//
+// vapron (moved here 2026-07-23): found chasing Craig's report of Vapron
+// flip-flopping between "critical" and "healthy". Root cause: vapron's
+// `server` in config/platforms.json is 100.89.227.39 (box 158), NOT this
+// box (66.42.121.161) — its code has never existed locally here under any
+// path. audit-runner was running `bun run build` against a directory that
+// could never exist on THIS box, guaranteed-failing every daily audit and
+// tanking the score to critical, while fleet-check's simple HTTP check
+// correctly reported healthy 10 minutes later — same structural problem as
+// marcoreid/davenroe, just a second Jarvis-controlled box instead of Vercel.
+// A real fix would SSH into 158 and build there (Tailscale now supports
+// that box-to-box, see today's Tailscale work) — not done here, this just
+// stops the false-critical reports.
 const URL_ONLY_CONFIG = {
   marcoreid: { urls: ['https://www.marcoreid.com'] },
   davenroe: { urls: ['https://www.davenroe.com'] },
+  vapron: { urls: ['https://vapron.ai'] },
 };
 
 function runCmd(cmd, cwd, timeoutMs = 120000, extraEnv = {}) {
