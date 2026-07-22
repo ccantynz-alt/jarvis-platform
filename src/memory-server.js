@@ -231,15 +231,27 @@ app.get('/memory/platform/:name', (req, res) => {
 app.post('/memory/platform/update', (req, res) => {
   const { platform, status, last_known_errors, health_score, notes } = req.body;
   if (!platform) return res.status(400).json({ error: 'platform required' });
+  // Preserve columns this endpoint doesn't manage (2026-07-23 fix — found via
+  // Craig reporting Vapron flip-flopping between "critical" and "healthy").
+  // INSERT OR REPLACE deletes+reinserts the WHOLE row, and this statement
+  // never touched last_audit/last_screenshot/consecutive_critical — so every
+  // call here (fleet-check.sh runs this every 10 minutes) silently wiped
+  // those back to null/0, wiping out audit-runner.js's own bookkeeping
+  // between its daily runs, including the consecutive_critical counter the
+  // self-repair guardrail depends on. Read-then-preserve fixes it.
+  const existing = db.prepare('SELECT last_audit, last_screenshot, consecutive_critical FROM platform_state WHERE platform = ?').get(platform);
   db.prepare(`
     INSERT OR REPLACE INTO platform_state
-    (platform, status, last_known_errors, health_score, notes, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, notes, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     platform,
     status || 'unknown',
     JSON.stringify(last_known_errors || []),
+    existing?.last_audit ?? null,
+    existing?.last_screenshot ?? null,
     health_score || 0,
+    existing?.consecutive_critical ?? 0,
     notes || null,
     new Date().toISOString()
   );
