@@ -141,6 +141,29 @@ occur. The cost is losing transition-only alerting (see Known limitations)
   the cloud routine really run the command" was not, per the log
   limitation above.
 
+**UPDATE 2026-07-22 — the ntfy channel itself is very likely BLOCKED from
+inside the real routine sandbox, not just unverified.** A one-shot
+diagnostic CCR (same environment the watchdog runs in) tried four HTTPS
+endpoints in a single Bash call: `login.tailscale.com`,
+`controlplane.tailscale.com`, `pkgs.tailscale.com`, and — critically —
+`ntfy.sh` as a "known-working baseline." **All four failed identically**:
+`CONNECT tunnel failed, response 403` (curl exit 56). This is the exact
+same error the 2026-07-19 investigation (see below) found for `ntfy.sh`
+specifically — two independent tests, days apart, both show the sandbox's
+default outbound proxy rejecting it. The earlier "verified" note above was
+tested from an *interactive* Claude Code session, which apparently has
+different (more permissive) network access than the unattended CCR
+environment the watchdog actually fires in — that gap turned out to
+matter. **Bottom line: the live watchdog most likely cannot actually
+deliver an alert right now, regardless of the Content-Type fix, because
+the alert channel itself is blocked by the environment's default network
+policy.** Fix is the same one Craig already needs for the tailnet-join
+design below — allowlist the needed domain(s) in the claude.ai/code
+environment's network policy. `ntfy.sh` specifically if keeping this
+design, or skip straight to `*.tailscale.com` + `pkgs.tailscale.com` for
+the tailnet-join redesign instead (see below), which drops the third-party
+dependency entirely.
+
 ## Investigation 2026-07-19 (cloud session, "box-watchdog issues")
 
 Findings from a Claude Code cloud session that dug into the failures above.

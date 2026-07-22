@@ -373,14 +373,27 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    land, don't trust ANY cloud-routine watchdog design, and don't spin up
    yet another redesign attempt without those prerequisites in place first
    — that's how this got to two contradictory "fixes" already.
-2. ANTHROPIC_API_KEY not yet set in secrets.env on the box — the fast
-   HTTP classifier path shipped 2026-07-12 but stays dormant until the
-   key is added (falls back to the 3-10s CLI meanwhile). Add the key,
-   `systemctl restart jarvis-slack`, verify with /slack/health
-   (classifier should read "http-api"). (A second, separate fast-path for
+   **CONFIRMED 2026-07-22:** a fresh one-shot diagnostic from inside the
+   real CCR sandbox tried `login.tailscale.com`, `controlplane.tailscale.com`,
+   `pkgs.tailscale.com`, AND `ntfy.sh` (as a "known-working" baseline) —
+   **all four failed identically** (`CONNECT tunnel failed, 403`). This is
+   the same error Session B found for `ntfy.sh` alone on 2026-07-19 — two
+   independent confirmations now. **The live watchdog most likely cannot
+   deliver an alert at all right now** — this isn't just "unverified,"
+   it's evidence of an actual block. Craig still needs to do the network
+   policy step above (either allowlist `ntfy.sh` to keep the current
+   design, or go straight to the tailnet-join redesign, which needs the
+   same step anyway and drops the third-party dependency). See
+   docs/OFF-BOX-WATCHDOG.md for the full diagnostic.
+2. ~~ANTHROPIC_API_KEY not yet set in secrets.env on the box~~ **CLEARED
+   2026-07-22** — key added, verified live via `/slack/health` showing
+   `"classifier":"http-api"`. (A second, separate fast-path for
    the Gateway/voice brain's own classifier — src/lib/conversation.js,
-   unrelated code path — shipped 2026-07-20 and has the same "needs the
-   key added" caveat.)
+   unrelated code path — shipped 2026-07-20. Same secrets.env, same
+   restart round, so this is very likely also live now, but not
+   independently verified the way the Slack path was — no direct
+   evidence yet that a Gateway/voice utterance actually took the
+   ~300ms path instead of the CLI fallback.)
 3. Orchestrator still runs agents as root with
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
