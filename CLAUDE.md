@@ -385,10 +385,22 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
 4. eSIM MVNO not in platforms.json (see WHAT JARVIS IS).
-5. audit-runner's PLATFORM_CONFIG only covers 4 of the 12 registered
-   platforms — the daily sprint now skips the rest silently (logged, not
-   Slacked). Add PLATFORM_CONFIG entries for platforms that should be
-   audited.
+5. ~~audit-runner's PLATFORM_CONFIG only covers 4 of the 12 registered
+   platforms~~ **CLEARED 2026-07-22** — all 11 audit-eligible platforms now
+   have a config (`jarvis` itself and the `pc`-executor `craig-pc` are
+   intentionally excluded, not a gap). Full build/test/screenshot audit:
+   zoobicon, vapron, bookaride, alecrae, gatetest, voxlen (web/React portion
+   only — desktop Tauri + mobile Swift builds are NOT audited),
+   universal-ai-operator, screenshot-to-code. Lighter URL-only audit
+   (screenshot + health check, no build/test, no auto-fix — no local
+   checkout on this box to build or push a fix from): marcoreid, davenroe
+   (Vercel-hosted). `noAutoFix` also set for universal-ai-operator (no git
+   remote to push a fix to) and screenshot-to-code (third-party fork —
+   auto-committing "fixes" risks diverging from upstream). New
+   PLATFORM_CONFIG/URL_ONLY_CONFIG build/test commands were inferred from
+   `config/platforms.json`'s tech_stack, not independently verified against
+   each repo's actual scripts — a wrong command just shows as a build
+   failure on the first run, not a silent false-pass.
 
 Cleared 2026-07-06: dashboard auth, cupsd exposure, keyword-only intents,
 no DB backups. Cleared 2026-07-12: Slack notification firehose (NotifyCenter:
@@ -407,6 +419,16 @@ without the win. (The Slack bridge's own classifier fast-path, KNOWN DEBT
 NOT cleared, despite an earlier claim in this file to the contrary: no
 external watcher — see KNOWN DEBT #1 above, this is still actively broken
 and being fought over by two uncoordinated redesign attempts.
+Cleared 2026-07-22: audit-runner ran real audits (build/test/screenshot,
+health score) for weeks without ever acting on what it found — Craig had to
+notice a bad score and manually ask for a repair every time (Vapron
+specifically). A critical audit now auto-dispatches its own fix via the
+orchestrator, same guarded pattern as deploy-gate.js's self-repair (capped
+at 2 consecutive critical audits before escalating to a human alert instead
+of re-dispatching forever). Platform coverage gap (was KNOWN DEBT #5) also
+cleared the same day — see KNOWN DEBT #5's strikethrough entry above for
+the full breakdown of which platforms get the full audit vs. the lighter
+URL-only variant vs. an explicit no-auto-fix flag.
 
 ---
 
