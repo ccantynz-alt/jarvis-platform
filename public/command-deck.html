@@ -680,6 +680,13 @@ function stopAllAudio() {
   speechQ.length = 0; updatePendingBadge();
   try { jarvisAudio.pause(); jarvisAudio.currentTime = 0; } catch {}
   if (window.speechSynthesis) speechSynthesis.cancel();
+  // speechActive is only cleared naturally once pumpSpeech()'s while loop
+  // unwinds, which happens on the next tick (onpause/onended fire async,
+  // not synchronously with .pause()/.cancel() above) — force it clear here
+  // too so a caller that immediately tries to re-listen after stopAllAudio()
+  // (the mic-button interrupt handler) isn't blocked by a stale flag for
+  // one event-loop tick.
+  speechActive = false;
   S.speaking = false; lastSpeechEndAt = Date.now();
   updateOrbLabel();
 }
@@ -1058,8 +1065,23 @@ function setVoiceMode(mode, persist = true) {
 }
 
 $('btn-mic').onclick = () => {
-  // Cycle WAKE → LIVE → OFF. Tapping while Jarvis talks also cuts him off.
+  // Interrupt-only while Jarvis is talking (2026-07-24, Craig: "how do I
+  // interrupt Jarvis instead of waiting") — previously this ALWAYS cycled
+  // WAKE → LIVE → OFF too, so using it to cut Jarvis off also silently
+  // changed your voice mode as a side effect. Now: if he's mid-speech, tapping
+  // just shuts him up and leaves your mode alone; the mode-cycle only
+  // happens on a tap while he's NOT talking.
+  const wasSpeaking = S.speaking || speechActive;
   stopAllAudio();
+  if (wasSpeaking) {
+    // stopAllAudio() just set lastSpeechEndAt = now, which would trip
+    // MIC_COOLDOWN_MS and silently block the listen call below — that
+    // cooldown exists for the acoustic tail of Jarvis finishing NATURALLY,
+    // not a manual interrupt where playback was just killed outright.
+    lastSpeechEndAt = 0;
+    if (armed) startListening();
+    return;
+  }
   if (!SRCls) {
     return addChat('JARVIS', location.protocol === 'https:'
       ? 'This browser has no speech recognition, sir — Safari or Chrome will hear you. You can always type below.'
