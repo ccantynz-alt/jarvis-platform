@@ -70,7 +70,7 @@ const PLATFORM_URLS = {
   vapron:    'https://vapron.ai',
   alecrae:   'https://alecrae.com',
   gatetest:  'https://gatetest.ai',
-  voxlen:    'https://voxlen.com',
+  voxlen:    'https://www.voxlen.ai',
   bookaride: 'https://www.bookaride.co.nz',
 };
 

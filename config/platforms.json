@@ -110,6 +110,7 @@
       "repo": "git@github.com:ccantynz-alt/voxlen.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
+      "site_url": "https://www.voxlen.ai",
       "tech_stack": [
         "TypeScript",
         "React",
@@ -117,7 +118,8 @@
         "Tauri",
         "Swift"
       ],
-      "status": "active"
+      "status": "active",
+      "notes": "Live domain is voxlen.ai (apex 307s to www). voxlen.com lapsed to a GoDaddy/Afternic parking page — confirmed 2026-07-23 by site-medic-voxlen."
     },
     "gluecron": {
       "name": "gluecron",
