@@ -60,7 +60,7 @@ const MARKER    = '[self-heal]';                 // tags auto-dispatched jobs
 // Public URL per platform (mirrors fleet-check.sh FLEET map).
 const URLS = {
   zoobicon: 'https://zoobicon.com', vapron: 'https://vapron.ai', gluecron: 'https://gluecron.com',
-  alecrae: 'https://alecrae.com', bookaride: 'https://www.bookaride.co.nz', voxlen: 'https://voxlen.com',
+  alecrae: 'https://alecrae.com', bookaride: 'https://www.bookaride.co.nz', voxlen: 'https://www.voxlen.ai',
   gatetest: 'https://gatetest.ai',
 };
 // Platforms whose data must be snapshotted before any repair touches the box.

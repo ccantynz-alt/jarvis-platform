@@ -36,7 +36,7 @@ alecrae|https://alecrae.com
 marcoreid|https://www.marcoreid.com
 davenroe|https://www.davenroe.com
 bookaride|https://www.bookaride.co.nz
-voxlen|https://voxlen.com
+voxlen|https://www.voxlen.ai
 gatetest|https://gatetest.ai
 gatetest-mcp|https://mcp.gatetest.ai/healthz
 "

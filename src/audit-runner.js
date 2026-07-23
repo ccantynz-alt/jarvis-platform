@@ -76,7 +76,7 @@ const PLATFORM_CONFIG = {
   // builds/tests the web/React part. Desktop/mobile builds are NOT covered.
   voxlen: {
     path: process.env.VOXLEN_PATH || '/root/voxlen',
-    urls: ['https://voxlen.com'],
+    urls: ['https://www.voxlen.ai'],
     buildCmd: 'npm run build',
     testCmd: 'npm test',
     checkCmd: null
