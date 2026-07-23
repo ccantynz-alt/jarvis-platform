@@ -180,6 +180,11 @@ function getConsecutiveCritical(platform) {
   return row?.consecutive_critical || 0;
 }
 
+function getExistingNotes(platform) {
+  const row = db.prepare('SELECT notes FROM platform_state WHERE platform = ?').get(platform);
+  return row?.notes ?? null;
+}
+
 // Is there already a job in flight for this platform? Don't pile a second
 // auto-dispatch on top of one still running from a prior audit.
 async function hasJobInFlight(platform) {
@@ -234,13 +239,19 @@ async function takeScreenshots(platform, urls) {
 function writeAuditState(platform, report) {
   const priorConsecutive = getConsecutiveCritical(platform);
   const newConsecutive = report.status === 'critical' ? priorConsecutive + 1 : 0;
+  // Preserve `notes` (2026-07-24 — same INSERT OR REPLACE column-loss bug
+  // found in memory-server.js's /memory/platform/update, mirrored here:
+  // this write never included `notes`, so every audit run silently wiped
+  // whatever fleet-check.sh had last written there — confirmed live
+  // earlier today, "notes":null right after a manual audit trigger).
+  const existingNotes = getExistingNotes(platform);
   db.prepare(`
     INSERT OR REPLACE INTO platform_state
-    (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, notes, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     platform, report.status, JSON.stringify(report.errors), new Date().toISOString(),
-    report.screenshots.find(s => s.ok)?.filepath || null, report.health_score, newConsecutive, new Date().toISOString()
+    report.screenshots.find(s => s.ok)?.filepath || null, report.health_score, newConsecutive, existingNotes, new Date().toISOString()
   );
   return newConsecutive;
 }
