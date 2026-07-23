@@ -83,11 +83,22 @@ async function memSummary() {
   const t = (await r.text()).replace(/<!DOCTYPE[\s\S]*$/i, '').trim();
   return JSON.parse(t);
 }
-async function runningSelfHealJobs() {
+async function fetchJobs() {
   try {
     const jobs = await fetch(`${ORCHESTRATOR}/jobs`).then(r => r.json());
-    return (Array.isArray(jobs) ? jobs : []).filter(j => j.status === 'running' && (j.task || '').includes(MARKER));
+    return Array.isArray(jobs) ? jobs : [];
   } catch { return []; }
+}
+// 2026-07-24: this used to only ever see ITS OWN [self-heal]-marked jobs —
+// blind to a job audit-runner.js's or deploy-gate.js's own auto-fix-dispatch
+// might already have in flight for the same platform (different trigger
+// signal: they watch 'critical'/'deploy-gate-blocked' status, this watches
+// fleet-check's 'error'). Two independent auto-repair systems piling a
+// second agent on the same platform is exactly the kind of redundant-dispatch
+// risk worth closing, so this now checks ANY job for that platform, not just
+// self-heal's own.
+function anyJobInFlight(jobs, platform) {
+  return jobs.some(j => j.platform === platform && (j.status === 'running' || j.status === 'queued'));
 }
 function snapshot(platform) {
   const cmd = SNAPSHOT_CMD[platform];
@@ -119,7 +130,8 @@ export async function runOnce() {
   const down = (summary.platforms || []).filter(p => p.status === 'error' && registry[p.name]);
 
   if (!down.length) { log('all probed platforms healthy'); return; }
-  const concurrent = (await runningSelfHealJobs()).length;
+  const jobs = await fetchJobs();
+  const concurrent = jobs.filter(j => j.status === 'running' && (j.task || '').includes(MARKER)).length;
 
   for (const p of down) {
     const name = p.name;
@@ -149,6 +161,7 @@ export async function runOnce() {
       saveState(name, s); continue;
     }
     if (concurrent >= MAX_CONCURRENT) { log(`${name}: at concurrency cap (${concurrent}/${MAX_CONCURRENT}) — defer`); saveState(name, s); continue; }
+    if (anyJobInFlight(jobs, name)) { log(`${name}: a job is already running/queued for this platform (possibly audit-runner/deploy-gate's own auto-fix) — not piling on`); saveState(name, s); continue; }
 
     // ---- act ----
     if (MODE === 'dry-run') {

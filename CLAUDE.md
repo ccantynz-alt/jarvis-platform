@@ -46,6 +46,37 @@ Notes:
 | jarvis-deck | src/deck-server.js | 9210 | loopback, exposed ONLY via `tailscale serve --https=8444` | **Command Deck v2.2** (2026-07-16, from Craig's Claude Design handoff) — public/command-deck.html: full-screen **CORE** 3D neural-core brain (default) + HUD/Hierarchy/Message Flow/Platforms tabs; PWA (deck.webmanifest + /icons/deck-*.png, source deck-icon.html); briefing panel (`{type:'briefing'}`); raw WS `/jarvis` = handoff contract v1.0 + `chat_chunk`/`notify`/`org`/`briefing`. All numbers real. Commands → the three-provider lib/agent.js brain with intent fallback; conversation in memory KV `deck-conversation`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs via src/lib/tts.js (cache + daily budget + `TTS_DISABLED`), speechSynthesis fallback. QA hooks `?demo-alert=1`/`?demo-briefing=1` (:9201 virtual-time captures can't see live WS pushes); `?view=hud\|org\|flow\|plat` deep-links a tab for screenshots (Hierarchy tab is `org`) — the org tier now renders real agent-org data, see jarvis-agents row. Evidence: docs/DECK-AUDIT-2026-07-16.md. Token = deck/gateway token or gateway cookie. |
 | jarvis-browser | src/browser-service.js | 9211 | loopback | SSRF-guarded web search, fetch, and Chromium render bridge for the brain |
 
+**Two periodic on-box scripts, NOT persistent daemons (documented 2026-07-24,
+found late — see Rule 0 note below):**
+- **`scripts/fleet-check.sh`** — `jarvis-fleet-check.timer`, every 10 min.
+  Cheap HTTP status probe of every platform's public URL, writes
+  `status`/`health_score` to `platform_state` via `/memory/platform/update`.
+  2+ consecutive misses → `status=error`. Also tracks flap history per
+  platform (oscillating healthy/error) separately from steady downtime.
+- **`src/self-heal.js`** — `jarvis-self-heal.timer`, every 5 min (per
+  `config/self-heal.env`, reconstructed 2026-07-24). Watches for
+  `platform_state.status === 'error'` (fleet-check's signal) and
+  **auto-dispatches a repair agent** through the orchestrator once a site's
+  been down ≥ `SELF_HEAL_DOWN_MINUTES` (debounce), gated by a cooldown,
+  a daily-attempts cap, a fleet-wide concurrency cap, and (2026-07-24) a
+  check that no OTHER job (including audit-runner's or deploy-gate's own
+  auto-fix-dispatch, which watch different signals) is already in flight
+  for that platform. **`SELF_HEAL_MODE=live` is currently set** —
+  `config/self-heal.env`'s own comments reference a real incident
+  (2026-07-17: 117 dispatches in a day against a cap of 6, caused by
+  systemd `EnvironmentFile` not stripping inline comments off numeric
+  guardrail values) — treat this as **already running live in production**,
+  not a dormant/experimental system.
+  **Rule 0 note:** `jarvis-self-heal.service`/`.timer` were missing from
+  this repo's `systemd/` folder entirely until 2026-07-24 — the exact same
+  gap `jarvis-browser.service` had (a real unit that exists only on the
+  box, never committed). The versions now in `systemd/` are a best-effort
+  reconstruction from the fleet-check.sh pattern + self-heal.env's own
+  references, not a copy of the box's real file — verify with `diff
+  /etc/systemd/system/jarvis-self-heal.* /opt/jarvis/systemd/jarvis-self-heal.*`
+  before trusting it matches exactly (see docs on the browser-service
+  discovery for why this check matters).
+
 Health paths are namespaced for memory (`/memory/health`), screenshot
 (`/screenshot/health`), metrics (`/metrics/health`), deploy-gate
 (`/deploy-gate/health`), audit (`/audit/health`), and browser
