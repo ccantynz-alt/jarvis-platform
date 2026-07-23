@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { writeFileSync, readFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import express from 'express';
@@ -134,22 +134,31 @@ const URL_ONLY_CONFIG = {
   vapron: { urls: ['https://vapron.ai'] },
 };
 
+// Fixed 2026-07-24 (docs/AUDIT-2026-07-17.md finding #3): this used to be
+// plain execSync, whose `timeout` only kills the DIRECT child (the shell) —
+// any grandchildren a test runner forks (gatetest's own test processes,
+// confirmed: 22 of them leaked, oldest 10.5 days, ~2/day accumulating,
+// each holding a loopback port and RSS) survive that kill and never get
+// reaped. spawnSync + detached:true puts the whole command in its OWN
+// process group, so it can be killed as a group afterward regardless of
+// whether it finished, timed out, or errored.
 function runCmd(cmd, cwd, timeoutMs = 120000, extraEnv = {}) {
-  try {
-    const output = execSync(cmd, {
-      cwd,
-      encoding: 'utf8',
-      timeout: timeoutMs,
-      stdio: 'pipe',
-      env: { ...process.env, ...extraEnv },
-    });
-    return { ok: true, output: output.slice(0, 8000) };
-  } catch (e) {
-    return {
-      ok: false,
-      output: ((e.stdout || '') + '\n' + (e.stderr || '')).slice(0, 8000)
-    };
+  const result = spawnSync(cmd, {
+    cwd,
+    shell: true,
+    detached: true,
+    encoding: 'utf8',
+    timeout: timeoutMs,
+    env: { ...process.env, ...extraEnv },
+  });
+  if (result.pid) {
+    try { process.kill(-result.pid, 'SIGKILL'); } catch { /* group already gone — fine */ }
   }
+  const ok = result.status === 0 && !result.error && !result.signal;
+  const output = ok
+    ? (result.stdout || '').slice(0, 8000)
+    : ((result.stdout || '') + '\n' + (result.stderr || '') + (result.error ? `\n${result.error.message}` : '')).slice(0, 8000);
+  return { ok, output };
 }
 
 function extractErrors(output) {
