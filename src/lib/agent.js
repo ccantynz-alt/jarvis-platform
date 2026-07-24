@@ -51,6 +51,14 @@ const geminiModel = () => process.env.GEMINI_BRAIN_MODEL || 'gemini-flash-latest
 const geminiUrl   = (m) => `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`;
 const MAX_TURNS   = 8;   // tool-use round-trips before we force a final answer
 const MAX_TOKENS  = 2000;
+// 2026-07-24 (Craig: "I have to wait 10 minutes for it to finish") — none of
+// these three emergency-fallback fetch() calls had ANY timeout. If the
+// primary Claude brain hiccups and runAgent()'s failover loop falls through
+// to try openai/anthropic/gemini in sequence, and any of them hangs (stalled
+// connection, slow TLS, unresponsive endpoint — plain fetch has no default
+// timeout), that's an unbounded wait per provider, stacked across up to 3 —
+// easily enough to explain a many-minutes hang on a single utterance.
+const FALLBACK_TIMEOUT_MS = 45_000;
 
 // ── Provider selection ───────────────────────────────────────────────────────
 // 'claude' = subscription Agent SDK session (no API key — keyFor returns a
@@ -268,6 +276,7 @@ async function streamOnce(apiKey, transcript, onChunk, digest = '') {
   const r = await fetch(API_URL, {
     method: 'POST',
     headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    signal: AbortSignal.timeout(FALLBACK_TIMEOUT_MS),
     body: JSON.stringify({
       model: AGENT_MODEL,
       max_tokens: MAX_TOKENS,
@@ -361,6 +370,7 @@ async function streamOnceOpenAI(apiKey, transcript, onChunk, digest = '') {
   const r = await fetch(OPENAI_URL, {
     method: 'POST',
     headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    signal: AbortSignal.timeout(FALLBACK_TIMEOUT_MS),
     body: JSON.stringify({
       model: openaiModel(),
       stream: true,
@@ -462,6 +472,7 @@ async function callGemini(apiKey, transcript, onChunk, digest = '') {
   const r = await fetch(geminiUrl(geminiModel()), {
     method: 'POST',
     headers: { 'x-goog-api-key': apiKey, 'content-type': 'application/json' },
+    signal: AbortSignal.timeout(FALLBACK_TIMEOUT_MS),
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: systemPrompt(digest) }] },
       contents: toGeminiContents(transcript),
