@@ -1104,28 +1104,58 @@ function setVoiceMode(mode, persist = true) {
   updateOrbLabel();
 }
 
-$('btn-mic').onclick = () => {
-  // Interrupt-only while Jarvis is talking (2026-07-24, Craig: "how do I
-  // interrupt Jarvis instead of waiting") — previously this ALWAYS cycled
-  // WAKE → LIVE → OFF too, so using it to cut Jarvis off also silently
-  // changed your voice mode as a side effect. Now: if he's mid-speech, tapping
-  // just shuts him up and leaves your mode alone; the mode-cycle only
-  // happens on a tap while he's NOT talking.
-  // Interrupt applies while he's audibly talking OR still generating (a
-  // reply mid-stream would otherwise resume speaking as new sentences land).
-  const wasSpeaking = S.speaking || speechActive || S.thinking || !!streamEl;
+// THE one interrupt (2026-07-25): callable from the STOP bar, the Escape key,
+// the mic button, and the "Jarvis…" voice barge-in — four routes, one action.
+// Kills current audio + queued sentences, discards the rest of the in-flight
+// reply (it still renders as text), and re-opens the ear immediately.
+function interruptSpeech() {
+  const wasBusy = S.speaking || speechActive || S.thinking || !!streamEl;
   stopAllAudio();
-  if (wasSpeaking) {
-    discardReply = true;  // silence the REST of this reply, not just this sentence
-    S.thinking = false; updateOrbLabel();
-    // stopAllAudio() just set lastSpeechEndAt = now, which would trip
-    // MIC_COOLDOWN_MS and silently block the listen call below — that
-    // cooldown exists for the acoustic tail of Jarvis finishing NATURALLY,
-    // not a manual interrupt where playback was just killed outright.
-    lastSpeechEndAt = 0;
-    if (armed) startListening();
-    return;
-  }
+  if (!wasBusy) return false;
+  discardReply = true;
+  S.thinking = false; updateOrbLabel();
+  // stopAllAudio() set lastSpeechEndAt = now, which would trip MIC_COOLDOWN_MS
+  // and silently block the immediate listen — that cooldown exists for the
+  // acoustic tail of Jarvis finishing NATURALLY, not a manual cutoff.
+  lastSpeechEndAt = 0;
+  if (armed) startListening();
+  return true;
+}
+
+// Escape = shut up, anywhere, always.
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') interruptSpeech(); });
+
+// Visible STOP bar whenever Jarvis is talking or generating — nobody should
+// ever have to ASK "how do I interrupt" (Craig did, three days running).
+const stopBar = document.createElement('div');
+stopBar.id = 'stop-bar';
+stopBar.textContent = '◼ STOP — tap, press Esc, or say "Jarvis"';
+stopBar.style.cssText = 'position:fixed;bottom:84px;left:50%;transform:translateX(-50%);z-index:60;display:none;' +
+  'padding:10px 22px;border:1px solid #ff4d6a;border-radius:8px;color:#ff4d6a;background:rgba(20,4,10,.85);' +
+  'font-family:inherit;font-size:13px;letter-spacing:1px;cursor:pointer;user-select:none';
+stopBar.onclick = interruptSpeech;
+document.body.appendChild(stopBar);
+setInterval(() => {
+  const busy = S.speaking || speechActive || (S.thinking && !discardReply);
+  stopBar.style.display = busy ? 'block' : 'none';
+}, 300);
+
+// Build stamp — bottom-right corner + console, fed by /health. If this hash
+// matches the repo HEAD, the whole deploy chain (git → box → your browser)
+// is proven; no more guessing whether a reload picked up the new code.
+fetch('/health').then(r => r.json()).then(h => {
+  if (!h.build) return;
+  console.log('[deck] build', h.build);
+  const tag = document.createElement('div');
+  tag.textContent = 'build ' + h.build;
+  tag.style.cssText = 'position:fixed;bottom:4px;right:8px;z-index:50;font-size:10px;color:#3d5a6b;font-family:monospace;pointer-events:none';
+  document.body.appendChild(tag);
+}).catch(() => {});
+
+$('btn-mic').onclick = () => {
+  // Mid-speech tap = pure interrupt (mode untouched); idle tap cycles
+  // WAKE → LIVE → OFF as before.
+  if (interruptSpeech()) return;
   if (!SRCls) {
     return addChat('JARVIS', location.protocol === 'https:'
       ? 'This browser has no speech recognition, sir — Safari or Chrome will hear you. You can always type below.'

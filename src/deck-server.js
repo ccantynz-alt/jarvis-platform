@@ -34,6 +34,7 @@ import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual, randomBytes } from 'crypto';
 import { readFileSync, writeFileSync } from 'fs';
+import { execSync } from 'child_process';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
@@ -130,8 +131,14 @@ const hhmm = (iso) => new Date(iso ?? Date.now()).toLocaleTimeString('en-GB');
 const app = express();
 app.use(express.json());
 
+// Build stamp (2026-07-25): ends the "is your browser on the new code?"
+// guessing game — the client shows this hash on screen; if it matches the
+// repo HEAD the deploy chain (git → box → browser) is proven end to end.
+let BUILD = 'unknown';
+try { BUILD = execSync('git rev-parse --short HEAD', { cwd: '/opt/jarvis', encoding: 'utf8' }).trim(); } catch {}
+
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'jarvis-deck', clients: wss?.clients?.size ?? 0, link: 'ready', tts: ttsEnabled() });
+  res.json({ status: 'ok', service: 'jarvis-deck', build: BUILD, clients: wss?.clients?.size ?? 0, link: 'ready', tts: ttsEnabled() });
 });
 
 // POST /internal/notify — instant push, mirrors gateway-server.js's own
