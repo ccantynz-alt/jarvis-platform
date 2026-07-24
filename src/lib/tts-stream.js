@@ -37,6 +37,7 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
 
   const session = { charsSent: 0, dead: false };
   let opened = false;
+  let endRequested = false; // end() may legitimately arrive before 'open' on short replies
   const pending = []; // text queued before the socket opens
 
   const fail = (e) => {
@@ -51,6 +52,7 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
     // First message carries voice settings; auth already went via header.
     ws.send(JSON.stringify({ text: ' ', voice_settings: { stability: 0.5, similarity_boost: 0.8, style: 0.25 } }));
     for (const t of pending.splice(0)) ws.send(JSON.stringify({ text: t }));
+    if (endRequested) ws.send(JSON.stringify({ text: '' })); // end() beat the handshake — flush now
   });
 
   ws.on('message', (raw) => {
@@ -84,8 +86,12 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
     },
     end() { // no more text — let EL flush the tail, then it sends isFinal
       if (session.dead) return;
+      // Race fix (2026-07-25, caught by the deploy smoke test): end() before
+      // the socket opened used to KILL the session — pending text was never
+      // sent and short replies produced 0 bytes of audio. Now it just flags,
+      // and the 'open' handler flushes pending text + the end marker.
       if (opened) { try { ws.send(JSON.stringify({ text: '' })); } catch { /* close will settle */ } }
-      else { session.dead = true; try { ws.close(); } catch {} onDone?.(); }
+      else endRequested = true;
     },
     abort() { // interruption: kill it NOW, no tail flush
       if (session.dead) return;
