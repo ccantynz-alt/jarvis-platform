@@ -420,9 +420,15 @@ $('btn-history').onclick = () => {
 // so queueing several sentences in quick succession just plays them in turn.
 let streamEl = null;
 let streamSpokenLen = 0; // chars of the current streaming reply already queued for speech
+// 2026-07-24 REAL interrupt (Craig: "I can't interrupt Jarvis"): killing the
+// current audio wasn't enough — the server keeps streaming the same turn, and
+// every newly-completed sentence re-queued speech, so he just started talking
+// again seconds later. While discardReply is set (mic-tap interrupt), chunks
+// still RENDER as text but nothing is spoken; the next sendCommand clears it.
+let discardReply = false;
 const SENTENCE_END_RE = /[.!?]["')\]]?(?:\s|$)/g;
 function speakCompletedSentences() {
-  if (!streamEl) return;
+  if (!streamEl || discardReply) return;
   const unspoken = streamEl.textContent.slice(streamSpokenLen);
   let lastBreak = -1, m;
   SENTENCE_END_RE.lastIndex = 0;
@@ -453,7 +459,9 @@ function onChatFinal(m) {
     // silently dropped the way the old single-shot speak(m.speech) was.
     const remaining = m.text.length > streamSpokenLen ? m.text.slice(streamSpokenLen).trim() : '';
     streamEl = null; streamSpokenLen = 0;
-    if (remaining) speak(remaining);
+    if (remaining && !discardReply) speak(remaining);
+  } else if (discardReply) {
+    addChat('JARVIS', m.text, null); // interrupted: show the text, stay silent
   } else {
     addChat('JARVIS', m.text, m.speech);
   }
@@ -833,6 +841,7 @@ function updateOrbLabel() {
 
 // ── Command routing (shared by keyboard, voice, briefing button) ────────────
 function sendCommand(c) {
+  discardReply = false; // a new ask always re-opens the mouth (see interrupt handler)
   addChat('YOU', c);
   if (ws && ws.readyState === 1) {
     S.thinking = true;
@@ -1071,9 +1080,13 @@ $('btn-mic').onclick = () => {
   // changed your voice mode as a side effect. Now: if he's mid-speech, tapping
   // just shuts him up and leaves your mode alone; the mode-cycle only
   // happens on a tap while he's NOT talking.
-  const wasSpeaking = S.speaking || speechActive;
+  // Interrupt applies while he's audibly talking OR still generating (a
+  // reply mid-stream would otherwise resume speaking as new sentences land).
+  const wasSpeaking = S.speaking || speechActive || S.thinking || !!streamEl;
   stopAllAudio();
   if (wasSpeaking) {
+    discardReply = true;  // silence the REST of this reply, not just this sentence
+    S.thinking = false; updateOrbLabel();
     // stopAllAudio() just set lastSpeechEndAt = now, which would trip
     // MIC_COOLDOWN_MS and silently block the listen call below — that
     // cooldown exists for the acoustic tail of Jarvis finishing NATURALLY,

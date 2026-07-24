@@ -169,14 +169,25 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
   const order = [primary, ...PROVIDERS.filter(p => p !== primary)]; // primary first, then fail over
   const before = transcript.length;
   let lastErr = null;
+  // 2026-07-24 HARD TOTAL BUDGET (Craig: "I have to wait 10 minutes"). The
+  // per-piece timeouts STACK: claude 180s×2 attempts, then each fallback
+  // provider up to MAX_TURNS×45s — worst case ~20 min for one utterance,
+  // and nothing capped the aggregate. This is a VOICE assistant: past this
+  // deadline we stop trying providers entirely and throw, so the caller's
+  // fast keyword-intent fallback answers instead. Overridable via env.
+  const deadline = Date.now() + (Number(process.env.BRAIN_TOTAL_BUDGET_MS) || 120_000);
 
   for (const provider of order) {
     const apiKey = keyFor(provider);
     if (!apiKey) continue;
+    if (Date.now() >= deadline) {
+      console.warn(`[agent] total turn budget exhausted before trying ${provider} — giving up`);
+      break;
+    }
     try {
       const out = provider === 'claude'
-        ? await runClaudeBrain(transcript, onChunk, gate)
-        : await runBrainLoop(provider, apiKey, transcript, onChunk, gate);
+        ? await runClaudeBrain(transcript, onChunk, gate, deadline)
+        : await runBrainLoop(provider, apiKey, transcript, onChunk, gate, deadline);
       if (provider !== brainProvider) { // failed over — make the working one sticky
         brainProvider = provider;
         fetch(`${MEMORY}/memory/kv`, {
@@ -208,7 +219,7 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
 
 // The tool-calling loop for one provider. Throws on API failure so runAgent can
 // fail over. Returns { text, speech, dispatched }.
-async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null) {
+async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null, deadline = Infinity) {
   const ctx = { pending: null, dispatched: null, gate };
   let finalText = '';
   // Computed once per turn (not per internal tool round-trip) — same live
@@ -221,6 +232,14 @@ async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null) 
   ]);
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
+    // Part of the 2026-07-24 total-budget fix: 8 tool round-trips × 45s each
+    // is up to 6 minutes in THIS loop alone — stop chaining tools once the
+    // overall turn deadline passes and answer with whatever we have.
+    if (Date.now() >= deadline) {
+      console.warn(`[agent] ${provider}: turn budget exhausted mid-tool-loop — forcing final answer`);
+      if (!finalText) finalText = 'Sorry sir — that one ran past the time I allow myself. Ask me again and I shall be brief.';
+      break;
+    }
     const { text, toolUses } = provider === 'openai'
       ? await streamOnceOpenAI(apiKey, transcript, onChunk, digest)
       : provider === 'gemini'

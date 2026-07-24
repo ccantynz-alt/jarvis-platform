@@ -58,8 +58,13 @@ export async function setBrainModel(word) {
   return TIER_LABEL[model];
 }
 
-const FIRST_TOKEN_MS = Number(process.env.BRAIN_FIRST_TOKEN_TIMEOUT_MS) || 30_000;
-const TURN_TIMEOUT_MS = Number(process.env.BRAIN_TURN_TIMEOUT_MS) || 180_000;
+// Voice-grade tightening 2026-07-24 (was 30s/180s — Craig: "I have to wait
+// 10 minutes"): 30s of dead air before the FIRST token reads as broken, and
+// 180s × 2 attempts made the claude provider alone a 6-minute worst case.
+// 12s first-token is still generous for a warm session; 90s covers real
+// tool-chaining turns. Env overrides remain for tuning without a deploy.
+const FIRST_TOKEN_MS = Number(process.env.BRAIN_FIRST_TOKEN_TIMEOUT_MS) || 12_000;
+const TURN_TIMEOUT_MS = Number(process.env.BRAIN_TURN_TIMEOUT_MS) || 90_000;
 const MAX_TURNS = 12; // SDK-internal tool round-trips per user turn
 
 export function hasClaudeBrain() {
@@ -247,7 +252,7 @@ function runTurn(s, text, onChunk) {
  * user's message (last entry); returns { text, speech, dispatched } and
  * appends the assistant reply. Throws on failure so agent.js can fail over.
  */
-export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null) {
+export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null, deadline = Infinity) {
   const run = async () => {
     const userMsg = transcript[transcript.length - 1];
     const userText = typeof userMsg?.content === 'string' ? userMsg.content : '';
@@ -285,12 +290,17 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
         const cls = classifyFailure({ message: e.message, stderr: String(e.resultMessage?.result || '') });
         console.error(`[brain-claude] turn failed (${cls.kind}) on ${s.profile}/${s.model}: ${e.message.slice(0, 200)}`);
         disposeSession(`turn failure: ${cls.kind}`);
-        if (cls.kind === 'usage_limit' && attempt === 0) {
+        // 2026-07-24: retries are only worth it while there's budget left —
+        // a second 90s attempt after a slow first failure is exactly how the
+        // "10 minute wait" compounded. Past the caller's deadline, fail fast
+        // so agent.js's fallback chain (or the keyword pipeline) answers.
+        const budgetLeft = Date.now() < deadline;
+        if (cls.kind === 'usage_limit' && attempt === 0 && budgetLeft) {
           const next = await reportExhausted(s.profile, cls.resetAt);
           if (next) continue;             // retry once on the other login
         } else if (cls.kind === 'auth') {
           await reportAuthFailure(s.profile, e.message);
-        } else if (cls.kind === 'other' && attempt === 0 && nextTierUp(s.model) !== s.model) {
+        } else if (cls.kind === 'other' && attempt === 0 && budgetLeft && nextTierUp(s.model) !== s.model) {
           escalateTo = nextTierUp(s.model); // Sonnet struggled → one retry on the bigger brain
           console.warn(`[brain-claude] escalating retry to ${escalateTo}`);
           continue;
