@@ -1,28 +1,21 @@
 [Unit]
-Description=Jarvis self-heal controller — auto-repair dispatch for down platforms
-After=network.target jarvis-memory.service jarvis-orchestrator.service
+Description=Jarvis self-heal — auto-repair down platforms (guardrailed)
+After=network-online.target jarvis-memory.service jarvis-orchestrator.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=root
 WorkingDirectory=/opt/jarvis
-ExecStart=/usr/bin/node src/self-heal.js
-EnvironmentFile=/opt/jarvis/config/self-heal.env
+# Order matters: self-heal.env loads second so its values win any collision
+# with secrets.env (this matches the box's real pre-existing unit).
 EnvironmentFile=/opt/jarvis/config/secrets.env
-StandardOutput=journal
-StandardError=journal
-Environment=NODE_ENV=production
+EnvironmentFile=/opt/jarvis/config/self-heal.env
+ExecStart=/usr/bin/node src/self-heal.js
+TimeoutStartSec=120
 
-# Rule 4 safety net (2026-07-20 pattern) — see jarvis-memory.service for
-# rationale. Reconstructed 2026-07-24: this unit + its .timer almost
-# certainly already exist on the box (config/self-heal.env references
-# `systemctl restart jarvis-self-heal.timer` by name, and its own comments
-# describe a real incident from 2026-07-17 — self-heal has very likely
-# been running live this whole time) but were never committed to this
-# repo's systemd/ folder, the same gap jarvis-browser.service had. This is
-# a best-effort reconstruction from the fleet-check.sh pattern plus
-# self-heal.env's own references — verify against whatever's actually in
-# /etc/systemd/system/jarvis-self-heal.service on the box before assuming
-# this matches exactly (same lesson as the browser-service discovery).
+# Rule 4 safety net (fleet standard) — see jarvis-memory.service for rationale.
+# 2026-07-24: this file was reconstructed from the box's REAL unit (found at
+# /etc/systemd/system/jarvis-self-heal.service, verified over the tailnet)
+# after an earlier same-day guess; only these two limit lines are additions.
 MemoryMax=512M
 CPUQuota=100%
