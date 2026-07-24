@@ -37,7 +37,9 @@
         "React"
       ],
       "status": "active",
-      "public_host": "mail.vapron.ai"
+      "site_url": "https://vapron.ai",
+      "public_host": "mail.vapron.ai",
+      "notes": "site_url added 2026-07-24: agents.js probes site_url || public_host, and mail.vapron.ai (the box's mail hostname) 404s on / — the site-medic and social agents were flagging healthy Vapron nightly over it. vapron.ai is the real public site."
     },
     "bookaride": {
       "name": "bookaride",

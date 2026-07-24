@@ -50,8 +50,12 @@ const PLATFORM_CONFIG = {
   gluecron: {
     path: process.env.GLUECRON_PATH || '/root/gluecron',
     urls: ['https://gluecron.com'],
-    buildCmd: 'bun run build',
-    testCmd: 'bun test',
+    // 2026-07-24: verified against /root/gluecron/package.json on the box —
+    // there IS no `build` script (scripts: dev/start/db:*/test/typecheck/
+    // preflight/doctor/e2e). The earlier guessed `bun run build` would have
+    // false-criticaled a healthy platform on every nightly audit.
+    buildCmd: 'bun run typecheck',
+    testCmd: 'bun run test',
     checkCmd: null
   },
   alecrae: {
@@ -265,14 +269,30 @@ function writeAuditState(platform, report) {
   return newConsecutive;
 }
 
+// A "critical" audit is about BUILD/TEST health of the local checkout —
+// Craig kept reading these as "website down" when the live sites were fine
+// (2026-07-24: "we are getting false reports of websites being down").
+// Every notification now states the live-site status explicitly, taken from
+// the same screenshots the audit just captured.
+function liveSiteLine(report) {
+  const shots = report.screenshots || [];
+  if (!shots.length) return 'Live site not probed by this audit.';
+  const up = shots.filter(s => s.ok).length;
+  return up === shots.length ? `Live site is UP (${up}/${shots.length} pages render) — this is about the local build/tests, not uptime.`
+    : up > 0 ? `Live site PARTIALLY renders (${up}/${shots.length} pages).`
+    : 'Live site pages also failed to render — possibly a real outage.';
+}
+
 async function notifyAuditResult(platform, report, newConsecutive, { noAutoFix = false } = {}) {
   if (report.status !== 'critical') return;
+  const siteLine = liveSiteLine(report);
+  const siteUp = siteLine.startsWith('Live site is UP');
   if (noAutoFix) {
     await notify({
       source: 'audit-runner', level: 'warn',
-      title: `⚠️ ${platform} audit critical (${report.health_score}/100) — no auto-fix (${noAutoFix === 'no-remote' ? 'no git remote' : noAutoFix === 'url-only' ? 'no local checkout' : 'third-party code'})`,
-      body: `Errors: ${report.errors.slice(0, 5).join('; ')}`,
-      speech: `Sir, ${platform}'s audit came back critical — this one needs your eyes, I can't auto-fix it.`,
+      title: `⚠️ ${platform} build/test audit critical (${report.health_score}/100) — no auto-fix (${noAutoFix === 'no-remote' ? 'no git remote' : noAutoFix === 'url-only' ? 'no local checkout' : 'third-party code'})`,
+      body: `${siteLine} Errors: ${report.errors.slice(0, 5).join('; ')}`,
+      speech: `Sir, ${platform}'s audit came back critical${siteUp ? ', though the live site itself is up' : ''} — this one needs your eyes, I can't auto-fix it.`,
     }).catch(() => {});
     return;
   }
@@ -282,11 +302,13 @@ async function notifyAuditResult(platform, report, newConsecutive, { noAutoFix =
     const jobId = await dispatchAutoFix(platform, report);
     await notify({
       source: 'audit-runner', level: 'warn',
-      title: `🔧 ${platform} audit critical (${report.health_score}/100) — auto-fix ${jobId ? 'dispatched' : 'FAILED to dispatch'}`,
-      body: jobId
+      title: `🔧 ${platform} build/test audit critical (${report.health_score}/100) — auto-fix ${jobId ? 'dispatched' : 'FAILED to dispatch'}`,
+      body: `${siteLine} ${jobId
         ? `Job ${jobId}, attempt ${newConsecutive}/${AUTO_FIX_MAX_ATTEMPTS}. Errors: ${report.errors.slice(0, 5).join('; ')}`
-        : `Dispatch failed — this needs a human look. Errors: ${report.errors.slice(0, 5).join('; ')}`,
-      speech: jobId ? `Sir, ${platform}'s audit came back critical — I've dispatched a fix.` : `Sir, ${platform}'s audit is critical and I couldn't auto-dispatch a fix — this needs you.`,
+        : `Dispatch failed — this needs a human look. Errors: ${report.errors.slice(0, 5).join('; ')}`}`,
+      speech: jobId
+        ? `Sir, ${platform}'s build checks failed${siteUp ? ' — the live site is still up' : ''} — I've dispatched a fix.`
+        : `Sir, ${platform}'s audit is critical and I couldn't auto-dispatch a fix — this needs you.`,
     }).catch(() => {});
   } else {
     await notify({

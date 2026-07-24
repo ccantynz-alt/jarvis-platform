@@ -210,15 +210,21 @@ function recapFrom(transcript) {
     : '';
 }
 
-function runTurn(s, text, onChunk) {
+function runTurn(s, text, onChunk, fresh = false) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let streamed = '';
     const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(firstT); clearTimeout(totalT); s.turn = null; fn(v); } };
 
+    // 2026-07-24: a COLD session (CLI child just spawned) legitimately takes
+    // longer than 12s to first token — the 07:26 UTC incident today showed
+    // the 12s watchdog killing fresh sessions in a loop, cascading into
+    // failover onto the metered APIs ("why has it switched to api?"). Warm
+    // sessions keep the tight voice-grade limit; fresh ones get spawn slack.
+    const firstMs = fresh ? (Number(process.env.BRAIN_FIRST_TOKEN_COLD_MS) || 35_000) : FIRST_TOKEN_MS;
     const firstT = setTimeout(() => {
       if (!streamed) { disposeSession('first-token watchdog'); finish(reject, new Error('claude brain: no first token in time')); }
-    }, FIRST_TOKEN_MS);
+    }, firstMs);
     const totalT = setTimeout(() => {
       disposeSession('turn watchdog'); finish(reject, new Error('claude brain: turn timed out'));
     }, TURN_TIMEOUT_MS);
@@ -278,7 +284,7 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
       currentCtx = ctx;
 
       try {
-        const text = await runTurn(s, (fresh ? recapFrom(transcript) : '') + (digest ? digest + ' ' : '') + userText, onChunk);
+        const text = await runTurn(s, (fresh ? recapFrom(transcript) : '') + (digest ? digest + ' ' : '') + userText, onChunk, fresh);
         transcript.push({ role: 'assistant', content: text });
         if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
         // An escalated session served its one hard turn — drop back to the

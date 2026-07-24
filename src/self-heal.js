@@ -163,6 +163,21 @@ export async function runOnce() {
     if (concurrent >= MAX_CONCURRENT) { log(`${name}: at concurrency cap (${concurrent}/${MAX_CONCURRENT}) — defer`); saveState(name, s); continue; }
     if (anyJobInFlight(jobs, name)) { log(`${name}: a job is already running/queued for this platform (possibly audit-runner/deploy-gate's own auto-fix) — not piling on`); saveState(name, s); continue; }
 
+    // ---- trust but verify (2026-07-24) ----
+    // memory said "error", but that's a 10-minute-old probe result. Before
+    // spending a repair agent, check the site LIVE — self-heal "repaired"
+    // healthy-but-slow vapron 4× in 12h off stale transient misses.
+    if (url) {
+      try {
+        const live = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
+        if (live.ok || (live.status >= 300 && live.status < 400)) {
+          log(`${name}: memory says error but LIVE probe returned ${live.status} — false alarm, clearing state`);
+          saveState(name, { firstDown: null, lastAttempt: s.lastAttempt, day: s.day, attemptsToday: s.attemptsToday });
+          continue;
+        }
+      } catch { /* live probe also failed — genuinely down, proceed */ }
+    }
+
     // ---- act ----
     if (MODE === 'dry-run') {
       log(`DRY-RUN would repair ${name} (HTTP ${code}, down ${downMin}m, attempt ${s.attemptsToday + 1})`);

@@ -45,6 +45,15 @@ summary=""
 while IFS='|' read -r name url expected; do
   [ -z "$name" ] && continue
   code=$(curl -s -L -o /dev/null -w '%{http_code}' --max-time 12 "$url" 2>/dev/null)
+  # Retry once before counting anything as a miss (2026-07-24): 24h of data
+  # showed vapron.ai alone returning 000 on 19/144 probes (13%) — slow site,
+  # transient timeouts, NOT downtime — and those misses were feeding strikes
+  # → status=error → self-heal "repairing" a healthy site 4× in 12h. A real
+  # outage fails the retry too; a blip almost never fails twice in a row.
+  case "$code" in
+    2*|3*) ;;
+    *) sleep 2; code=$(curl -s -L -o /dev/null -w '%{http_code}' --max-time 20 "$url" 2>/dev/null) ;;
+  esac
   strike_file="$STATE_DIR/${name}.strikes"
   case "$code" in
     2*|3*)
