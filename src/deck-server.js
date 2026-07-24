@@ -38,6 +38,7 @@ import { execSync } from 'child_process';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
+import { openTtsStream } from './lib/tts-stream.js';
 
 const PORT      = 9210;
 const SCHEDULER = 'http://127.0.0.1:9209';
@@ -704,13 +705,27 @@ wss.on('connection', (ws, req) => {
   for (const f of [...state.feedCache].reverse()) send({ type: 'feed', ...f });
   for (const w of [...state.wireCache].reverse()) send({ type: 'wire', ...w });
 
+  // Voice v2 (docs/VOICE-V2.md): per-connection streaming-speech session.
+  // voiceSession.discard flips on interrupt — the brain may keep generating,
+  // but nothing more is voiced or streamed for that turn.
+  let voiceSession = null;
+  function killVoiceSession() {
+    if (voiceSession) { voiceSession.discard = true; voiceSession.tts?.abort(); voiceSession = null; }
+  }
+  ws.on('close', () => killVoiceSession());
+
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (msg.type === 'ping') return ws.readyState === 1 && ws.send('{"type":"pong"}');
+    if (msg.type === 'interrupt') { // v2: kill this turn's voice AT THE SOURCE
+      killVoiceSession();
+      return send({ type: 'audio_ctl', ev: 'end' });
+    }
     if (msg.type !== 'command') return;
     const text = String(msg.text || '').trim();
     if (!text) return;
+    killVoiceSession(); // a new ask always supersedes whatever he was saying
     dispatchGate.turn++; // each spoken/typed command is one human turn (dispatch gate)
     pushWire('deck.command', JSON.stringify({ from: 'craig', text: text.slice(0, 80) }));
     // Any briefing ask also feeds the deck's structured briefing panel,
@@ -731,15 +746,53 @@ wss.on('connection', (ws, req) => {
       if (hasAgent()) {
         const transcript = await loadTranscript();
         const before = transcript.length;
+        // Voice v2 (docs/VOICE-V2.md): stream speech server-side while the
+        // brain streams text. Sentences feed ONE ElevenLabs stream; mp3
+        // chunks go to the client as binary frames on this same socket.
+        let session = null;
+        if (msg.v2) {
+          session = { discard: false, tts: null, buf: '', spokenAny: false };
+          session.tts = await openTtsStream({
+            onAudio: (chunk) => { if (!session.discard && ws.readyState === 1) ws.send(chunk); },
+            onDone: () => { if (!session.discard) send({ type: 'audio_ctl', ev: 'end' }); },
+            onError: (e) => {
+              console.error('[deck] v2 tts stream failed:', e.message);
+              if (!session.discard) send({ type: 'audio_ctl', ev: 'fallback' }); // client re-voices via v1
+              session.tts = null;
+            },
+          }).catch(() => null);
+          if (session.tts) { voiceSession = session; send({ type: 'audio_ctl', ev: 'start' }); }
+          else session = null; // TTS off/over budget → pure v1 behaviour
+        }
+        const SENT_END = /[.!?]["')\]]?(?:\s|$)/;
+        const feedSpeech = (chunk) => {
+          if (!session?.tts || session.discard) return;
+          session.buf += chunk;
+          let m;
+          while ((m = session.buf.match(SENT_END))) {
+            const cut = m.index + m[0].length;
+            session.tts.sendText(session.buf.slice(0, cut));
+            session.spokenAny = true;
+            session.buf = session.buf.slice(cut);
+          }
+        };
         try {
           // runAgent pushes user+assistant turns onto transcript itself.
           const full = await runAgent(transcript, text,
-            (chunk) => send({ type: 'chat_chunk', text: chunk }), dispatchGate);
+            (chunk) => { send({ type: 'chat_chunk', text: chunk }); feedSpeech(chunk); }, dispatchGate);
           saveTranscript();
+          if (session?.tts && !session.discard) {
+            if (session.buf.trim()) session.tts.sendText(session.buf); // the tail fragment
+            if (!session.spokenAny && !session.buf.trim() && full.text) session.tts.sendText(full.text.slice(0, 1200));
+            session.tts.end();
+          }
           const back = noteBrainHealthy();
           if (back) send({ type: 'notify', level: 'info', title: back, speech: back });
-          return send({ type: 'chat', text: full.text || 'Done, sir.', speech: full.speech });
+          // In v2 the server already voiced the reply — suppress client re-speak
+          // by sending speech:null (v1 clients never set msg.v2, so unaffected).
+          return send({ type: 'chat', text: full.text || 'Done, sir.', speech: session ? null : full.speech });
         } catch (e) {
+          if (session) { session.tts?.abort(); if (voiceSession === session) voiceSession = null; }
           // Both brain providers unusable (no credits, outage) — undo this
           // turn's partial transcript and fall through to the intent pipeline.
           transcript.splice(before);

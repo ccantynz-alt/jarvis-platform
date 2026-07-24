@@ -18,8 +18,8 @@ import { createHash } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 
-const VOICE_ID  = process.env.JARVIS_VOICE_ID || 'lUTamkMw7gOzZbFIwmq4';
-const MODEL_ID  = 'eleven_flash_v2_5'; // lowest latency tier
+export const VOICE_ID  = process.env.JARVIS_VOICE_ID || 'lUTamkMw7gOzZbFIwmq4';
+export const MODEL_ID  = 'eleven_flash_v2_5'; // lowest latency tier
 const CACHE_DIR = '/opt/jarvis/memory/tts-cache';
 const CACHE_CAP_BYTES = 50 * 1024 * 1024;
 const BUDGET    = parseInt(process.env.TTS_DAILY_CHAR_BUDGET || '40000', 10);
@@ -32,14 +32,16 @@ export function ttsEnabled() {
 }
 
 // ── Daily character budget (durable in memory KV, survives restarts) ────────
-async function budgetSpent(day) {
+// Exported 2026-07-25 so lib/tts-stream.js (Voice v2) draws on the SAME
+// daily budget — streamed chars and fetched chars spend from one pool.
+export async function budgetSpent(day) {
   try {
     const r = await fetch(`${MEMORY}/memory/kv/tts-budget-${day}`);
     const j = await r.json();
     return parseInt(j?.value, 10) || 0;
   } catch { return 0; }
 }
-async function budgetAdd(day, chars, prev) {
+export async function budgetAdd(day, chars, prev) {
   try {
     await fetch(`${MEMORY}/memory/kv`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

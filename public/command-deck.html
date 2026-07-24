@@ -428,6 +428,7 @@ let streamSpokenLen = 0; // chars of the current streaming reply already queued 
 let discardReply = false;
 const SENTENCE_END_RE = /[.!?]["')\]]?(?:\s|$)/g;
 function speakCompletedSentences() {
+  if (typeof V2 !== 'undefined' && V2) return; // v2: the server voices the stream
   if (!streamEl || discardReply) return;
   const unspoken = streamEl.textContent.slice(streamSpokenLen);
   let lastBreak = -1, m;
@@ -459,7 +460,12 @@ function onChatFinal(m) {
     // silently dropped the way the old single-shot speak(m.speech) was.
     const remaining = m.text.length > streamSpokenLen ? m.text.slice(streamSpokenLen).trim() : '';
     streamEl = null; streamSpokenLen = 0;
-    if (remaining && !discardReply) speak(remaining);
+    if (typeof v2FallbackTurn !== 'undefined' && v2FallbackTurn && !discardReply) {
+      v2FallbackTurn = false;
+      speak(m.text); // v2's stream died mid-turn — voice the whole reply via v1
+    } else if (remaining && !discardReply && !(typeof V2 !== 'undefined' && V2)) {
+      speak(remaining);
+    }
   } else if (discardReply) {
     addChat('JARVIS', m.text, null); // interrupted: show the text, stay silent
   } else {
@@ -849,7 +855,7 @@ function sendCommand(c) {
   if (ws && ws.readyState === 1) {
     S.thinking = true;
     updateOrbLabel();
-    ws.send(JSON.stringify({ type: 'command', text: c }));
+    ws.send(JSON.stringify({ type: 'command', text: c, v2: typeof V2 !== 'undefined' && V2 }));
   } else {
     simReply(c);
   }
@@ -1021,18 +1027,29 @@ function startListening() {
 }
 
 function handleUtterance(said) {
-  // Anything heard WHILE Jarvis is talking/generating is wake-gated in every
-  // mode — his own TTS bleeding into the mic must never become a command,
-  // but "Jarvis" (± a follow-up command) barges in: kills the rest of the
-  // reply and hands the floor back to Craig immediately.
+  // Anything heard WHILE Jarvis is talking/generating is gated — his own TTS
+  // bleeding into the mic must never become a command. Two ways through:
+  //   1. "Jarvis" (± follow-up command) — instant barge-in, any mode.
+  //   2. Voice v2 only: ANY real sentence (3+ words) that is NOT an echo of
+  //      what he's currently saying — true talk-over-him, like a phone call.
   if (S.speaking || speechActive || S.thinking || streamEl) {
     const bm = said.match(WAKE_RE);
-    if (!bm) return showHeard(said, true); // his own voice or room noise — ignore
-    stopAllAudio();
-    discardReply = true;
-    S.thinking = false; updateOrbLabel();
+    const isEcho = (() => {
+      // Word-overlap against what Jarvis is currently saying on screen: ≥60%
+      // of the heard words appearing in his live reply = his own voice.
+      const spoken = ((streamEl?.textContent || '') + ' ' + ($('latest-reply')?.textContent || '')).toLowerCase();
+      if (!spoken.trim()) return false;
+      const words = said.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+      if (!words.length) return true;
+      const hits = words.filter(w => spoken.includes(w)).length;
+      return hits / words.length >= 0.6;
+    })();
+    const v2TalkOver = typeof V2 !== 'undefined' && V2 && !bm &&
+      said.split(/\s+/).filter(Boolean).length >= 3 && !isEcho;
+    if (!bm && !v2TalkOver) return showHeard(said, true); // echo or noise — ignore
+    interruptSpeech();
     showHeard(said, false);
-    const cmd = bm[1].trim();
+    const cmd = bm ? bm[1].trim() : said.trim();
     if (cmd) return sendCommand(cmd);
     awaitingCommand = Date.now() + 15000;
     addChat('JARVIS', 'Sir?', null); // interrupted: acknowledge silently on screen, ear open
@@ -1111,6 +1128,10 @@ function setVoiceMode(mode, persist = true) {
 function interruptSpeech() {
   const wasBusy = S.speaking || speechActive || S.thinking || !!streamEl;
   stopAllAudio();
+  if (typeof v2Teardown === 'function') v2Teardown(); // v2: drop the local stream player
+  if (wasBusy && ws && ws.readyState === 1) {
+    try { ws.send(JSON.stringify({ type: 'interrupt' })); } catch {} // v2: kill TTS at the source
+  }
   if (!wasBusy) return false;
   discardReply = true;
   S.thinking = false; updateOrbLabel();
@@ -1640,6 +1661,7 @@ function connectWS() {
     return;
   }
   try { ws = new WebSocket(WS_URL); } catch (e) { scheduleReconnect(); return; }
+  ws.binaryType = 'arraybuffer'; // Voice v2: binary frames = streamed mp3 chunks
   ws.onopen = () => {
     stopSim();
     retryDelay = 1000;
@@ -1648,7 +1670,11 @@ function connectWS() {
     setLink('LIVE');
     addChat('JARVIS', 'Live link established, sir. You are seeing real telemetry.');
   };
-  ws.onmessage = (ev) => { lastMsgAt = Date.now(); try { handleMsg(JSON.parse(ev.data)); } catch (e) {} };
+  ws.onmessage = (ev) => {
+    lastMsgAt = Date.now();
+    if (ev.data instanceof ArrayBuffer) return v2AudioChunk(ev.data); // v2 mp3 chunk
+    try { handleMsg(JSON.parse(ev.data)); } catch (e) {}
+  };
   ws.onclose = () => {
     if (SIM_MODE) { setLink('SIM'); startSim(); }
     else if (S.link !== 'DOWN') { setLink('DOWN'); markStale(true); }
@@ -1687,8 +1713,64 @@ function handleMsg(m) {
   else if (m.type === 'org' && Array.isArray(m.tiers)) { S.org = { tiers: m.tiers, total: m.total }; if (S.view === 'org') renderOrg(); renderAgents(); }
   else if (m.type === 'chat_chunk') onChatChunk(m.text);
   else if (m.type === 'chat') onChatFinal(m);
+  else if (m.type === 'audio_ctl') v2AudioCtl(m.ev);
   else if (m.type === 'notify') showAlert(m.level, m.title, m.speech);
   else if (m.type === 'briefing' && m.data) showBriefing(m.data);
+}
+
+// ── Voice v2 client (docs/VOICE-V2.md): MediaSource streaming player ─────────
+// Flag: ?v2=1 turns it on (persisted), ?v2=0 off. Desktop Chrome/Edge only.
+const V2 = (() => {
+  const q = qs.get('v2');
+  if (q === '1') try { localStorage.setItem('jarvis_v2', '1'); } catch {}
+  if (q === '0') try { localStorage.removeItem('jarvis_v2'); } catch {}
+  let on = false;
+  try { on = localStorage.getItem('jarvis_v2') === '1'; } catch {}
+  return on && !IS_IOS && 'MediaSource' in window && MediaSource.isTypeSupported('audio/mpeg');
+})();
+let v2 = null; // { ms, sb, queue, ended } — one per spoken reply
+let v2FallbackTurn = false; // EL stream died mid-turn → voice the final text via v1
+
+function v2Teardown() {
+  if (!v2) return;
+  try { jarvisAudio.pause(); } catch {}
+  try { if (v2.ms.readyState === 'open') v2.ms.endOfStream(); } catch {}
+  v2 = null;
+  S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel();
+}
+function v2Pump() {
+  if (!v2 || !v2.sb || v2.sb.updating) return;
+  if (v2.queue.length) { try { v2.sb.appendBuffer(v2.queue.shift()); } catch { v2Teardown(); } }
+  else if (v2.ended) { try { if (v2.ms.readyState === 'open') v2.ms.endOfStream(); } catch {} }
+}
+function v2AudioCtl(ev) {
+  if (!V2) return;
+  if (ev === 'start') {
+    v2FallbackTurn = false;
+    v2Teardown();
+    const ms = new MediaSource();
+    v2 = { ms, sb: null, queue: [], ended: false };
+    jarvisAudio.src = URL.createObjectURL(ms);
+    ms.addEventListener('sourceopen', () => {
+      if (!v2 || v2.ms !== ms) return;
+      v2.sb = ms.addSourceBuffer('audio/mpeg');
+      v2.sb.addEventListener('updateend', v2Pump);
+      v2Pump();
+    }, { once: true });
+    jarvisAudio.onplay = () => { S.speaking = true; updateOrbLabel(); };
+    jarvisAudio.onended = jarvisAudio.onerror = () => { v2Teardown(); scheduleRelisten(); };
+    jarvisAudio.play().catch(() => {}); // needs the usual first-tap gesture priming
+  } else if (ev === 'end') {
+    if (v2) { v2.ended = true; v2Pump(); }
+  } else if (ev === 'fallback') {
+    v2FallbackTurn = true; // onChatFinal voices the text through the v1 path
+    v2Teardown();
+  }
+}
+function v2AudioChunk(buf) {
+  if (!V2 || !v2 || discardReply) return;
+  v2.queue.push(new Uint8Array(buf));
+  v2Pump();
 }
 
 // ── Morning-briefing panel ({type:'briefing'} from the server) ──────────────
