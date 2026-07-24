@@ -726,7 +726,10 @@ async function pumpSpeech() {
   if (!ttsPrimed) { updatePendingBadge(); return; } // waits for the first tap
   speechActive = true;
   while (speechQ.length) {
-    if (listening && rec) try { rec.abort(); } catch {} // never transcribe himself
+    // iOS only: close the ear while speaking (speaker bleed + one-shot
+    // recognition). Desktop keeps listening for wake-word barge-in — see
+    // startListening/handleUtterance 2026-07-24.
+    if (IS_IOS && listening && rec) try { rec.abort(); } catch {}
     const text = speechQ.shift();
     updatePendingBadge();
     try { await speakOnce(text); } catch { /* keep the queue moving */ }
@@ -945,8 +948,17 @@ function showHeard(text, ignored) { // failures must never be silent
 }
 
 function startListening() {
-  if (!SRCls || listening || voiceMode === 'off' || !armed || S.speaking || speechActive) return;
-  if (Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return; // acoustic-tail cooldown, see scheduleRelisten
+  // VOICE BARGE-IN 2026-07-24 (Craig: "I still can't interrupt when talking"):
+  // the ear used to close whenever Jarvis spoke ("never transcribe himself"),
+  // which made talking over him structurally impossible — the most natural
+  // interrupt there is. On desktop the ear now stays OPEN during speech;
+  // handleUtterance wake-gates anything heard while he's talking, so his own
+  // voice / room noise can't fire commands but "Jarvis—" cuts him off.
+  // iOS keeps the old closed-ear behaviour (one-shot recognition + speaker
+  // bleed make open-mic barge-in unreliable there).
+  const speakingBlocks = IS_IOS && (S.speaking || speechActive);
+  if (!SRCls || listening || voiceMode === 'off' || !armed || speakingBlocks) return;
+  if (IS_IOS && Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return; // acoustic-tail cooldown (iOS only now)
   if (qs.get('core')) return; // screenshot/QA state-forcing — no real mic
   const gen = ++recGen;
   rec = new SRCls();
@@ -1009,6 +1021,23 @@ function startListening() {
 }
 
 function handleUtterance(said) {
+  // Anything heard WHILE Jarvis is talking/generating is wake-gated in every
+  // mode — his own TTS bleeding into the mic must never become a command,
+  // but "Jarvis" (± a follow-up command) barges in: kills the rest of the
+  // reply and hands the floor back to Craig immediately.
+  if (S.speaking || speechActive || S.thinking || streamEl) {
+    const bm = said.match(WAKE_RE);
+    if (!bm) return showHeard(said, true); // his own voice or room noise — ignore
+    stopAllAudio();
+    discardReply = true;
+    S.thinking = false; updateOrbLabel();
+    showHeard(said, false);
+    const cmd = bm[1].trim();
+    if (cmd) return sendCommand(cmd);
+    awaitingCommand = Date.now() + 15000;
+    addChat('JARVIS', 'Sir?', null); // interrupted: acknowledge silently on screen, ear open
+    return;
+  }
   if (voiceMode === 'live') { showHeard(said, false); return sendCommand(said); }
   const m = said.match(WAKE_RE);
   if (m) {
@@ -1043,12 +1072,14 @@ function scheduleRelisten() {
   if (voiceMode === 'off' || !armed) return;
   clearTimeout(relistenTimer);
   const delay = Math.max(srBackoff, MIC_COOLDOWN_MS);
-  relistenTimer = setTimeout(() => { if (!listening && !S.speaking && !speechActive) startListening(); }, delay);
+  // Desktop: the ear may reopen even mid-speech (barge-in); iOS waits.
+  relistenTimer = setTimeout(() => { if (!listening && (!IS_IOS || (!S.speaking && !speechActive))) startListening(); }, delay);
 }
 
 // Chrome quietly kills long recognizer sessions; the watchdog reopens the ear.
 setInterval(() => {
-  if (armed && voiceMode !== 'off' && !listening && !S.speaking && !speechActive && !document.hidden) startListening();
+  const iosBlocked = IS_IOS && (S.speaking || speechActive);
+  if (armed && voiceMode !== 'off' && !listening && !iosBlocked && !document.hidden) startListening();
 }, 3000);
 
 const MODE_LABEL = { wake: '👂 WAKE: “JARVIS…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };

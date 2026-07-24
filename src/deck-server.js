@@ -743,7 +743,21 @@ wss.on('connection', (ws, req) => {
       }
       const { intent } = await resolveIntent(text);
       const result = await runIntent(intent, text, (m) => send({ type: 'chat', text: m.speech || m.text }), dispatchGate);
-      send({ type: 'chat', text: result?.speech || result?.text || 'Acknowledged, sir.' });
+      const fallbackReply = result?.speech || result?.text || 'Acknowledged, sir.';
+      // 2026-07-24 (Craig: "within 30 seconds it completely forgot what we
+      // were organising"): when the brain failed, the splice above erased
+      // the ENTIRE exchange — his message and the fallback answer were never
+      // written to the durable transcript, so the very next brain turn had
+      // no record the conversation happened. Failed-brain turns now still
+      // land in memory as plain text, so continuity survives brain hiccups.
+      try {
+        const transcript = await loadTranscript();
+        transcript.push({ role: 'user', content: text });
+        transcript.push({ role: 'assistant', content: `[via basic pipeline while the main brain was unavailable] ${String(result?.text || fallbackReply).slice(0, 500)}` });
+        if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
+        saveTranscript();
+      } catch { /* recording is best-effort — never block the reply */ }
+      send({ type: 'chat', text: fallbackReply });
     } catch (e) {
       console.error('[deck] command error:', e.message);
       send({ type: 'chat', text: 'Apologies, sir — that command hit an error: ' + e.message });
