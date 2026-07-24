@@ -83,6 +83,22 @@ export async function statusDigest() {
     const jobs = Array.isArray(jobsR.value) ? jobsR.value : [];
     const running = jobs.filter(j => j.status === 'running').length;
     if (running) parts.push(`${running} job${running === 1 ? '' : 's'} running`);
+    // 2026-07-24 (Craig: "Jarvis doesn't seem to have memory of jobs I'm
+    // asking him to do") — this previously only reported a RUNNING count,
+    // nothing about what recently finished. If he dispatched something and
+    // asks about it later without saying "list jobs" explicitly, the model
+    // had zero ambient signal to draw on. jobs is already most-recent-first
+    // (orchestrator's /jobs), so the first completed/failed entry is the
+    // most recent one — give the model something concrete to reference.
+    const lastFinished = jobs.find(j => j.status === 'completed' || j.status === 'failed');
+    if (lastFinished) {
+      const finishedMs = lastFinished.finishedAt ? Date.now() - new Date(lastFinished.finishedAt).getTime() : null;
+      const ago = finishedMs == null ? 'recently'
+        : finishedMs < 60000 ? 'just now'
+        : finishedMs < 3600000 ? `${Math.round(finishedMs / 60000)}m ago`
+        : `${Math.round(finishedMs / 3600000)}h ago`;
+      parts.push(`last finished job: ${lastFinished.platform} ${lastFinished.status} ${ago} — "${(lastFinished.task || '').slice(0, 70)}"`);
+    }
   }
   if (inboxR.status === 'fulfilled') {
     const n = (inboxR.value?.notifications || []).length;
