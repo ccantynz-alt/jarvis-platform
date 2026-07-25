@@ -93,10 +93,34 @@ wrong (never touch/delete this file on the strength of that claim). Uses
 always prefers it. Model tiers: everyday **Sonnet 5**, voice-switchable to
 Opus/Fable ("switch model to Fable"), with an automatic one-turn escalation
 retry when a tier struggles. Tools + persona live in src/lib/brain-tools.js —
-ONE surface shared by every provider. The metered APIs (openai `gpt-5.1`,
-anthropic Messages, gemini) are EMERGENCY fallbacks only; any automatic
-failover away from `claude` fires a spoken notify() — silent downgrades
-(the 2026-07-18 Gemini incident) must never repeat.
+ONE surface shared by every provider.
+
+**SUBSCRIPTION-ONLY — metered APIs are OFF by default (Craig's ruling,
+2026-07-26: "sometimes we can't get an eye on API fallback so probably best
+not to have it").** The metered providers (openai `gpt-5.1`, anthropic
+Messages, gemini) are gated behind `BRAIN_ALLOW_METERED=1`, default unset.
+While off, `keyFor()` reports them keyless, which removes them from
+runAgent's failover loop, `hasAgent()`, and `maybeBrainSwitch()` in one
+place. When both subscription accounts are usage-limited the brain now
+THROWS, the caller degrades to the keyword-intent pipeline, and a total-
+outage `notify()` fires — loud and free, instead of quiet and metered.
+This replaced a real, live problem, not a theoretical one: on 2026-07-25 a
+total outage made the failover loop land on `anthropic`, and because a
+successful failover is persisted to KV `brain-provider` it stayed there,
+billing metered tokens with no ongoing signal; `secrets.env` separately had
+`BRAIN_PROVIDER=gemini`, so clearing that KV would have pinned it to a
+*different* metered API rather than the subscription. **Two things to check
+if the brain ever seems to be on the wrong provider — they drifted apart
+before: KV (`curl 127.0.0.1:9200/memory/kv/brain-provider`) AND env (`grep
+BRAIN_PROVIDER config/secrets.env`). Fastest single check: the
+`[jarvis-deck] agent brain: <name> ✓` line at boot in `journalctl -u
+jarvis-deck`.**
+Any automatic failover away from `claude` still fires a spoken notify() —
+silent downgrades (the 2026-07-18 Gemini incident) must never repeat.
+**Scope:** `ANTHROPIC_API_KEY` is deliberately untouched and still powers the
+Haiku *intent classifier* fast-path (src/lib/conversation.js,
+src/slack-bridge.js) — ~300ms classification calls, not brain turns. Don't
+delete that key thinking it's part of the brain fallback.
 **Two-account failover (src/lib/claude-auth.js):** subscription logins live at
 `/root/.claude` (profile `default`) and `/root/.claude-profiles/<name>`
 (`CLAUDE_CONFIG_DIR`; one-time `CLAUDE_CONFIG_DIR=<dir> claude login`). On a
