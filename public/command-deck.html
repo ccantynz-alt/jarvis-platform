@@ -856,8 +856,17 @@ function sendCommand(c) {
     S.thinking = true;
     updateOrbLabel();
     ws.send(JSON.stringify({ type: 'command', text: c, v2: typeof V2 !== 'undefined' && V2 }));
+  } else if (SIM_MODE) {
+    simReply(c); // demo canned answers — ONLY ever with ?sim=1
   } else {
-    simReply(c);
+    // 2026-07-26: this used to call simReply() unconditionally whenever the
+    // socket was down — so a lost link (any reconnect window, any deck-server
+    // restart) made Jarvis answer in his REAL voice with invented figures: a
+    // "420-dollar budget request", "96 percent matched", "all 412 tests
+    // green". Indistinguishable from a real answer apart from a 10px pill in
+    // the corner. Confident fabrication in a system Craig makes business
+    // decisions from is far worse than an honest silence.
+    addChat('JARVIS', 'I have lost the link to the box, sir — I can\'t reach my brain or any real data until it reconnects. Nothing I said would be true, so I\'d rather say nothing.');
   }
 }
 
@@ -1256,6 +1265,14 @@ let demoRunning = false;
 $('btn-demo').onclick = () => {
   // Live link → ask the real brain for the real briefing; canned demo is SIM-only.
   if (ws && ws.readyState === 1) { sendCommand('morning briefing'); return; }
+  // Same fabrication hazard as sendCommand (2026-07-26): this canned script
+  // asserts a passing build, "96 percent of June invoices" and an approved
+  // "420 dollars" — spoken aloud, unlabelled. Demo only, never on a real
+  // deck that has simply lost its link.
+  if (!SIM_MODE) {
+    addChat('JARVIS', 'I can\'t give you a briefing right now, sir — the link to the box is down, so I have no real figures to brief you from.');
+    return;
+  }
   if (demoRunning) return; demoRunning = true;
   const seq = [
     ['YOU', 'Jarvis, give me the morning briefing.', 0],

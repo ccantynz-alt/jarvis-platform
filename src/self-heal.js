@@ -115,7 +115,10 @@ function repairTask(platform, url, code, mins) {
 
 async function dispatchRepair(platform, url, code, mins) {
   await snapshot(platform); // no-op unless the platform has a DB to protect
-  const body = { platform, task: repairTask(platform, url, code, mins), executor: 'auto' };
+  // priority 1 (2026-07-26): a public site is DOWN — this outranks every
+  // scheduled role agent (now 8) and ordinary dispatch (5) in the orchestrator's
+  // priority-ASC queue, so a repair can never wait behind routine paperwork.
+  const body = { platform, task: repairTask(platform, url, code, mins), executor: 'auto', priority: 1 };
   const r = await fetch(`${ORCHESTRATOR}/dispatch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   return r.json();
 }

@@ -637,7 +637,13 @@ app.post('/dispatch', async (req, res) => {
         path: role.permissions.cwd,
         enqueued_by: (req.body && req.body.enqueued_by) || 'api',
         parent_job_id: (req.body && req.body.parent_job_id) || null,
-        priority: role.priority ?? 5,
+        // 8, not 5 (2026-07-26): the scheduler sorts by priority ASC with only
+        // MAX_CONCURRENT_JOBS slots, and scheduled role agents used to enter at
+        // the SAME priority as an emergency repair. Five accountant agents with
+        // 30-minute timeouts could therefore hold a self-heal repair for a
+        // genuinely DOWN production site in the queue behind them. Routine
+        // scheduled paperwork must always yield to fleet work.
+        priority: role.priority ?? 8,
         timeout_min: role.budget?.timeout_min ?? 20,
         max_attempts: 2,
       });

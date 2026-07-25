@@ -125,8 +125,11 @@ export const TOOLS = [
     input_schema: { type: 'object', properties: {}, required: [] } },
   { name: 'get_inbox', description: "Craig's notification inbox — recent alerts/warnings/info from all Jarvis services. Use for 'what needs my attention' / 'any alerts'.",
     input_schema: { type: 'object', properties: { unread_only: { type: 'boolean', description: 'default true' } }, required: [] } },
-  { name: 'get_agent_reports', description: 'Latest reports filed by the role agents (social media, accountants, legal) — what each department last did and found.',
-    input_schema: { type: 'object', properties: {}, required: [] } },
+  { name: 'get_agent_reports', description: "Latest reports filed by the role agents (social media, SEO, site medics, accountants, legal, C-suite) — what each department last did and found. Returns summaries; pass agent (e.g. 'social-media-davenroe') or full=true to read the ACTUAL deliverable — the drafted posts, the findings, the fix proposal.",
+    input_schema: { type: 'object', properties: {
+      agent: { type: 'string', description: "only this agent's reports, with their full detail" },
+      full: { type: 'boolean', description: 'include the full report bodies, not just one-line summaries' },
+    }, required: [] } },
   { name: 'dispatch_job', description: "Send a Claude agent to DO WORK on a platform (fix, build, change, deploy). GATED: call with confirmed=false first to preview; only confirmed=true after Craig says yes actually launches it.",
     input_schema: { type: 'object', properties: {
       platform: { type: 'string', description: 'target platform (or omit to auto-detect from the task)' },
@@ -168,10 +171,32 @@ export async function runTool(name, input, ctx) {
       return list.map(n => `[${n.level}] ${n.ts.slice(5, 16)} ${n.title}${n.body && n.body !== n.title ? ' — ' + n.body.slice(0, 120) : ''}`).join('\n');
     }
     case 'get_agent_reports': {
-      const r = await fetch(`${MEMORY}/memory/agent-reports?limit=12`).then(r => r.json());
-      const list = Array.isArray(r) ? r : [];
-      if (!list.length) return 'No agent reports on file yet.';
-      return list.map(x => `${x.agent} [${x.status}] ${x.ts.slice(5, 16)}: ${x.summary}`).join('\n');
+      // 2026-07-26: this used to return ONLY x.summary and silently drop
+      // x.details — so the entire deliverable of the entire 43-agent org (the
+      // drafted posts, the medic's findings, the proposed fix) was invisible
+      // to the one component that can act on it. Asked to "fix what site-medic
+      // found", the brain had a one-line summary and had to paraphrase, which
+      // is exactly the vague dispatch the persona rules warn against.
+      const wantAgent = String(input.agent || '').trim().toLowerCase();
+      // Detail costs context, so spend it where it's asked for: a named agent
+      // (or full=true) gets bodies; the broad "what's everyone been doing"
+      // sweep stays a scannable list.
+      const detailed = !!input.full || !!wantAgent;
+      const r = await fetch(`${MEMORY}/memory/agent-reports?limit=${detailed ? 40 : 12}`).then(r => r.json());
+      let list = Array.isArray(r) ? r : [];
+      if (wantAgent) list = list.filter(x => String(x.agent || '').toLowerCase().includes(wantAgent));
+      if (!list.length) {
+        return wantAgent ? `No reports on file from an agent matching "${input.agent}".` : 'No agent reports on file yet.';
+      }
+      if (!detailed) {
+        return list.map(x => `${x.agent} [${x.status}] ${x.ts.slice(5, 16)}: ${x.summary}`).join('\n') +
+          '\n\n(Summaries only — ask for a specific agent, or full detail, to read the actual reports.)';
+      }
+      return list.slice(0, 6).map(x => {
+        const body = String(x.details || '').trim();
+        return `── ${x.agent} [${x.status}] ${x.ts.slice(0, 16)}\n${x.summary}` +
+          (body ? `\n${body.length > 2000 ? body.slice(0, 2000) + '\n…[truncated]' : body}` : '');
+      }).join('\n\n');
     }
     case 'get_platform_status': {
       const p = input.platform && platformNames().includes(input.platform.toLowerCase())
