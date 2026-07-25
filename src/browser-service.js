@@ -19,10 +19,30 @@ import express from 'express';
 import { chromium } from 'playwright-core';
 import dns from 'dns/promises';
 import net from 'net';
-import { appendFileSync, mkdirSync } from 'fs';
+import { appendFileSync, mkdirSync, statSync } from 'fs';
 
 const PORT = 9211;
-const CHROME = process.env.CHROMIUM_BIN || '/usr/bin/google-chrome';
+// Playwright's executablePath needs an ABSOLUTE path — unlike screenshot-
+// service.js, which spawn()s the same CHROMIUM_BIN and gets PATH resolution
+// for free. secrets.env ships CHROMIUM_BIN=google-chrome (a bare name), so
+// /browser/render failed EVERY call with "executable doesn't exist at
+// google-chrome" while screenshot capture kept working — which is why this
+// went unnoticed: the brain simply had no working eyes on the web
+// (search/fetch were fine; only render, the one that actually SEES a page).
+// Resolve a bare name against PATH + the usual install locations.
+function resolveChrome() {
+  const want = process.env.CHROMIUM_BIN || '/usr/bin/google-chrome';
+  if (want.includes('/')) return want;                 // already a path — trust it
+  const dirs = (process.env.PATH || '').split(':').filter(Boolean);
+  const candidates = [
+    ...dirs.map(d => `${d}/${want}`),
+    `/usr/bin/${want}`, '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable',
+    '/usr/bin/chromium', '/usr/bin/chromium-browser', '/opt/google/chrome/google-chrome',
+  ];
+  for (const c of candidates) { try { if (statSync(c).isFile()) return c; } catch {} }
+  return want; // nothing found — let Playwright report it loudly
+}
+const CHROME = resolveChrome();
 const NAV_TIMEOUT = 15000;
 const FETCH_TIMEOUT = 12000;
 const MAX_TEXT = 6000;           // chars of page text handed back to the brain
