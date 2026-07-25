@@ -533,13 +533,26 @@ app.post('/worker/heartbeat', async (req, res) => {
   res.json({ enabled: await pcWorkerEnabled() });
 });
 
-// POST /worker/result { job_id, code, stdout, stderr, timedOut }
+// POST /worker/result { job_id, worker_id, code, stdout, stderr, timedOut }
 app.post('/worker/result', async (req, res) => {
-  const { job_id, code, stdout = '', stderr = '', timedOut = false } = req.body || {};
+  const { job_id, worker_id, code, stdout = '', stderr = '', timedOut = false } = req.body || {};
   if (!job_id) return res.status(400).json({ error: 'job_id required' });
   let row;
   try { row = await dbGet(`/memory/jobs/${job_id}`); }
   catch { return res.status(404).json({ error: 'Job not found' }); }
+  // Ownership guard (2026-07-26 security fix): this had no check at all that
+  // the caller actually claimed this job — any holder of JARVIS_WORKER_TOKEN
+  // could post a fabricated result for ANY job (including in-flight SSH/local
+  // jobs against real fleet platforms), flipping platform_state's health
+  // status and injecting attacker-controlled text into Slack/voice
+  // notifications via finishJob()'s notify() fan-out. Only the 'pc' executor
+  // path uses this endpoint at all, and only the worker that actually holds
+  // the current lease (worker_id set by /worker/claim) may report its result.
+  if (row.executor !== 'pc') return res.status(403).json({ error: 'not a pc-executor job' });
+  if (row.status !== 'running') return res.status(409).json({ error: `job is not running (status=${row.status})` });
+  if (row.worker_id && worker_id && row.worker_id !== worker_id) {
+    return res.status(403).json({ error: 'worker_id does not hold this job\'s lease' });
+  }
   await finishJob(row, { code, stdout, stderr, timedOut });
   res.json({ ok: true });
 });

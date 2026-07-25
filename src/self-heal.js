@@ -131,7 +131,16 @@ export async function runOnce() {
 
   if (!down.length) { log('all probed platforms healthy'); return; }
   const jobs = await fetchJobs();
-  const concurrent = jobs.filter(j => j.status === 'running' && (j.task || '').includes(MARKER)).length;
+  // mutable (2026-07-26 fix): this used to be a one-time snapshot taken before
+  // the loop and never updated as dispatches happened within the same tick —
+  // if N platforms were simultaneously flagged down (a shared-hosting/DNS/CDN
+  // outage), every one of them would pass the `concurrent >= MAX_CONCURRENT`
+  // check against the same stale count and self-heal could dispatch repairs
+  // for all N in one run, blowing straight through the fleet-wide concurrency
+  // guardrail — the same "guardrail exists in code but doesn't actually bound
+  // behavior" class of bug as the 2026-07-17 incident, just a different
+  // trigger. Now incremented after each successful dispatch below.
+  let concurrent = jobs.filter(j => j.status === 'running' && (j.task || '').includes(MARKER)).length;
 
   for (const p of down) {
     const name = p.name;
@@ -190,7 +199,7 @@ export async function runOnce() {
     try {
       const res = await dispatchRepair(name, url, code, downMin);
       if (res.error) { log(`${name}: dispatch error: ${res.error}`); }
-      else { log(`${name}: repair job ${res.jobId} dispatched`); s.lastAttempt = now(); s.attemptsToday += 1; }
+      else { log(`${name}: repair job ${res.jobId} dispatched`); s.lastAttempt = now(); s.attemptsToday += 1; concurrent += 1; }
     } catch (e) { log(`${name}: dispatch threw: ${e.message}`); }
     saveState(name, s);
   }

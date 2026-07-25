@@ -189,7 +189,7 @@
   renderMute();
   muteBtn.onclick = () => {
     muted = !muted; localStorage.setItem('jarvis_muted', muted ? '1' : '0'); renderMute();
-    if (muted) { speechSynthesis.cancel(); document.body.dataset.jstate = 'idle'; }
+    if (muted) { bargeCancel = true; speechSynthesis.cancel(); document.body.dataset.jstate = 'idle'; }
     else { ttsPrimed = true; speak('Jarvis voice is on.'); } // in-gesture speech: unlocks iOS audio + audible device test
   };
 
@@ -201,8 +201,61 @@
   function primeTTS() { // iOS: speech must be unlocked by a user gesture
     if (ttsPrimed || !('speechSynthesis' in window)) return;
     const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
+    attachMicAnalyser();
   }
   function setJState(s) { document.body.dataset.jstate = s; }
+
+  // ── Barge-in VAD (2026-07-26) ────────────────────────────────────────────────
+  // This page had NO way to interrupt Jarvis mid-sentence before this — muting
+  // only silenced future replies, and the mic never reopened until he finished
+  // talking (see scheduleRelisten, called only from speak's onend). This adds
+  // a real "talk over him and he stops": a persistent mic tap, independent of
+  // the push-to-talk/conversation-mode SpeechRecognition sessions below, run
+  // through a plain energy-based voice-activity detector. echoCancellation is
+  // what keeps his own voice (speaker bleed into the mic) from tripping it —
+  // without it this would just re-trigger on his own speech constantly.
+  // NOT verified on real iOS hardware — needs confirming on Craig's iPad/phone.
+  let gwStream = null, gwAnalyser = null, gwVadData = null, gwVadTimer = null;
+  let gwVadFloor = 0.02, gwVadAboveMs = 0, gwVadBelowMs = 0, gwVadSpeaking = false, gwVadLastT = 0;
+  const GW_VAD_ON_MS = 140, GW_VAD_OFF_MS = 300, GW_VAD_RATIO = 2.2;
+  async function attachMicAnalyser() {
+    if (gwAnalyser || !navigator.mediaDevices?.getUserMedia) return;
+    try {
+      gwStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = ctx.createMediaStreamSource(gwStream);
+      gwAnalyser = ctx.createAnalyser(); gwAnalyser.fftSize = 256;
+      src.connect(gwAnalyser);
+      gwVadData = new Uint8Array(gwAnalyser.fftSize);
+      gwVadTimer = setInterval(gwVadTick, 100);
+    } catch { /* mic permission denied/unavailable — push-to-talk/SR still work standalone */ }
+  }
+  function gwVadTick() {
+    const now = performance.now();
+    const dt = gwVadLastT ? Math.min(250, now - gwVadLastT) : 100;
+    gwVadLastT = now;
+    if (!gwAnalyser || !gwVadData) return;
+    gwAnalyser.getByteTimeDomainData(gwVadData);
+    let sum = 0;
+    for (let i = 0; i < gwVadData.length; i++) { const v = (gwVadData[i] - 128) / 128; sum += v * v; }
+    const rms = Math.sqrt(sum / gwVadData.length);
+    if (rms > gwVadFloor * GW_VAD_RATIO) { gwVadAboveMs += dt; gwVadBelowMs = 0; }
+    else { gwVadBelowMs += dt; gwVadAboveMs = 0; gwVadFloor += (rms - gwVadFloor) * 0.02; }
+    if (!gwVadSpeaking && gwVadAboveMs >= GW_VAD_ON_MS) {
+      gwVadSpeaking = true;
+      if (document.body.dataset.jstate === 'speaking') bargeIn();
+    } else if (gwVadSpeaking && gwVadBelowMs >= GW_VAD_OFF_MS) {
+      gwVadSpeaking = false;
+    }
+  }
+  let bargeCancel = false; // cancel() fires the utterance's onerror asynchronously, not onend —
+                            // this flag lets that handler tell "user cut him off" apart from a real error
+  function bargeIn() {
+    bargeCancel = true;
+    speechSynthesis.cancel();
+  }
 
   function speak(text) {
     if (muted || !text || !('speechSynthesis' in window)) return;
@@ -219,7 +272,11 @@
       || voiceCache.find(v => /^en/i.test(v.lang)) || null;
     u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
     u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; if (conversationMode) scheduleRelisten(); };
-    u.onerror = (e) => { setJState('idle'); hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`; };
+    u.onerror = (e) => {
+      setJState('idle');
+      if (bargeCancel) { bargeCancel = false; hint.textContent = ''; if (conversationMode && !listening) scheduleRelisten(); return; }
+      hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`;
+    };
     speechSynthesis.speak(u);
   }
 

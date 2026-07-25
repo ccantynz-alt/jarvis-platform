@@ -87,29 +87,36 @@ function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); 
 // overrides, this is not root and not the server's env).
 //
 // claude ships as claude.cmd on Windows, which only cmd.exe can execute
-// directly — that needs shell:true. But shell:true + an ARGS ARRAY is a
-// documented Node foot-gun (and an explicit deprecation warning): the args
-// get joined with spaces and re-tokenized by cmd.exe, silently mangling any
-// prompt containing punctuation cmd treats specially. A prompt with a colon
-// and periods was observed splitting apart and reaching claude as an empty
-// stdin, so it replied with its generic no-input greeting instead of running
-// the task. Fix: build ONE command string ourselves with JSON.stringify()
-// (produces a well-formed double-quoted, backslash-escaped token both cmd.exe
-// and the underlying argv parser accept) and pass that single string with
-// shell:true — Node's documented-safe form.
+// directly — that needs shell:true.
+//
+// SECURITY FIX (2026-07-26): this used to embed the prompt directly into the
+// shell command string via JSON.stringify() — that only produces valid
+// JS-string escaping, NOT cmd.exe escaping. A prompt containing `" & cmd & "`
+// closes the quoted region as far as cmd.exe's tokenizer is concerned and
+// runs `cmd` as an independent, unquoted command — arbitrary code execution
+// on this PC, under Craig's own account. Any text that becomes a pc-executor
+// job's prompt/task reaches here, including task text a dispatched agent
+// might compose from web content it just fetched. Fixed by passing the
+// prompt over stdin instead: the command string below is now a fixed literal
+// with nothing untrusted interpolated into it, and `-p/--print` is
+// documented as "useful for pipes" — this also sidesteps the earlier
+// cmd.exe re-tokenization bug (punctuation in the prompt no longer touches
+// the shell's argument parser at all, since it never becomes an argument).
 function runClaude(prompt, cwd, timeoutMin) {
   return new Promise((resolve) => {
-    const cmdStr = 'claude --dangerously-skip-permissions --print ' + JSON.stringify(prompt);
+    const cmdStr = 'claude --dangerously-skip-permissions --print';
     const proc = spawn(cmdStr, {
       cwd, shell: true,
       env: { ...process.env, DISABLE_AUTOUPDATER: '1' },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = '', stderr = '', timedOut = false, settled = false;
     const killTimer = setTimeout(() => {
       timedOut = true;
       try { spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F']); } catch {}
     }, timeoutMin * 60_000);
+    proc.stdin.on('error', () => {}); // EPIPE if the process exits before the write lands
+    proc.stdin.write(String(prompt), () => proc.stdin.end());
     proc.stdout.on('data', d => { stdout += d.toString(); });
     proc.stderr.on('data', d => { stderr += d.toString(); });
     const settle = (code, err) => {
@@ -183,7 +190,7 @@ async function runJob(job) {
     ? `${result.stdout}\n\n[pc-worker] files touched under ${cwd}:\n${changed.map(f => '  ' + path.relative(cwd, f)).join('\n')}`
     : result.stdout;
 
-  await api('result', { job_id: job.id, ...result, stdout }).catch(e => log(`result post failed: ${e.message}`));
+  await api('result', { job_id: job.id, worker_id: WORKER_ID, ...result, stdout }).catch(e => log(`result post failed: ${e.message}`));
   currentJobId = null;
 }
 

@@ -45,9 +45,25 @@ const SCREENSHOT       = 'http://127.0.0.1:9201';
 const METRICS          = 'http://127.0.0.1:9202';
 
 // Notification tuning — all overridable in secrets.env
-const DIGEST_MINUTES    = Number(process.env.JARVIS_DIGEST_MINUTES || 30);
-const NOTIFY_COOLDOWN   = Number(process.env.JARVIS_NOTIFY_COOLDOWN_MINUTES || 30);
-const MAX_PER_HOUR      = Number(process.env.JARVIS_MAX_IMMEDIATE_PER_HOUR || 15);
+// NaN-safe (2026-07-26): systemd's EnvironmentFile does NOT strip inline
+// comments, so a naive Number(process.env.X || default) can silently parse to
+// NaN — every downstream `< NaN` comparison is then false, which disables the
+// rate limit, dedupe, AND digest-flush gates at once (this is the exact same
+// bug class that caused the 117-dispatches/day incident on 2026-07-17,
+// documented in self-heal.js's guardrail() — that fix was never mirrored
+// here). Strip a trailing comment and fall back to the default on anything
+// that doesn't parse to a positive finite number.
+function guardedNumber(name, fallback) {
+  const n = Number(String(process.env[name] ?? '').trim().split(/\s|#/)[0]);
+  if (Number.isFinite(n) && n > 0) return n;
+  if (process.env[name] !== undefined) {
+    console.error(`[slack-bridge] BAD CONFIG ${name}=${JSON.stringify(process.env[name])} — using default ${fallback}`);
+  }
+  return fallback;
+}
+const DIGEST_MINUTES    = guardedNumber('JARVIS_DIGEST_MINUTES', 30);
+const NOTIFY_COOLDOWN   = guardedNumber('JARVIS_NOTIFY_COOLDOWN_MINUTES', 30);
+const MAX_PER_HOUR      = guardedNumber('JARVIS_MAX_IMMEDIATE_PER_HOUR', 15);
 // "22-7" = hold non-critical from 10pm to 7am NZ. Set to "off" to disable.
 const QUIET_HOURS_RAW   = process.env.JARVIS_QUIET_HOURS || '22-7';
 
@@ -104,7 +120,12 @@ async function sendSlack(text, channel = SLACK_CHANNEL) {
 // ── Notify Center — the gate for all unsolicited notifications ──────────────
 
 function parseQuietHours(raw) {
-  const m = String(raw).match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+  // Same inline-comment hazard as guardedNumber above, but this one fails
+  // QUIET (returns null → quiet hours silently disabled) rather than NaN —
+  // still worth stripping so a trailing "# ..." comment can't turn this off
+  // without anyone noticing.
+  const stripped = String(raw).trim().split('#')[0].trim();
+  const m = stripped.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
   if (!m) return null;
   return { start: Number(m[1]) % 24, end: Number(m[2]) % 24 };
 }

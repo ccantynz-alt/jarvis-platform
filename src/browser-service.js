@@ -147,12 +147,22 @@ app.post('/browser/render', async (req, res) => {
     const b = await getBrowser();
     ctx = await b.newContext({ userAgent: 'JarvisBrowser/1.0', viewport: { width: 1280, height: 900 } });
     const page = await ctx.newPage();
-    // Block any sub-request that targets a private/loopback/metadata address.
+    // Block any sub-request (and any redirect hop — Playwright's network
+    // interception sees each hop as its own request) that targets a
+    // private/loopback/metadata/tailnet address.
+    //
+    // SECURITY FIX (2026-07-26): this used to only check literal IP addresses
+    // and a fixed hostname-suffix list — a hostname whose DNS record simply
+    // points at 127.0.0.1/169.254.169.254/10.x/etc sailed through untouched,
+    // since net.isIP() is false for a domain name. The initial URL got the
+    // real DNS-resolving guard() check (below, before page.goto), but nothing
+    // after that did. Now every request on this page — main navigation,
+    // redirects, and subresources alike — gets the same guard() used by
+    // /browser/fetch, so a rebinding hostname can't sneak a request to an
+    // internal address through the render path.
     await page.route('**', async (route) => {
-      try {
-        const rh = new URL(route.request().url()).hostname;
-        if (BLOCKED_HOST.test(rh) || (net.isIP(rh) && isPrivateIP(rh))) return route.abort();
-      } catch { return route.abort(); }
+      const g = await guard(route.request().url()).catch(() => ({ blocked: true, reason: 'guard threw' }));
+      if (g.blocked) return route.abort();
       return route.continue();
     });
     const resp = await page.goto(url, { timeout: NAV_TIMEOUT, waitUntil: 'domcontentloaded' });
