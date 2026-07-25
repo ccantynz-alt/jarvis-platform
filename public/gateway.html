@@ -201,64 +201,53 @@
   function primeTTS() { // iOS: speech must be unlocked by a user gesture
     if (ttsPrimed || !('speechSynthesis' in window)) return;
     const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); ttsPrimed = true;
-    attachMicAnalyser();
   }
   function setJState(s) { document.body.dataset.jstate = s; }
 
-  // ── Barge-in VAD (2026-07-26) ────────────────────────────────────────────────
-  // This page had NO way to interrupt Jarvis mid-sentence before this — muting
-  // only silenced future replies, and the mic never reopened until he finished
-  // talking (see scheduleRelisten, called only from speak's onend). This adds
-  // a real "talk over him and he stops": a persistent mic tap, independent of
-  // the push-to-talk/conversation-mode SpeechRecognition sessions below, run
-  // through a plain energy-based voice-activity detector. echoCancellation is
-  // what keeps his own voice (speaker bleed into the mic) from tripping it —
-  // without it this would just re-trigger on his own speech constantly.
-  // NOT verified on real iOS hardware — needs confirming on Craig's iPad/phone.
-  let gwStream = null, gwAnalyser = null, gwVadData = null, gwVadTimer = null;
-  let gwVadFloor = 0.02, gwVadAboveMs = 0, gwVadBelowMs = 0, gwVadSpeaking = false, gwVadLastT = 0;
-  const GW_VAD_ON_MS = 140, GW_VAD_OFF_MS = 300, GW_VAD_RATIO = 2.2;
-  async function attachMicAnalyser() {
-    if (gwAnalyser || !navigator.mediaDevices?.getUserMedia) return;
-    try {
-      gwStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const src = ctx.createMediaStreamSource(gwStream);
-      gwAnalyser = ctx.createAnalyser(); gwAnalyser.fftSize = 256;
-      src.connect(gwAnalyser);
-      gwVadData = new Uint8Array(gwAnalyser.fftSize);
-      gwVadTimer = setInterval(gwVadTick, 100);
-    } catch { /* mic permission denied/unavailable — push-to-talk/SR still work standalone */ }
-  }
-  function gwVadTick() {
-    const now = performance.now();
-    const dt = gwVadLastT ? Math.min(250, now - gwVadLastT) : 100;
-    gwVadLastT = now;
-    if (!gwAnalyser || !gwVadData) return;
-    gwAnalyser.getByteTimeDomainData(gwVadData);
-    let sum = 0;
-    for (let i = 0; i < gwVadData.length; i++) { const v = (gwVadData[i] - 128) / 128; sum += v * v; }
-    const rms = Math.sqrt(sum / gwVadData.length);
-    if (rms > gwVadFloor * GW_VAD_RATIO) { gwVadAboveMs += dt; gwVadBelowMs = 0; }
-    else { gwVadBelowMs += dt; gwVadAboveMs = 0; gwVadFloor += (rms - gwVadFloor) * 0.02; }
-    if (!gwVadSpeaking && gwVadAboveMs >= GW_VAD_ON_MS) {
-      gwVadSpeaking = true;
-      if (document.body.dataset.jstate === 'speaking') bargeIn();
-    } else if (gwVadSpeaking && gwVadBelowMs >= GW_VAD_OFF_MS) {
-      gwVadSpeaking = false;
-    }
-  }
+  // ── Interrupting Jarvis (2026-07-26) ────────────────────────────────────────
+  // This page had NO way to stop him mid-sentence: muting only silenced FUTURE
+  // replies, and the mic never reopened until he finished (scheduleRelisten is
+  // called only from speak's onend). The Command Deck has had a STOP bar and an
+  // Escape binding for days; the Gateway never got them.
+  //
+  // Deliberately NOT acoustic. A mic-tap energy VAD was tried and reverted the
+  // same day: echo cancellation attenuates the mic hardest during double-talk
+  // (exactly when barge-in must fire), on iOS a second getUserMedia
+  // permanently mutes the first (WebKit #179363) which SpeechRecognition would
+  // trigger, and pausing audio while recognition runs can kill it with no
+  // error event — so one false positive could leave the ear deaf with no way
+  // to notice. These two routes carry none of that risk and always work.
   let bargeCancel = false; // cancel() fires the utterance's onerror asynchronously, not onend —
-                            // this flag lets that handler tell "user cut him off" apart from a real error
+                           // this flag lets that handler tell "user cut him off" from a real error
   function bargeIn() {
+    if (document.body.dataset.jstate !== 'speaking' && !speechSynthesis.speaking) return false;
     bargeCancel = true;
     speechSynthesis.cancel();
+    setJState('idle');
+    hint.textContent = '';
+    if (conversationMode && !listening) scheduleRelisten();
+    return true;
   }
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') bargeIn(); });
+
+  const stopBar = document.createElement('div');
+  stopBar.textContent = '◼ STOP — tap or press Esc';
+  stopBar.style.cssText = 'position:fixed;bottom:76px;left:50%;transform:translateX(-50%);z-index:60;display:none;' +
+    'padding:10px 20px;border:1px solid #ff4d6a;border-radius:8px;color:#ff4d6a;background:rgba(20,4,10,.9);' +
+    'font:inherit;font-size:13px;letter-spacing:1px;cursor:pointer;user-select:none';
+  stopBar.onclick = bargeIn;
+  document.body.appendChild(stopBar);
+  setInterval(() => {
+    stopBar.style.display = (document.body.dataset.jstate === 'speaking' || speechSynthesis.speaking) ? 'block' : 'none';
+  }, 300);
 
   function speak(text) {
     if (muted || !text || !('speechSynthesis' in window)) return;
+    // Every new utterance starts with a clean flag. Without this, a bargeIn()
+    // or mute that fired when nothing was actually speaking leaves bargeCancel
+    // stuck true, and the next GENUINE voice error gets silently swallowed as
+    // if it were a deliberate interrupt. Bounds staleness to one utterance.
+    bargeCancel = false;
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 1.0; u.pitch = 0.85; u.volume = 1; // measured, slightly deep — closest browser TTS gets to a Jarvis timbre

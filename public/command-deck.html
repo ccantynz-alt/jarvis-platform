@@ -881,7 +881,7 @@ const SR_LANG = qs.get('lang') || localStorage.getItem('jarvis_lang') || 'en-NZ'
 let voiceMode = (qs.get('voice') === '0' || !SRCls) ? 'off'
   : (['wake', 'live', 'off'].includes(localStorage.getItem('jarvis_voice')) ? localStorage.getItem('jarvis_voice') : 'wake');
 let armed = false; // browsers require one user gesture before mic/audio work
-let stream = null, analyser = null, audioData = null, vadData = null; // mic level → listening halo (+ VAD)
+let stream = null, analyser = null, audioData = null; // mic level → listening halo
 let outAnalyser = null, outData = null;               // his own voice → speaking pulse
 let rec = null, listening = false, relistenTimer = null;
 let recGen = 0;        // stale-recognizer guard: old sessions can't double-start
@@ -906,62 +906,21 @@ function armVoice() {
 async function attachAnalyser() { // mic level visualization — best effort
   if (analyser) return;
   try {
-    // echoCancellation/noiseSuppression (2026-07-26): the real fix for speaker
-    // bleed — without it, the mic picks up Jarvis's own voice and any VAD or
-    // heuristic built on top of this stream is fighting an unfiltered signal.
+    // echoCancellation/noiseSuppression (2026-07-26): reduces Jarvis's own
+    // voice bleeding from the speaker back into the mic, which is what makes
+    // the wake-word barge-in below misfire. autoGainControl is deliberately
+    // OFF: its own internal VAD raises gain into silence when it misjudges a
+    // gap, which amplifies exactly the residual echo we're trying to suppress.
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
     });
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     const src = ctx.createMediaStreamSource(stream);
     analyser = ctx.createAnalyser(); analyser.fftSize = 256;
     src.connect(analyser);
     audioData = new Uint8Array(analyser.frequencyBinCount);
-    vadData = new Uint8Array(analyser.fftSize);
-    startVad();
   } catch { /* SR may still work; iOS grants it its own capture */ }
 }
-
-// ── Barge-in VAD (2026-07-26) ────────────────────────────────────────────────
-// Real "talk over him and he stops," independent of SpeechRecognition — which
-// iOS refuses to run while audio is playing, the reason voice barge-in never
-// worked on iPad/iPhone before this. Runs off the SAME mic tap as the
-// listening halo above, continuously, regardless of speaking state; the
-// echoCancellation constraint above is what keeps his own voice from tripping
-// it. This is a plain energy detector — it doesn't know what was said, only
-// that a human is talking RIGHT NOW — so it only ever calls interruptSpeech(),
-// which stops playback and reopens the real ear (SpeechRecognition) to catch
-// the actual words once nothing is competing with it anymore.
-// NOT verified on real iOS hardware — getUserMedia capture is architecturally
-// separate from SpeechRecognition/speechSynthesis (different subsystems), so
-// it should keep delivering samples during playback, but Craig needs to
-// confirm this actually holds on his iPad/iPhone. VAD_RATIO/VAD_ON_MS below
-// are a starting point — tune them against his real rooms/devices.
-let vadFloor = 0.02, vadAboveMs = 0, vadBelowMs = 0, vadSpeaking = false, vadTimer = null, vadLastT = 0;
-const VAD_ON_MS = 140;   // sustained energy above floor before it counts as real speech
-const VAD_OFF_MS = 300;  // sustained quiet before VAD resets to "not speaking"
-const VAD_RATIO = 2.2;   // energy must exceed the adaptive noise floor by this multiple
-function vadTick() {
-  const now = performance.now();
-  const dt = vadLastT ? Math.min(250, now - vadLastT) : 100;
-  vadLastT = now;
-  if (!analyser || !vadData || voiceMode === 'off') return;
-  analyser.getByteTimeDomainData(vadData);
-  let sum = 0;
-  for (let i = 0; i < vadData.length; i++) { const v = (vadData[i] - 128) / 128; sum += v * v; }
-  const rms = Math.sqrt(sum / vadData.length);
-  if (rms > vadFloor * VAD_RATIO) { vadAboveMs += dt; vadBelowMs = 0; }
-  else { vadBelowMs += dt; vadAboveMs = 0; vadFloor += (rms - vadFloor) * 0.02; } // adapt floor only in quiet
-  if (!vadSpeaking && vadAboveMs >= VAD_ON_MS) {
-    vadSpeaking = true;
-    // Rising edge only — fires interruptSpeech() once per speech segment, not
-    // continuously for as long as the human keeps talking.
-    if (S.speaking || speechActive || S.thinking || streamEl) interruptSpeech();
-  } else if (vadSpeaking && vadBelowMs >= VAD_OFF_MS) {
-    vadSpeaking = false;
-  }
-}
-function startVad() { if (!vadTimer) vadTimer = setInterval(vadTick, 100); }
 
 function attachOutputAnalyser() {
   // Route the neural voice through an analyser so the core pulses to the REAL
