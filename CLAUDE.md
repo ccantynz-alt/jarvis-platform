@@ -90,9 +90,15 @@ wrong (never touch/delete this file on the strength of that claim). Uses
 **The brain runs on Craig's claude.ai SUBSCRIPTIONS, not metered APIs
 (2026-07-19).** Provider `claude` = a persistent Claude Agent SDK session
 (src/lib/brain-claude.js) billed to the subscription login; `BRAIN_PROVIDER=auto`
-always prefers it. Model tiers: everyday **Sonnet 5**, voice-switchable to
-Opus/Fable ("switch model to Fable"), with an automatic one-turn escalation
-retry when a tier struggles. Tools + persona live in src/lib/brain-tools.js —
+always prefers it. **Model tiers (Craig's ruling 2026-07-26): Opus 5 and Fable
+5 ONLY** — everyday **Opus 5**, with Fable 5 as the voice-selectable heavy tier
+("switch model to Fable") and the automatic one-turn escalation when a turn
+fails for a non-limit reason. Sonnet is no longer a tier (a stale
+`brain-claude-model` KV naming it is ignored and falls back to Opus 5), and
+the previous-generation `claude-opus-4-8` is retired. Note the interaction
+with the subscription-only rule below: heavy tiers burn the usage windows
+faster and there is no metered fallback, so two-account failover
+(claude-auth.js) + the total-outage alert are what keep that safe. Tools + persona live in src/lib/brain-tools.js —
 ONE surface shared by every provider.
 
 **SUBSCRIPTION-ONLY — metered APIs are OFF by default (Craig's ruling,

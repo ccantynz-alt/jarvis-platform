@@ -27,12 +27,22 @@ import {
   classifyFailure, reportExhausted, reportAuthFailure,
 } from './claude-auth.js';
 
-// Model tiers (Craig's ruling 2026-07-19): Sonnet 5 is the everyday brain —
-// fast and light on subscription usage limits. Opus/Fable are the heavy tiers:
-// voice-selectable ("switch model to Fable") and used automatically for ONE
-// retry when the current tier's turn fails for a non-limit reason.
-const TIERS = ['claude-sonnet-5', 'claude-opus-4-8', 'claude-fable-5'];
-const TIER_LABEL = { 'claude-sonnet-5': 'Sonnet 5', 'claude-opus-4-8': 'Opus', 'claude-fable-5': 'Fable 5' };
+// Model tiers (Craig's ruling 2026-07-26, superseding 2026-07-19's
+// Sonnet-everyday setup): **Opus 5 and Fable only.** Jarvis runs the smartest
+// tiers available — he's making business calls, not answering trivia. Opus 5
+// is the everyday brain; Fable 5 is the escalation for ONE retry when a turn
+// fails for a non-limit reason, and is voice-selectable ("switch model to
+// Fable"). Sonnet is deliberately no longer a tier: a stale KV value naming
+// it is ignored by the TIERS.includes() guard below and falls back to Opus 5.
+// This also retires 'claude-opus-4-8', which was a previous-generation Opus.
+//
+// Tradeoff Craig has accepted: heavier tiers consume the claude.ai
+// subscription's usage windows faster, and since 2026-07-26 there is no
+// metered fallback — so both accounts limiting out means degrading to the
+// keyword pipeline rather than quietly billing an API. claude-auth.js's
+// two-account failover plus the total-outage alert are what make that safe.
+const TIERS = ['claude-opus-5', 'claude-fable-5'];
+const TIER_LABEL = { 'claude-opus-5': 'Opus 5', 'claude-fable-5': 'Fable 5' };
 const MODEL_KEY = 'brain-claude-model';
 let modelChoice = null; // voice-selected tier, persisted in memory KV
 (async () => { // restore across restarts (best effort)
@@ -41,13 +51,17 @@ let modelChoice = null; // voice-selected tier, persisted in memory KV
     if (TIERS.includes(r?.value)) modelChoice = r.value;
   } catch { /* KV empty or memory down */ }
 })();
-const MODEL = () => modelChoice || process.env.BRAIN_CLAUDE_MODEL || 'claude-sonnet-5';
+const MODEL = () => modelChoice || process.env.BRAIN_CLAUDE_MODEL || 'claude-opus-5';
 const nextTierUp = (m) => TIERS[Math.min(TIERS.indexOf(m) + 1, TIERS.length - 1)];
 
-/** Voice/model selection: accepts sonnet/opus/fable, returns spoken label. */
+/** Voice/model selection: accepts opus/fable, returns spoken label. */
 export async function setBrainModel(word) {
-  const model = /fable/i.test(word) ? 'claude-fable-5' : /opus/i.test(word) ? 'claude-opus-4-8'
-    : /sonnet/i.test(word) ? 'claude-sonnet-5' : null;
+  // "switch model to sonnet" now resolves to Opus 5 rather than returning
+  // null — null would make maybeBrainSwitch fall through and answer with a
+  // confusing non-sequitur. Opus 5 IS the everyday tier now, so honouring the
+  // intent ("give me the lighter/default brain") is the truthful answer.
+  const model = /fable/i.test(word) ? 'claude-fable-5'
+    : /opus|sonnet/i.test(word) ? 'claude-opus-5' : null;
   if (!model) return null;
   modelChoice = model;
   fetch('http://127.0.0.1:9200/memory/kv', {
