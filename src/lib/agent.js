@@ -214,6 +214,21 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
       transcript.splice(before); // undo any partial turns before retrying/bailing
     }
   }
+  // 2026-07-26 fix: a TOTAL outage (every provider failed) used to throw with
+  // no notify() at all — the per-provider failover notice above only fires
+  // when switching TO a working provider, so this path was silent. The
+  // caller's own catch (deck-server.js/gateway-server.js) degrades to the
+  // keyword-intent pipeline and shows a one-shot in-session notice, but that
+  // only reaches whoever is on THAT exact live connection at THAT moment, and
+  // never durably records the outage or reaches Slack/the inbox. Confirmed
+  // this gap is real: a 2026-07-25 incident (claude session stalling +
+  // simultaneous OpenAI 429) hit exactly this path with zero durable alert.
+  await notify({
+    source: 'brain', level: 'alert',
+    title: 'Brain fully down — every provider failed',
+    body: `All configured brain providers failed this turn (last error: ${(lastErr && lastErr.message) || 'unknown'}). Falling back to basic keyword mode until a provider recovers.`,
+    speech: 'Sir, my reasoning brain is completely unavailable right now — every provider failed. Running in basic mode.',
+  }).catch(() => {});
   throw lastErr || new Error('agent unavailable: no usable brain provider');
 }
 
