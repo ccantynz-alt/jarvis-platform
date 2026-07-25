@@ -64,26 +64,62 @@ const FALLBACK_TIMEOUT_MS = 45_000;
 // 'claude' = subscription Agent SDK session (no API key — keyFor returns a
 // truthy sentinel when a login exists). The rest are metered APIs.
 const PROVIDERS = ['claude', 'openai', 'anthropic', 'gemini'];
+const METERED   = new Set(['openai', 'anthropic', 'gemini']);
+
+// SUBSCRIPTION-ONLY BY DEFAULT (Craig's ruling, 2026-07-26: "sometimes we
+// can't get an eye on API fallback so probably best not to have it").
+//
+// This is not theoretical tidiness — it was actively costing money silently.
+// On 2026-07-25 at 20:53 the Claude session stalled, the failover loop walked
+// the chain, and landed on 'anthropic'. Because a successful failover is made
+// STICKY (persisted to KV 'brain-provider'), the brain stayed on the metered
+// Anthropic API from then on, with no ongoing signal that it had left the
+// subscription. secrets.env also had BRAIN_PROVIDER=gemini, so a KV wipe would
+// have silently pinned it to a different metered API instead. Two separate
+// paths onto un-watched metered billing, neither visible day-to-day.
+//
+// With metered off: the ONLY brain is the claude.ai subscription (both of
+// Craig's logins, via claude-auth.js two-account failover). When both accounts
+// are limited, runAgent throws, the caller degrades to the keyword-intent
+// pipeline, and the total-outage notify() fires — loud and free, instead of
+// quiet and metered. Set BRAIN_ALLOW_METERED=1 to restore the old chain.
+const meteredAllowed = () => process.env.BRAIN_ALLOW_METERED === '1';
+const usable = (p) => !METERED.has(p) || meteredAllowed();
+
 const openaiKey    = () => process.env.OPENAI_API_KEY || null;
 const anthropicKey = () => process.env.ANTHROPIC_API_KEY || null;
 const geminiKey    = () => process.env.GEMINI_API_KEY || null;
-const keyFor = (p) => p === 'claude' ? (hasClaudeBrain() ? 'subscription' : null)
+// A metered provider with a perfectly good key still reports "no key" while
+// metered use is off — this is what keeps it out of runAgent's failover loop
+// and out of hasAgent()/maybeBrainSwitch, in one place.
+const keyFor = (p) => !usable(p) ? null
+  : p === 'claude' ? (hasClaudeBrain() ? 'subscription' : null)
   : p === 'openai' ? openaiKey() : p === 'anthropic' ? anthropicKey() : geminiKey();
 
 let brainProvider = null; // resolved/switched provider name
 (async () => { // restore last voice-switched choice across restarts (best effort)
   try {
     const r = await fetch(`${MEMORY}/memory/kv/brain-provider`).then(r => r.json());
-    if (PROVIDERS.includes(r?.value)) brainProvider = r.value;
+    // A stale KV value naming a now-disallowed metered provider must not
+    // resurrect it (this is exactly how 'anthropic' survived the 07-25 outage).
+    if (PROVIDERS.includes(r?.value) && usable(r.value)) brainProvider = r.value;
   } catch { /* KV empty or memory down — env/auto rules apply */ }
 })();
 
 export function getBrainProvider() {
-  if (brainProvider) return brainProvider;
+  if (brainProvider && usable(brainProvider)) return brainProvider;
   const pref = (process.env.BRAIN_PROVIDER || 'auto').toLowerCase();
-  if (PROVIDERS.includes(pref)) return (brainProvider = pref);
-  return (brainProvider = hasClaudeBrain() ? 'claude'
-    : openaiKey() ? 'openai' : anthropicKey() ? 'anthropic' : 'gemini');
+  if (PROVIDERS.includes(pref) && usable(pref)) return (brainProvider = pref);
+  if (PROVIDERS.includes(pref) && !usable(pref)) {
+    console.warn(`[agent] BRAIN_PROVIDER=${pref} is a metered API and BRAIN_ALLOW_METERED is not set — using the Claude subscription instead.`);
+  }
+  if (hasClaudeBrain()) return (brainProvider = 'claude');
+  // No subscription login. With metered off there is deliberately nothing to
+  // fall back to — resolve to 'claude' anyway so hasAgent() (which asks
+  // keyFor) reports false and the caller uses the keyword pipeline, rather
+  // than naming a provider we've decided not to bill.
+  if (!meteredAllowed()) return (brainProvider = 'claude');
+  return (brainProvider = openaiKey() ? 'openai' : anthropicKey() ? 'anthropic' : 'gemini');
 }
 
 // Pre-warm the subscription brain at service boot so the first voice turn has
@@ -132,9 +168,13 @@ export async function maybeBrainSwitch(text) {
   const label = want === 'openai' ? 'GPT' : want === 'gemini' ? 'Gemini' : 'Claude';
   const vendor = want === 'openai' ? 'OpenAI' : want === 'gemini' ? 'Google' : 'Anthropic';
   if (!keyFor(want)) {
-    return want === 'claude'
-      ? "I can't switch to Claude, sir — no subscription login is set up on this box."
-      : `I can't switch to ${label}, sir — no ${vendor} API key is configured on this box.`;
+    if (want === 'claude') return "I can't switch to Claude, sir — no subscription login is set up on this box.";
+    // Don't claim "no API key" when the key exists and we've simply chosen not
+    // to bill it — that would send Craig hunting for a key that's already there.
+    if (METERED.has(want) && !meteredAllowed()) {
+      return `Metered APIs are switched off, sir — I run on your Claude subscriptions only, so there's no unwatched ${vendor} spend. Set BRAIN_ALLOW_METERED to one on the box if you want ${label} back.`;
+    }
+    return `I can't switch to ${label}, sir — no ${vendor} API key is configured on this box.`;
   }
   brainProvider = want;
   try {
