@@ -131,6 +131,28 @@ export async function runOnce() {
   try { summary = await memSummary(); } catch (e) { log(`memory unreachable: ${e.message}`); return; }
   const registry = loadPlatforms();
   const down = (summary.platforms || []).filter(p => p.status === 'error' && registry[p.name]);
+  const downNames = new Set(down.map(p => p.name));
+
+  // Clear state for platforms that recovered (so counters/firstDown reset
+  // cleanly). MUST run before the "all healthy" early-return below, not just
+  // at the bottom of this function — that return used to skip this loop
+  // entirely, so a stale `firstDown` set by one flaky probe would survive
+  // silently through every subsequent "all probed platforms healthy" tick
+  // (which never re-reaches the bottom of the function), then resurface the
+  // next time a single transient blip flagged the platform again, computed
+  // against the ancient timestamp — dispatching a repair agent for a site
+  // "down 505m" (or 9709m, 720m, 275m, 445m — the actual log history) when
+  // it had really been up the whole time. This is the root cause of the
+  // repeated false "website down" self-heal dispatches against vapron.
+  for (const name of Object.keys(registry)) {
+    if (downNames.has(name)) continue;
+    const f = join(STATE_DIR, `${name}.json`);
+    if (existsSync(f)) {
+      const s = stateOf(name);
+      if (s.firstDown) { log(`${name}: recovered — clearing self-heal state`); }
+      saveState(name, { firstDown: null, lastAttempt: s.lastAttempt, day: today(), attemptsToday: s.attemptsToday });
+    }
+  }
 
   if (!down.length) { log('all probed platforms healthy'); return; }
   const jobs = await fetchJobs();
@@ -205,18 +227,6 @@ export async function runOnce() {
       else { log(`${name}: repair job ${res.jobId} dispatched`); s.lastAttempt = now(); s.attemptsToday += 1; concurrent += 1; }
     } catch (e) { log(`${name}: dispatch threw: ${e.message}`); }
     saveState(name, s);
-  }
-
-  // Clear state for platforms that recovered (so counters reset cleanly).
-  const downNames = new Set(down.map(p => p.name));
-  for (const name of Object.keys(registry)) {
-    if (downNames.has(name)) continue;
-    const f = join(STATE_DIR, `${name}.json`);
-    if (existsSync(f)) {
-      const s = stateOf(name);
-      if (s.firstDown) { log(`${name}: recovered — clearing self-heal state`); }
-      saveState(name, { firstDown: null, lastAttempt: s.lastAttempt, day: today(), attemptsToday: s.attemptsToday });
-    }
   }
 }
 
