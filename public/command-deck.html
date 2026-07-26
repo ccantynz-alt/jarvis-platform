@@ -741,7 +741,8 @@ async function pumpSpeech() {
     try { await speakOnce(text); } catch { /* keep the queue moving */ }
   }
   speechActive = false;
-  scheduleRelisten(); // reopen the ear once the whole queue has drained
+  openFollowUpWindow(); // he just spoke to Craig — Craig's reply needs no wake word
+  scheduleRelisten();   // reopen the ear once the whole queue has drained
 }
 
 async function speakOnce(text) {
@@ -978,9 +979,21 @@ function startListening() {
   // voice / room noise can't fire commands but "Jarvis—" cuts him off.
   // iOS keeps the old closed-ear behaviour (one-shot recognition + speaker
   // bleed make open-mic barge-in unreliable there).
-  const speakingBlocks = IS_IOS && (S.speaking || speechActive);
+  // THE EAR IS SHUT WHILE JARVIS TALKS — on every platform (2026-07-26).
+  // The 2026-07-24 change kept the desktop mic open during speech to allow
+  // wake-word barge-in. The real transcript shows what that actually caused:
+  // his own speaker output was transcribed and sent back as Craig's input, so
+  // Jarvis spent whole exchanges answering himself ("that's my own answer
+  // coming back at me, sir"). Worse, Craig's genuine speech arrived FUSED with
+  // the echo in one utterance, and the 60% word-overlap filter then binned the
+  // whole thing — so his actual opinion was discarded as echo. An open mic
+  // pointed at a speaker cannot be fixed with a text-similarity heuristic;
+  // the only reliable cure is not to listen while talking.
+  // Voice barge-in is the acknowledged cost. It is replaced by three routes
+  // that always work: the STOP bar, Escape, and tapping the mic button.
+  const speakingBlocks = S.speaking || speechActive;
   if (!SRCls || listening || voiceMode === 'off' || !armed || speakingBlocks) return;
-  if (IS_IOS && Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return; // acoustic-tail cooldown (iOS only now)
+  if (Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return; // acoustic tail — all platforms
   if (qs.get('core')) return; // screenshot/QA state-forcing — no real mic
   const gen = ++recGen;
   rec = new SRCls();
@@ -1105,14 +1118,29 @@ function scheduleRelisten() {
   if (voiceMode === 'off' || !armed) return;
   clearTimeout(relistenTimer);
   const delay = Math.max(srBackoff, MIC_COOLDOWN_MS);
-  // Desktop: the ear may reopen even mid-speech (barge-in); iOS waits.
-  relistenTimer = setTimeout(() => { if (!listening && (!IS_IOS || (!S.speaking && !speechActive))) startListening(); }, delay);
+  // Never reopen mid-speech on any platform — see startListening's note.
+  relistenTimer = setTimeout(() => { if (!listening && !S.speaking && !speechActive) startListening(); }, delay);
+}
+
+// CONVERSATION FOLLOW-UP WINDOW (2026-07-26). Craig: "I can't talk back to
+// give my opinion." In wake mode every single utterance needed the word
+// "Jarvis" in front of it — answering a question he'd just been asked showed
+// up as "HEARD (ignored)". Real conversation doesn't work that way: once
+// Jarvis has just spoken TO you, the next thing you say is obviously to him.
+// So the moment a reply finishes, any real utterance counts as the next turn
+// for this long, no wake word needed. handleUtterance consumes the window
+// one-shot; the next reply re-arms it, so a back-and-forth keeps flowing.
+const FOLLOWUP_MS = 25000;
+function openFollowUpWindow() {
+  if (voiceMode === 'off') return;
+  awaitingCommand = Date.now() + FOLLOWUP_MS;
+  updateOrbLabel();
 }
 
 // Chrome quietly kills long recognizer sessions; the watchdog reopens the ear.
 setInterval(() => {
-  const iosBlocked = IS_IOS && (S.speaking || speechActive);
-  if (armed && voiceMode !== 'off' && !listening && !iosBlocked && !document.hidden) startListening();
+  const speakingBlocks = S.speaking || speechActive; // never reopen mid-speech
+  if (armed && voiceMode !== 'off' && !listening && !speakingBlocks && !document.hidden) startListening();
 }, 3000);
 
 const MODE_LABEL = { wake: '👂 WAKE: “JARVIS…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };
@@ -1155,6 +1183,9 @@ function interruptSpeech() {
   // and silently block the immediate listen — that cooldown exists for the
   // acoustic tail of Jarvis finishing NATURALLY, not a manual cutoff.
   lastSpeechEndAt = 0;
+  // Cutting him off IS the start of a turn — whatever Craig says next is meant
+  // for Jarvis, so don't make him prefix it with the wake word.
+  openFollowUpWindow();
   if (armed) startListening();
   return true;
 }
@@ -1166,7 +1197,10 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') interruptS
 // ever have to ASK "how do I interrupt" (Craig did, three days running).
 const stopBar = document.createElement('div');
 stopBar.id = 'stop-bar';
-stopBar.textContent = '◼ STOP — tap, press Esc, or say "Jarvis"';
+// No longer offers 'say "Jarvis"': the mic is now shut while he speaks (see
+// startListening), so that route genuinely does not work any more. Promising
+// it would be a lie told at the exact moment Craig is trying to stop him.
+stopBar.textContent = '◼ STOP — tap or press Esc';
 stopBar.style.cssText = 'position:fixed;bottom:84px;left:50%;transform:translateX(-50%);z-index:60;display:none;' +
   'padding:10px 22px;border:1px solid #ff4d6a;border-radius:8px;color:#ff4d6a;background:rgba(20,4,10,.85);' +
   'font-family:inherit;font-size:13px;letter-spacing:1px;cursor:pointer;user-select:none';
@@ -1782,7 +1816,7 @@ function v2AudioCtl(ev) {
       v2Pump();
     }, { once: true });
     jarvisAudio.onplay = () => { S.speaking = true; updateOrbLabel(); };
-    jarvisAudio.onended = jarvisAudio.onerror = () => { v2Teardown(); scheduleRelisten(); };
+    jarvisAudio.onended = jarvisAudio.onerror = () => { v2Teardown(); openFollowUpWindow(); scheduleRelisten(); };
     jarvisAudio.play().catch(() => {}); // needs the usual first-tap gesture priming
   } else if (ev === 'end') {
     if (v2) { v2.ended = true; v2Pump(); }
