@@ -11,7 +11,8 @@ logs/*.log
 visual-baselines/
 deploy-gate-workspace/
 backups/
-config/secrets.env.bak.*
+config/secrets.env.bak*
+config/*.env.bak*
 *.bak.*
 config/deck.token
 config/deck.env
