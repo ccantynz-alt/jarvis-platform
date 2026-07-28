@@ -223,6 +223,7 @@
     if (document.body.dataset.jstate !== 'speaking' && !speechSynthesis.speaking) return false;
     bargeCancel = true;
     speechSynthesis.cancel();
+    markSpeechEnded(); // a cut-off utterance still leaves sound in the room
     setJState('idle');
     hint.textContent = '';
     if (conversationMode && !listening) scheduleRelisten();
@@ -248,6 +249,7 @@
     // stuck true, and the next GENUINE voice error gets silently swallowed as
     // if it were a deliberate interrupt. Bounds staleness to one utterance.
     bargeCancel = false;
+    lastSpokenText = text; // compared against the next utterance to catch speaker bleed
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 1.0; u.pitch = 0.85; u.volume = 1; // measured, slightly deep — closest browser TTS gets to a Jarvis timbre
@@ -260,8 +262,9 @@
       || voiceCache.find(v => /en[-_](AU|NZ)/i.test(v.lang))
       || voiceCache.find(v => /^en/i.test(v.lang)) || null;
     u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
-    u.onend = () => { setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; if (conversationMode) scheduleRelisten(); };
+    u.onend = () => { markSpeechEnded(); setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; if (conversationMode) scheduleRelisten(); };
     u.onerror = (e) => {
+      markSpeechEnded();
       setJState('idle');
       if (bargeCancel) { bargeCancel = false; hint.textContent = ''; if (conversationMode && !listening) scheduleRelisten(); return; }
       hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`;
@@ -342,8 +345,50 @@
   const micBtn = $('micBtn'), convBtn = $('convBtn');
   let conversationMode = false, rec = null, listening = false, relistenTimer = null;
 
-  function startListening() {
+  // ── Echo guard (2026-07-28) ─────────────────────────────────────────────────
+  // Craig: "its continuous breaking, echoing and looping". The Command Deck was
+  // hardened against this on 2026-07-26; the Gateway — the interface he
+  // actually talks to — never got any of it. Same gap as the transcript.
+  //
+  // The Gateway's ear is already shut while Jarvis talks (one-shot recognition,
+  // reopened only from speak's onend), so the exposure is narrower than the
+  // deck's was: it's the ACOUSTIC TAIL. speechSynthesis fires onend when it
+  // believes it has finished, but speaker reverb and Bluetooth latency mean
+  // sound is still in the room — the mic reopened 400ms later and transcribed
+  // the last words of Jarvis's own reply as Craig's next utterance, which went
+  // straight to the brain and started the loop.
+  //
+  // Two backstops, deliberately conservative, because the 2026-07-26 transcript
+  // showed the OPPOSITE failure too: Craig's real speech arrived FUSED with the
+  // echo in one utterance and a 60% word-overlap filter binned the whole thing,
+  // discarding his actual opinion. So this only discards an utterance that is
+  // OVERWHELMINGLY his own words (80%) and arrives inside the tail window.
+  // Anything else gets through, even if it carries some echo.
+  const MIC_COOLDOWN_MS = 600;   // matches the deck
+  const ECHO_WINDOW_MS  = 2500;  // beyond this, treat speech as genuinely Craig's
+  const ECHO_RATIO      = 0.8;   // deck uses 0.6 with an open mic; ours is a tail-only backstop
+  let lastSpeechEndAt = 0, lastSpokenText = '';
+
+  function markSpeechEnded() { lastSpeechEndAt = Date.now(); }
+
+  function isSelfEcho(said) {
+    if (!lastSpokenText) return false;
+    if (Date.now() - lastSpeechEndAt > ECHO_WINDOW_MS) return false;
+    const spoken = lastSpokenText.toLowerCase();
+    const words = said.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    if (!words.length) return false;
+    return words.filter(w => spoken.includes(w)).length / words.length >= ECHO_RATIO;
+  }
+
+  // userGesture=true means Craig tapped the mic or turned on hands-free — that
+  // is a deliberate barge-in and always wins. An automatic relisten must never
+  // cut Jarvis off or open the mic into his own voice.
+  function startListening(userGesture = false) {
     if (!SR || listening) return;
+    if (!userGesture) {
+      if (document.body.dataset.jstate === 'speaking' || speechSynthesis.speaking) return;
+      if (Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return scheduleRelisten();
+    }
     speechSynthesis.cancel();
     rec = new SR();
     rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
@@ -362,7 +407,13 @@
     rec.onend = () => {
       listening = false; micBtn.classList.remove('listening'); setJState('idle');
       const said = finalText.trim();
-      if (said) { hint.textContent = ''; send(said); } // relisten happens after Jarvis replies (speak.onend)
+      if (said && isSelfEcho(said)) {
+        // His own voice off the speaker tail. Drop it silently and reopen the
+        // ear — never send it to the brain, which is how the loop started.
+        hint.textContent = '';
+        if (conversationMode) scheduleRelisten();
+      }
+      else if (said) { hint.textContent = ''; send(said); } // relisten happens after Jarvis replies (speak.onend)
       else if (conversationMode) { hint.textContent = 'say something…'; scheduleRelisten(); }
       else if (!hint.textContent.startsWith('⚠')) hint.textContent = '';
     };
@@ -370,16 +421,19 @@
   }
 
   // Re-open the mic a beat after Jarvis stops talking (called from speak.onend).
+  // The wait is now at least the acoustic-tail cooldown, not a flat 400ms —
+  // reopening before the room goes quiet is what fed his own voice back in.
   function scheduleRelisten() {
     if (!conversationMode) return;
     clearTimeout(relistenTimer);
-    relistenTimer = setTimeout(() => { if (conversationMode && !listening) startListening(); }, 400);
+    const wait = Math.max(400, MIC_COOLDOWN_MS - (Date.now() - lastSpeechEndAt));
+    relistenTimer = setTimeout(() => { if (conversationMode && !listening) startListening(false); }, wait);
   }
 
   function setConversation(on) {
     conversationMode = on;
     convBtn.classList.toggle('active', on);
-    if (on) { primeTTS(); hint.textContent = 'hands-free on — tap 💬 to stop'; if (!listening) startListening(); }
+    if (on) { primeTTS(); hint.textContent = 'hands-free on — tap 💬 to stop'; if (!listening) startListening(true); }
     else { clearTimeout(relistenTimer); hint.textContent = ''; if (listening) rec?.stop(); }
   }
 
@@ -389,7 +443,7 @@
       ? 'Voice not supported in this browser — use the text box'
       : '⚠ Voice needs the https ts.net address, not http';
   } else {
-    micBtn.onclick = () => { primeTTS(); if (listening) rec?.stop(); else startListening(); };
+    micBtn.onclick = () => { primeTTS(); if (listening) rec?.stop(); else startListening(true); };
     convBtn.onclick = () => setConversation(!conversationMode);
   }
 
