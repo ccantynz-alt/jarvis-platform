@@ -366,18 +366,42 @@
   // Anything else gets through, even if it carries some echo.
   const MIC_COOLDOWN_MS = 600;   // matches the deck
   const ECHO_WINDOW_MS  = 2500;  // beyond this, treat speech as genuinely Craig's
-  const ECHO_RATIO      = 0.8;   // deck uses 0.6 with an open mic; ours is a tail-only backstop
+  const ECHO_RATIO      = 0.8;
+  const ECHO_MIN_WORDS  = 4;     // below this, ALWAYS send — see below
   let lastSpeechEndAt = 0, lastSpokenText = '';
 
   function markSpeechEnded() { lastSpeechEndAt = Date.now(); }
 
+  const echoWords = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+
+  // A real echo is Jarvis's own words, in Jarvis's own order. That is the test
+  // — NOT bag-of-words overlap.
+  //
+  // The first version of this used `spoken.includes(word)` over the whole
+  // reply, which is a SUBSTRING check: "rest" matched "restarted", "the"
+  // matched "there". With no minimum length, a short command built from common
+  // words scored 100% and was dropped in silence. "and the rest" never reached
+  // the brain. Craig, 2026-07-28: "its listening now and not talking back i
+  // dont know if its working." A filter that can silently eat real speech is
+  // worse than the echo it prevents.
+  //
+  // Two changes make it safe: whole-word comparison against a CONTIGUOUS run
+  // of the reply (coincidental overlap doesn't line up in order), and a hard
+  // floor — anything under ECHO_MIN_WORDS is always sent, because "yes",
+  // "stop" and "do it" must never be swallowed.
   function isSelfEcho(said) {
     if (!lastSpokenText) return false;
     if (Date.now() - lastSpeechEndAt > ECHO_WINDOW_MS) return false;
-    const spoken = lastSpokenText.toLowerCase();
-    const words = said.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-    if (!words.length) return false;
-    return words.filter(w => spoken.includes(w)).length / words.length >= ECHO_RATIO;
+    const heard = echoWords(said);
+    const spoken = echoWords(lastSpokenText);
+    if (heard.length < ECHO_MIN_WORDS || !spoken.length) return false;
+    let best = 0;
+    for (let i = 0; i < spoken.length; i++) {
+      let hits = 0;
+      for (let j = 0; j < heard.length; j++) if (spoken[i + j] === heard[j]) hits++;
+      if (hits > best) best = hits;
+    }
+    return best / heard.length >= ECHO_RATIO;
   }
 
   // userGesture=true means Craig tapped the mic or turned on hands-free — that
@@ -408,9 +432,13 @@
       listening = false; micBtn.classList.remove('listening'); setJState('idle');
       const said = finalText.trim();
       if (said && isSelfEcho(said)) {
-        // His own voice off the speaker tail. Drop it silently and reopen the
-        // ear — never send it to the brain, which is how the loop started.
-        hint.textContent = '';
+        // His own voice off the speaker tail — never send it to the brain,
+        // that is how the loop started. But SAY SO: a silent drop is
+        // indistinguishable from Jarvis being broken, which is exactly how the
+        // first version of this filter cost an evening. If Craig sees this
+        // line when he actually spoke, the filter is wrong and he can tell.
+        console.warn('[voice] ignored as self-echo:', said);
+        hint.textContent = '🔇 ignored an echo of my own reply — say again if that was you';
         if (conversationMode) scheduleRelisten();
       }
       else if (said) { hint.textContent = ''; send(said); } // relisten happens after Jarvis replies (speak.onend)

@@ -28,6 +28,8 @@ function extract(re, label) {
 const src = [
   extract(/const ECHO_WINDOW_MS\s+=\s+\d+;/, 'ECHO_WINDOW_MS'),
   extract(/const ECHO_RATIO\s+=\s+[\d.]+;/, 'ECHO_RATIO'),
+  extract(/const ECHO_MIN_WORDS\s+=\s+\d+;/, 'ECHO_MIN_WORDS'),
+  extract(/const echoWords = [^\n]+;/, 'echoWords'),
   extract(/function isSelfEcho\(said\) \{[\s\S]*?\n  \}/, 'isSelfEcho'),
 ].join('\n');
 
@@ -68,8 +70,32 @@ test('nothing spoken yet means nothing can be an echo', () => {
   assert.equal(guard('health score is back to ninety four', ''), false);
 });
 
-test('short filler is not silently swallowed', () => {
-  // Words of 3 letters or fewer are ignored by the ratio, leaving no evidence.
-  // The guard must fall open (send it) rather than eat a real "yes"/"no".
-  assert.equal(guard('yes do it'), false);
+// ── The 2026-07-28 regression ───────────────────────────────────────────────
+// The first version compared with spoken.includes(word) — a SUBSTRING check
+// over the whole reply — and had no minimum length. Short commands built from
+// common words scored 100% and were dropped in silence. Craig: "its listening
+// now and not talking back i dont know if its working."
+
+const CHATTY = 'The Vapron deployment finished cleanly, sir, and the health score is back to ' +
+  'ninety four. I have also restarted the gateway and the deck.';
+
+test('a short command is NEVER swallowed, whatever he last said', () => {
+  for (const said of ['yes do it', 'stop', 'no not that one', 'and the rest', 'go on then']) {
+    assert.equal(guard(said, CHATTY), false, said);
+  }
+});
+
+test('substring collisions do not count — "rest" is not "restarted"', () => {
+  // Every word here appears somewhere inside CHATTY as a substring, which is
+  // what the broken version keyed on. In order, as whole words, they do not.
+  assert.equal(guard('and the rest of the score', CHATTY), false);
+});
+
+test('words must match in Jarvis own order, not just be present', () => {
+  // A genuine sentence reusing his vocabulary, scrambled — not an echo.
+  assert.equal(guard('deck gateway restarted the have I also', CHATTY), false);
+});
+
+test('a contiguous run of his reply IS caught', () => {
+  assert.equal(guard('I have also restarted the gateway and the deck', CHATTY), true);
 });
