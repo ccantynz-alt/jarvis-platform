@@ -423,9 +423,22 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   bypass all of this by design — mute never mutes answers. Tuning vars in
   secrets.env.example. If Slack floods again, find the caller posting
   with level=critical or a constantly-changing dedupe key.
-- **Memory hygiene:** `repair_log` and `agent_context` tables exist but are
-  empty — sessions skip the mid-session logging in the protocol below. The
-  memory is only as smart as what gets written to it.
+- **Memory hygiene:** `repair_log` is empty — sessions skip the mid-session
+  logging in the protocol below. The memory is only as smart as what gets
+  written to it. **Correction (2026-07-28): `agent_context` is NOT empty and
+  never was** — it is the physical table behind the whole `/memory/kv` API
+  (see memory-server.js: `GET/POST /memory/kv` read and write
+  `agent_context`), so it holds `brain-provider`, `jarvis-conversation`,
+  `claude-active-profile`, `claude_verified_version` and every other durable
+  bit of Jarvis state. Do not "clean up" this table.
+- **One conversation, all surfaces (2026-07-28):** the deck and the gateway
+  share ONE durable transcript via `src/lib/transcript.js`, memory KV key
+  `jarvis-conversation` (migrated from the deck's old `deck-conversation`).
+  Before this the gateway — **THE interface** — held conversation in a
+  per-WebSocket array, so a page reload, a device swap, or a service restart
+  silently wiped it. If Jarvis ever "forgets" again, check that key first.
+  The dispatch confirmation gate is deliberately NOT shared: a preview shown
+  on one surface must not be confirmable from another.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 

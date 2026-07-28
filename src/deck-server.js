@@ -39,6 +39,7 @@ import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
 import { openTtsStream } from './lib/tts-stream.js';
+import { loadTranscript, saveTranscript, recordFallbackTurn } from './lib/transcript.js';
 
 const PORT      = 9210;
 const SCHEDULER = 'http://127.0.0.1:9209';
@@ -664,30 +665,14 @@ const KEEPALIVE = setInterval(() => {
 }, 30000);
 wss.on('close', () => clearInterval(KEEPALIVE));
 
-// One rolling conversation shared across devices/reloads, persisted in memory
-// KV so Jarvis remembers context between sessions. runAgent() mutates and
-// bounds the array itself (last 24 messages).
-let sharedTranscript = null;
+// The one rolling conversation — now lib/transcript.js, shared with the
+// gateway so context follows Craig between surfaces instead of each server
+// keeping its own. runAgent() mutates and bounds the array itself.
 // Dispatch confirmation gate: `turn` counts human commands; a preview stamps
 // the turn it was shown in, and a dispatch only fires when confirmed in a LATER
-// turn (see agent.js dispatch_job). Shared like the transcript (single principal).
+// turn (see agent.js dispatch_job). Deliberately NOT shared with the gateway:
+// a preview shown on one surface must not be confirmable from another.
 const dispatchGate = { turn: 0, pending: null };
-async function loadTranscript() {
-  if (sharedTranscript) return sharedTranscript;
-  try {
-    const r = await fetch(`${MEMORY}/memory/kv/deck-conversation`).then(r => r.json());
-    const parsed = JSON.parse(r?.value || '[]');
-    sharedTranscript = Array.isArray(parsed) ? parsed : [];
-  } catch { sharedTranscript = []; }
-  return sharedTranscript;
-}
-function saveTranscript() {
-  if (!sharedTranscript) return;
-  fetch(`${MEMORY}/memory/kv`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key: 'deck-conversation', value: JSON.stringify(sharedTranscript) }),
-  }).catch(() => {});
-}
 
 wss.on('connection', (ws, req) => {
   const user = req.headers['tailscale-user-login'] || 'local';
@@ -808,15 +793,9 @@ wss.on('connection', (ws, req) => {
       // were organising"): when the brain failed, the splice above erased
       // the ENTIRE exchange — his message and the fallback answer were never
       // written to the durable transcript, so the very next brain turn had
-      // no record the conversation happened. Failed-brain turns now still
-      // land in memory as plain text, so continuity survives brain hiccups.
-      try {
-        const transcript = await loadTranscript();
-        transcript.push({ role: 'user', content: text });
-        transcript.push({ role: 'assistant', content: `[via basic pipeline while the main brain was unavailable] ${String(result?.text || fallbackReply).slice(0, 500)}` });
-        if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
-        saveTranscript();
-      } catch { /* recording is best-effort — never block the reply */ }
+      // no record the conversation happened. Now in lib/transcript.js so the
+      // gateway gets the same continuity instead of only the deck.
+      await recordFallbackTurn(text, result?.text || fallbackReply);
       send({ type: 'chat', text: fallbackReply });
     } catch (e) {
       console.error('[deck] command error:', e.message);

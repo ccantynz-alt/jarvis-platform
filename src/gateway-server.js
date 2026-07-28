@@ -40,6 +40,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, loadRoadmap } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { notify } from './lib/notify.js';
+import { loadTranscript, saveTranscript, recordFallbackTurn } from './lib/transcript.js';
 
 const PORT         = 9208;
 const ORCHESTRATOR = 'http://127.0.0.1:9205';
@@ -288,8 +289,12 @@ async function watchJob(jobId, platform) {
 wss.on('connection', (ws, req) => {
   const user = req.headers['tailscale-user-login'] || 'local';
   console.log(`[gateway] client connected (${user}) — ${wss.clients.size} online`);
-  const transcript = []; // per-connection conversational memory (agent brain)
-  const dispatchGate = { turn: 0, pending: null }; // dispatch confirmation gate (per connection)
+  // Conversational memory is NOT per-connection any more (2026-07-28). It was
+  // `const transcript = []` right here, which meant a page reload, a device
+  // swap, or a `systemctl restart jarvis-gateway` wiped the conversation on
+  // the interface Craig actually talks to. It now comes from lib/transcript.js
+  // — the same durable, KV-backed conversation the deck uses.
+  const dispatchGate = { turn: 0, pending: null }; // dispatch confirmation gate (per connection, deliberately)
 
   ws.send(JSON.stringify({ type: 'hello', platforms: platformNames() }));
 
@@ -345,10 +350,12 @@ wss.on('connection', (ws, req) => {
         // Claude per the brain provider) when an API key is configured;
         // otherwise fall back to the frozen keyword/Haiku intent pipeline.
         if (hasAgent()) {
+          const transcript = await loadTranscript();
           const before = transcript.length;
           try {
             const full = await runAgent(transcript, text, (chunk) =>
               ws.send(JSON.stringify({ type: 'reply_chunk', text: chunk })), dispatchGate);
+            saveTranscript();
             if (full.dispatched?.jobId) {
               watchJob(full.dispatched.jobId, full.dispatched.platform || 'auto');
             }
@@ -375,6 +382,11 @@ wss.on('connection', (ws, req) => {
         // Job-completion announcements for voice-dispatched work
         const onEvent = (m) => ws.send(JSON.stringify({ type: 'reply', text: m.text, speech: m.speech, interim: true }));
         const result = await runIntent(intent, text, onEvent, dispatchGate);
+        // Keep the exchange even though the brain couldn't serve it — the
+        // keyword pipeline has no memory of its own, so without this the next
+        // brain turn has no record the conversation happened (deck got this
+        // on 2026-07-24; the gateway had been missing it ever since).
+        await recordFallbackTurn(text, result?.text ?? '(no reply)');
         // dispatch/passthrough now only PREVIEW (gate runs them next turn), so
         // there's no jobId here to watch — the gate's dispatch handles watchJob.
         ws.send(JSON.stringify({
