@@ -101,6 +101,22 @@ faster and there is no metered fallback, so two-account failover
 (claude-auth.js) + the total-outage alert are what keep that safe. Tools + persona live in src/lib/brain-tools.js —
 ONE surface shared by every provider.
 
+**A model-ID change in code can outrun the `claude` binary on the box — check
+the CLI version whenever tiers move (2026-07-28).** Every Jarvis spawn sets
+`DISABLE_AUTOUPDATER=1` (spawn-agent.js, brain-claude.js) by design, so the
+CLI only moves when a human moves it. A binary that predates a tier rejects it
+with `There's an issue with the selected model (<id>). It may not exist or you
+may not have access to it.` Because metered fallback is off, ONE unknown model
+ID takes the whole brain down: Opus 5 rejected → escalate → Fable 5 rejected →
+runAgent finds no other provider → deck/gateway degrade to the keyword-intent
+pipeline for **every** turn. That reads to Craig as three separate faults —
+"it keeps breaking", "it has no memory" (the keyword pipeline has no
+conversational memory), "it keeps narrating problems" — from a single stale
+binary. `classifyFailure` now returns `kind:'model'` for this and
+`reportModelRejected()` names it out loud instead of letting it wear an
+outage's clothes. First check when the brain is dead across the board:
+`claude --version` on the box, then `claude --model claude-opus-5 --print hi`.
+
 **SUBSCRIPTION-ONLY — metered APIs are OFF by default (Craig's ruling,
 2026-07-26: "sometimes we can't get an eye on API fallback so probably best
 not to have it").** The metered providers (openai `gpt-5.1`, anthropic

@@ -24,7 +24,7 @@ import { z } from 'zod';
 import { TOOLS, runTool, systemPrompt, statusDigest } from './brain-tools.js';
 import {
   hasClaudeAuth, getActiveProfile, profileEnv,
-  classifyFailure, reportExhausted, reportAuthFailure,
+  classifyFailure, reportExhausted, reportAuthFailure, reportModelRejected,
 } from './claude-auth.js';
 
 // Model tiers (Craig's ruling 2026-07-26, superseding 2026-07-19's
@@ -320,8 +320,23 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
           if (next) continue;             // retry once on the other login
         } else if (cls.kind === 'auth') {
           await reportAuthFailure(s.profile, e.message);
+        } else if (cls.kind === 'model') {
+          // This box's `claude` binary doesn't know the tier we asked for.
+          // Escalating UP would hand the same stale binary a model it knows
+          // even less, so drop DOWN to the everyday tier for one retry and
+          // say out loud what's actually wrong (never a silent downgrade).
+          const rejected = cls.model || s.model;
+          await reportModelRejected(rejected, e.message);
+          if (modelChoice && rejected === modelChoice) {
+            await setBrainModel('opus'); // stop re-asking for a tier this box can't serve
+          }
+          if (s.model !== TIERS[0] && attempt === 0 && budgetLeft) {
+            escalateTo = TIERS[0];
+            console.warn(`[brain-claude] ${rejected} rejected — retrying on ${escalateTo}`);
+            continue;
+          }
         } else if (cls.kind === 'other' && attempt === 0 && budgetLeft && nextTierUp(s.model) !== s.model) {
-          escalateTo = nextTierUp(s.model); // Sonnet struggled → one retry on the bigger brain
+          escalateTo = nextTierUp(s.model); // this tier struggled → one retry on the bigger brain
           console.warn(`[brain-claude] escalating retry to ${escalateTo}`);
           continue;
         }

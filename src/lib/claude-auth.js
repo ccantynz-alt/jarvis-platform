@@ -92,6 +92,18 @@ const LIMIT_RE = /usage limit reached|usage[_ ]limit|5-hour limit|weekly limit|h
 const RESET_EPOCH_RE = /limit[^0-9]{0,40}\|?(\d{10,13})/i;   // legacy "…limit reached|<epoch>"
 const AUTH_RE = /not logged in|please run \/login|\/login/i;
 const AUTH_RE2 = /invalid (api key|token|credentials)|oauth.*(expired|revoked)|authentication[_ ]error/i;
+// The CLI rejects a model it doesn't know with:
+//   "There's an issue with the selected model (claude-opus-5). It may not
+//    exist or you may not have access to it."
+// Verified against claude 2.1.220. This is what a box whose `claude` binary
+// predates a model tier looks like — and since EVERY Jarvis spawn sets
+// DISABLE_AUTOUPDATER=1 (spawn-agent.js, brain-claude.js), the binary only
+// moves when a human moves it, so a model-ID change in code can outrun it.
+// Without its own kind this landed in 'other', which made brain-claude.js
+// escalate to the next tier up — a model the same stale binary also rejects —
+// and the eventual alert read as a usage/outage problem. Name it instead.
+const MODEL_RE = /issue with the selected model|may not exist or you may not have access|unknown model|invalid model|model[_ ]not[_ ]found|not_found_error.*model/i;
+const MODEL_NAME_RE = /selected model \(([^)]+)\)|model[:\s]+["']?(claude-[a-z0-9.-]+)/i;
 
 export function classifyFailure({ code = null, stdout = '', stderr = '', message = '' } = {}) {
   const text = [message, stderr, stdout].filter(Boolean).join('\n').slice(0, 4000);
@@ -106,6 +118,10 @@ export function classifyFailure({ code = null, stdout = '', stderr = '', message
     return { kind: 'usage_limit', resetAt };
   }
   if (AUTH_RE.test(text) || AUTH_RE2.test(text)) return { kind: 'auth' };
+  if (MODEL_RE.test(text)) {
+    const m = text.match(MODEL_NAME_RE);
+    return { kind: 'model', model: (m && (m[1] || m[2])) || null };
+  }
   return { kind: 'other' };
 }
 
@@ -179,6 +195,26 @@ export async function reportAuthFailure(name, detail = '') {
     title: `Claude login for profile "${name}" is broken`,
     body: `${detail.slice(0, 300)}\nFix on the box: ${name === 'default' ? '' : `CLAUDE_CONFIG_DIR=${PROFILES_DIR}/${name} `}claude login`,
     speech: `Sir, the Claude login for account ${name === 'default' ? 'one' : name} needs re-authorising.`,
+  });
+}
+
+/**
+ * A model-classified failure means the `claude` binary on this box does not
+ * know (or is not entitled to) the tier the code asked for. Name it plainly —
+ * the whole point is that Craig should not have to work out that a
+ * "brain unavailable" alert actually means "your CLI is older than the model".
+ * Alert once/hour per model so a wedged tier can't turn into a flood.
+ */
+const lastModelAlert = {};
+export async function reportModelRejected(model, detail = '') {
+  const key = model || 'unknown';
+  if (Date.now() - (lastModelAlert[key] || 0) < 3600_000) return;
+  lastModelAlert[key] = Date.now();
+  await notify({
+    source: 'claude-auth', level: 'alert',
+    title: `Claude CLI on this box does not recognise "${key}"`,
+    body: `${detail.slice(0, 300)}\n\nThe model ID in code is ahead of the binary, or the login isn't entitled to that tier. Every Jarvis spawn sets DISABLE_AUTOUPDATER=1, so the CLI only moves when you move it.\nOn the box: claude --version, then check the tier with\n  claude --model ${key} --print hi\nIf the version is behind, update the CLI and let spawn-agent.js's canary gate re-verify it before dispatch resumes.`,
+    speech: `Sir, the Claude command line on this box doesn't recognise ${/opus/i.test(key) ? 'Opus 5' : /fable/i.test(key) ? 'Fable 5' : 'the requested model'}. It likely needs updating.`,
   });
 }
 
