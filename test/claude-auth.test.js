@@ -42,6 +42,25 @@ test('auth failures still outrank the model check', () => {
   assert.equal(classifyFailure({ message: 'Invalid API key · Please run /login' }).kind, 'auth');
 });
 
+// Our own watchdogs (brain-claude.js runTurn). These MUST NOT classify as
+// 'other': that branch escalates to a heavier tier, which is slower, so a
+// latency failure would be answered with something more likely to time out.
+// Observed live on the box 2026-07-28 20:33.
+test('first-token watchdog is a timeout, not a generic failure', () => {
+  assert.equal(classifyFailure({ message: 'claude brain: no first token in time' }).kind, 'timeout');
+});
+
+test('turn watchdog is a timeout', () => {
+  assert.equal(classifyFailure({ message: 'claude brain: turn timed out' }).kind, 'timeout');
+});
+
+test('a usage limit reported during a slow turn is still a usage limit', () => {
+  // Ordering guard: LIMIT_RE runs first, so a limit that also mentions a
+  // timeout must not be downgraded to a same-tier retry.
+  const got = classifyFailure({ message: 'usage limit reached — turn timed out' });
+  assert.equal(got.kind, 'usage_limit');
+});
+
 test('unrelated failures stay other', () => {
   assert.equal(classifyFailure({ message: 'ECONNRESET socket hang up' }).kind, 'other');
   assert.equal(classifyFailure({}).kind, 'other');

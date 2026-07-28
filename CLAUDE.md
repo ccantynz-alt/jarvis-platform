@@ -93,7 +93,15 @@ wrong (never touch/delete this file on the strength of that claim). Uses
 always prefers it. **Model tiers (Craig's ruling 2026-07-26): Opus 5 and Fable
 5 ONLY** — everyday **Opus 5**, with Fable 5 as the voice-selectable heavy tier
 ("switch model to Fable") and the automatic one-turn escalation when a turn
-fails for a non-limit reason. Sonnet is no longer a tier (a stale
+fails for a non-limit, non-timeout reason. **A heavier tier changes the
+TIMEOUTS that fit it — move them in the same commit (2026-07-28).** The 12s
+warm first-token watchdog was tuned on 2026-07-24 against `claude-sonnet-5`;
+`7e1c7b9` made the everyday tier Opus 5 two days later and left the watchdog
+alone, so healthy-but-heavier turns were being shot at 12s (seen live on the
+box 2026-07-28 20:33). It is now 20s, and a watchdog trip classifies as
+`kind:'timeout'` and retries the SAME tier with the cold-spawn allowance
+rather than escalating — escalation answers "too slow" with something slower
+and spends the subscription window doing it. Sonnet is no longer a tier (a stale
 `brain-claude-model` KV naming it is ignored and falls back to Opus 5), and
 the previous-generation `claude-opus-4-8` is retired. Note the interaction
 with the subscription-only rule below: heavy tiers burn the usage windows

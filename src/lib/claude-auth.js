@@ -104,6 +104,13 @@ const AUTH_RE2 = /invalid (api key|token|credentials)|oauth.*(expired|revoked)|a
 // and the eventual alert read as a usage/outage problem. Name it instead.
 const MODEL_RE = /issue with the selected model|may not exist or you may not have access|unknown model|invalid model|model[_ ]not[_ ]found|not_found_error.*model/i;
 const MODEL_NAME_RE = /selected model \(([^)]+)\)|model[:\s]+["']?(claude-[a-z0-9.-]+)/i;
+// Our OWN watchdogs firing (brain-claude.js runTurn), not an API error. This
+// needs its own kind because the sensible reaction is the opposite of the
+// 'other' one: 'other' escalates to a heavier tier on the theory the model
+// struggled with the task, but a heavier tier is by definition SLOWER, so
+// escalating a latency failure makes it worse and spends the subscription
+// window doing it. Observed live 2026-07-28 20:33 on the box.
+const TIMEOUT_RE = /no first token in time|turn timed out|first-token watchdog|turn watchdog/i;
 
 export function classifyFailure({ code = null, stdout = '', stderr = '', message = '' } = {}) {
   const text = [message, stderr, stdout].filter(Boolean).join('\n').slice(0, 4000);
@@ -122,6 +129,7 @@ export function classifyFailure({ code = null, stdout = '', stderr = '', message
     const m = text.match(MODEL_NAME_RE);
     return { kind: 'model', model: (m && (m[1] || m[2])) || null };
   }
+  if (TIMEOUT_RE.test(text)) return { kind: 'timeout' };
   return { kind: 'other' };
 }
 

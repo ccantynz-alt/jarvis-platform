@@ -77,7 +77,15 @@ export async function setBrainModel(word) {
 // 180s × 2 attempts made the claude provider alone a 6-minute worst case.
 // 12s first-token is still generous for a warm session; 90s covers real
 // tool-chaining turns. Env overrides remain for tuning without a deploy.
-const FIRST_TOKEN_MS = Number(process.env.BRAIN_FIRST_TOKEN_TIMEOUT_MS) || 12_000;
+// 2026-07-28: raised 12s → 20s. The 12s figure was tuned on 2026-07-24 when
+// the everyday tier was claude-sonnet-5; 7e1c7b9 made it Opus 5 two days later
+// and nobody moved the watchdog, so healthy-but-heavier turns were being shot
+// at 12s. Confirmed on the box 2026-07-28 20:33: first-token watchdog on Opus
+// 5 → escalate to Fable 5 → de-escalate. Every one of those costs a killed
+// turn plus a retry on a heavier tier, and two misses drop the whole brain to
+// the keyword pipeline (which has no conversational memory — this is one of
+// the ways Jarvis "forgets"). Still well inside the 120s total turn budget.
+const FIRST_TOKEN_MS = Number(process.env.BRAIN_FIRST_TOKEN_TIMEOUT_MS) || 20_000;
 const TURN_TIMEOUT_MS = Number(process.env.BRAIN_TURN_TIMEOUT_MS) || 90_000;
 const MAX_TURNS = 12; // SDK-internal tool round-trips per user turn
 
@@ -335,6 +343,14 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
             console.warn(`[brain-claude] ${rejected} rejected — retrying on ${escalateTo}`);
             continue;
           }
+        } else if (cls.kind === 'timeout' && attempt === 0 && budgetLeft) {
+          // Retry on the SAME tier, never a heavier one. disposeSession above
+          // means the retry is a fresh session, which gets the cold-spawn
+          // allowance (35s) — that is the slack a slow turn actually needs.
+          // Escalating here would answer "too slow" with "something slower",
+          // and spend the subscription window doing it.
+          console.warn(`[brain-claude] ${s.model} missed the first-token watchdog — retrying same tier with cold slack`);
+          continue;
         } else if (cls.kind === 'other' && attempt === 0 && budgetLeft && nextTierUp(s.model) !== s.model) {
           escalateTo = nextTierUp(s.model); // this tier struggled → one retry on the bigger brain
           console.warn(`[brain-claude] escalating retry to ${escalateTo}`);
