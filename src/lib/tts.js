@@ -17,12 +17,15 @@
 import { createHash } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
+import { guardrail } from './guardrail.js';
 
 export const VOICE_ID  = process.env.JARVIS_VOICE_ID || 'lUTamkMw7gOzZbFIwmq4';
 export const MODEL_ID  = 'eleven_flash_v2_5'; // lowest latency tier
 const CACHE_DIR = '/opt/jarvis/memory/tts-cache';
 const CACHE_CAP_BYTES = 50 * 1024 * 1024;
-const BUDGET    = parseInt(process.env.TTS_DAILY_CHAR_BUDGET || '40000', 10);
+// A malformed budget must not become NaN: `spent + len > NaN` is false, so
+// the cap would silently vanish and ElevenLabs spend would run unbounded.
+const BUDGET    = guardrail('TTS_DAILY_CHAR_BUDGET', 40000, { source: 'tts' });
 const MEMORY    = 'http://127.0.0.1:9200';
 
 mkdirSync(CACHE_DIR, { recursive: true });

@@ -423,6 +423,18 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   bypass all of this by design — mute never mutes answers. Tuning vars in
   secrets.env.example. If Slack floods again, find the caller posting
   with level=critical or a constantly-changing dedupe key.
+- **Every numeric limit goes through `src/lib/guardrail.js` (2026-07-28).**
+  systemd's `EnvironmentFile` does NOT strip inline comments, so
+  `MAX=6 # per day` arrives as the string `"6 # per day"`; `Number()` makes it
+  NaN and every `x < NaN` is false, so the gate stops gating. That is the
+  2026-07-17 incident (117 self-heal dispatches against a cap of 6). The same
+  bug was still live in `tts.js`/`tts-stream.js`, where a bare
+  `parseInt(...)` with no `||` fallback meant a malformed
+  `TTS_DAILY_CHAR_BUDGET` removed the ElevenLabs spend cap entirely. Note that
+  `Number(x) || default` is only *accidentally* safe — it hides the operator's
+  mistake instead of reporting it. Use `guardrail()`: it takes the leading
+  token, refuses non-positive values, always returns something finite, and
+  logs `BAD GUARDRAIL` when a value was set but unusable.
 - **Memory hygiene:** `repair_log` is empty — sessions skip the mid-session
   logging in the protocol below. The memory is only as smart as what gets
   written to it. **Correction (2026-07-28): `agent_context` is NOT empty and

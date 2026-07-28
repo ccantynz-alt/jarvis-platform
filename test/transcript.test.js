@@ -4,7 +4,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadTranscript, saveTranscript, recordFallbackTurn, _reset } from '../src/lib/transcript.js';
+import { loadTranscript, saveTranscript, recordFallbackTurn, retryLoadIfUnread, _reset } from '../src/lib/transcript.js';
 
 const realFetch = global.fetch;
 
@@ -50,8 +50,81 @@ test('a missing conversation starts empty rather than throwing', async () => {
 });
 
 test('memory-server being down does not break the turn', async () => {
-  global.fetch = async () => { throw new Error('ECONNREFUSED'); };
-  assert.deepEqual(await loadTranscript(), []);
+  const errors = [];
+  const realError = console.error;
+  console.error = (m) => errors.push(String(m));
+  try {
+    global.fetch = async () => { throw new Error('ECONNREFUSED'); };
+    assert.deepEqual(await loadTranscript(), []);
+  } finally { console.error = realError; }
+  assert.match(errors.at(-1) || '', /memory unreachable/);
+});
+
+// ── The boot race ───────────────────────────────────────────────────────────
+// The units order deck/gateway After= jarvis-memory.service, but After= only
+// means memory-server was STARTED, not that it has bound :9200. Losing this
+// behaviour means every reboot can wipe the real conversation.
+
+test('a read that fails then succeeds recovers the real conversation', async () => {
+  const stored = JSON.stringify([{ role: 'user', content: 'the real history' }]);
+  let attempts = 0;
+  global.fetch = async (url) => {
+    if (++attempts <= 2) throw new Error('ECONNREFUSED'); // memory still booting
+    return { ok: true, status: 200, json: async () => ({ value: stored }) };
+  };
+  const t = await loadTranscript();
+  assert.equal(t[0].content, 'the real history');
+});
+
+test('a scratch conversation is NEVER persisted over the stored one', async () => {
+  const writes = [];
+  const realError = console.error;
+  console.error = () => {};
+  try {
+    global.fetch = async (url, opts) => {
+      if (opts?.method === 'POST') { writes.push(JSON.parse(opts.body)); return { ok: true, status: 200, json: async () => ({}) }; }
+      throw new Error('ECONNREFUSED'); // every read fails — we never learned the truth
+    };
+    const t = await loadTranscript();
+    t.push({ role: 'user', content: 'said while memory was down' });
+    saveTranscript();
+    await new Promise(r => setTimeout(r, 600));
+  } finally { console.error = realError; }
+  assert.equal(writes.length, 0, 'writing here would destroy the stored conversation');
+});
+
+test('once a read succeeds, saving resumes', async () => {
+  let readOk = false;
+  const writes = [];
+  const realError = console.error;
+  console.error = () => {};
+  try {
+    global.fetch = async (url, opts) => {
+      if (opts?.method === 'POST') { writes.push(JSON.parse(opts.body)); return { ok: true, status: 200, json: async () => ({}) }; }
+      if (!readOk) throw new Error('ECONNREFUSED');
+      return { ok: true, status: 200, json: async () => ({ value: '[]' }) };
+    };
+    await loadTranscript();          // fails — scratch mode
+    readOk = true;
+    assert.equal(await retryLoadIfUnread(), true);
+    (await loadTranscript()).push({ role: 'user', content: 'now it is safe' });
+    saveTranscript();
+    await new Promise(r => setTimeout(r, 600));
+  } finally { console.error = realError; }
+  assert.equal(writes.length, 1);
+  assert.equal(JSON.parse(writes[0].value)[0].content, 'now it is safe');
+});
+
+test('a 404 means genuinely empty, not unreachable — saving is allowed', async () => {
+  const writes = [];
+  global.fetch = async (url, opts) => {
+    if (opts?.method === 'POST') { writes.push(JSON.parse(opts.body)); return { ok: true, status: 200, json: async () => ({}) }; }
+    return { ok: false, status: 404 };
+  };
+  (await loadTranscript()).push({ role: 'user', content: 'first ever message' });
+  saveTranscript();
+  await new Promise(r => setTimeout(r, 600));
+  assert.equal(writes.length, 1);
 });
 
 test('concurrent turns share ONE load, not two divergent arrays', async () => {

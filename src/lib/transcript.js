@@ -34,36 +34,98 @@ const KEY = 'jarvis-conversation';
 const MAX_MESSAGES = 24;   // matches runAgent's own bound
 const SAVE_DEBOUNCE_MS = 400;
 
+const LOAD_ATTEMPTS = 4;
+const LOAD_BACKOFF_MS = 250;
+
 let transcript = null;     // the one shared array
 let loading = null;        // in-flight load, so concurrent turns don't double-fetch
 let saveTimer = null;
 let lastSaveFailedAt = 0;
+// Did we ever successfully READ the store? Until we have, we do not know what
+// the conversation is, and must not overwrite it. See loadTranscript.
+let loaded = false;
 
+/** null = key genuinely absent (404). Throws if the store can't be reached. */
 async function readKey(key) {
   const r = await fetch(`${MEMORY}/memory/kv/${key}`);
-  if (!r.ok) return null;                      // 404 = never written
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`memory KV returned ${r.status}`);
   const parsed = JSON.parse((await r.json())?.value || '[]');
   return Array.isArray(parsed) ? parsed : null;
 }
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 /**
  * The shared conversation. Safe to call concurrently — the first call owns the
  * fetch and everyone else awaits it, so two utterances landing together can't
  * produce two divergent arrays (the old per-server code could).
+ *
+ * BOOT RACE (2026-07-28): the units order deck/gateway `After=
+ * jarvis-memory.service`, but After= only means memory-server was STARTED, not
+ * that node has bound :9200. A read that lands in that window used to be
+ * indistinguishable from "no history": we cached [] and the very next
+ * saveTranscript() wrote that empty array over the real conversation. Every
+ * reboot could silently destroy it. So: retry a few times, and until a read
+ * has actually SUCCEEDED, refuse to persist (see saveTranscript). A turn
+ * still gets a usable array immediately — it just isn't allowed to become the
+ * durable truth.
  */
 export async function loadTranscript() {
   if (transcript) return transcript;
   if (loading) return loading;
   loading = (async () => {
-    try {
-      transcript = (await readKey(KEY)) || (await readKey(LEGACY_KEY)) || [];
-    } catch {
-      transcript = [];                         // memory down — start clean, don't crash a turn
+    for (let attempt = 0; attempt < LOAD_ATTEMPTS; attempt++) {
+      try {
+        transcript = (await readKey(KEY)) || (await readKey(LEGACY_KEY)) || [];
+        loaded = true;
+        return transcript;
+      } catch (e) {
+        if (attempt === LOAD_ATTEMPTS - 1) {
+          console.error(`[transcript] memory unreachable after ${LOAD_ATTEMPTS} attempts (${e.message}) — ` +
+            'running on a scratch conversation; it will NOT be persisted over the stored one');
+          transcript = [];
+          return transcript;
+        }
+        await sleep(LOAD_BACKOFF_MS * (attempt + 1)); // 250ms, 500ms, 750ms
+      }
     }
     return transcript;
   })().finally(() => { loading = null; });
   return loading;
 }
+
+/**
+ * Re-attempt the initial read after a failed boot, so a process that started
+ * before memory-server can recover the real conversation instead of staying on
+ * its scratch array for the rest of its life.
+ *
+ * Anything said while in scratch mode is deliberately dropped rather than
+ * merged: the store is the truth, and a scratch array grafted on top would
+ * duplicate whatever memory-server already had.
+ */
+export async function retryLoadIfUnread() {
+  if (loaded || loading) return loaded;
+  transcript = null;
+  await loadTranscript();
+  return loaded;
+}
+
+// Background recovery. Runs OFF the turn path on purpose — retrying inside
+// loadTranscript() would put the load backoff (up to ~1.5s) in front of every
+// voice utterance while memory is down, and this is a voice assistant.
+// Stops as soon as a read succeeds; unref'd so it never holds a process open.
+const RECOVERY_INTERVAL_MS = 30_000;
+const recovery = setInterval(() => {
+  if (loaded) return clearInterval(recovery);
+  retryLoadIfUnread().then((ok) => {
+    if (ok) {
+      clearInterval(recovery);
+      console.log('[transcript] memory reachable again — recovered the stored conversation');
+    }
+  }).catch(() => {});
+}, RECOVERY_INTERVAL_MS);
+recovery.unref?.();
 
 /**
  * Persist. Debounced because a single turn can touch the array several times,
@@ -75,6 +137,10 @@ export async function loadTranscript() {
  */
 export function saveTranscript() {
   if (!transcript || saveTimer) return;
+  // Never let a scratch conversation overwrite the stored one — see the boot
+  // race in loadTranscript. Silence here is correct: the alternative is
+  // destroying real history.
+  if (!loaded) return;
   saveTimer = setTimeout(async () => {
     saveTimer = null;
     if (!transcript) return;
@@ -123,5 +189,7 @@ export async function recordFallbackTurn(userText, replyText) {
 export function _reset() {
   transcript = null;
   loading = null;
+  loaded = false;
+  lastSaveFailedAt = 0;
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 }

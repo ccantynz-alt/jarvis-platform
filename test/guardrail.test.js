@@ -1,0 +1,68 @@
+// lib/guardrail.js — the 2026-07-17 lesson, generalised.
+//
+// systemd's EnvironmentFile keeps inline comments as part of the value, so
+// "6 # per day" reaches the process verbatim. Number() makes that NaN and every
+// comparison against NaN is false, so `attempts < MAX` stops blocking. All four
+// self-heal gates disabled themselves at once and the box fired 117 repair
+// dispatches in a day against a cap of 6, silently.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { guardrail } from '../src/lib/guardrail.js';
+
+const NAME = 'JARVIS_TEST_GUARDRAIL';
+const quiet = (fn) => {
+  const real = console.error; const seen = [];
+  console.error = (m) => seen.push(String(m));
+  try { return { value: fn(), logs: seen }; } finally { console.error = real; }
+};
+
+test.afterEach(() => { delete process.env[NAME]; });
+
+test('a clean value is used', () => {
+  process.env[NAME] = '6';
+  assert.equal(guardrail(NAME, 3), 6);
+});
+
+test('an inline comment does not become NaN — the original incident', () => {
+  process.env[NAME] = '6 # per day';
+  assert.equal(quiet(() => guardrail(NAME, 3)).value, 6);
+});
+
+test('a tab-separated comment is handled too', () => {
+  process.env[NAME] = '12\t# minutes';
+  assert.equal(quiet(() => guardrail(NAME, 3)).value, 12);
+});
+
+test('unset falls back silently', () => {
+  const { value, logs } = quiet(() => guardrail(NAME, 3));
+  assert.equal(value, 3);
+  assert.equal(logs.length, 0, 'an unset optional limit is normal, not an error');
+});
+
+test('garbage falls back AND is reported', () => {
+  process.env[NAME] = '# 40000';
+  const { value, logs } = quiet(() => guardrail(NAME, 40000, { source: 'tts' }));
+  assert.equal(value, 40000);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /\[tts\] BAD GUARDRAIL/);
+});
+
+test('a negative or zero limit is refused — it would disable the gate', () => {
+  for (const bad of ['-1', '0']) {
+    process.env[NAME] = bad;
+    assert.equal(quiet(() => guardrail(NAME, 5)).value, 5, bad);
+  }
+});
+
+test('zero is accepted when it is a meaningful setting', () => {
+  process.env[NAME] = '0';
+  assert.equal(guardrail(NAME, 5, { allowZero: true }), 0);
+});
+
+test('the result is ALWAYS finite — nothing downstream can compare against NaN', () => {
+  for (const v of ['', '   ', 'abc', 'NaN', 'Infinity', '# nope']) {
+    process.env[NAME] = v;
+    assert.equal(Number.isFinite(quiet(() => guardrail(NAME, 7)).value), true, JSON.stringify(v));
+  }
+});

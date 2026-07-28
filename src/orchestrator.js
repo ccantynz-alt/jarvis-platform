@@ -7,6 +7,7 @@ import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
 import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
+import { guardrail } from './lib/guardrail.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -51,7 +52,9 @@ const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || 'claude-fable-5'
 // whole job list). The orchestrator is the single scheduler: it enqueues on
 // /dispatch and a tick loop starts queued jobs up to MAX_CONCURRENT_JOBS.
 
-const MAX_CONCURRENT_JOBS = parseInt(process.env.MAX_CONCURRENT_JOBS, 10) || 3;
+// Fleet-wide concurrency is a guardrail — parse it so a malformed value is
+// reported and defaulted rather than quietly becoming NaN (see lib/guardrail.js).
+const MAX_CONCURRENT_JOBS = guardrail('MAX_CONCURRENT_JOBS', 3, { source: 'orchestrator' });
 const SCHEDULER_TICK_MS = 4000;
 const CANARY_RETRY_MS = 30 * 60_000;
 // PC-worker lease: how long a claimed job is reserved before an unrenewed

@@ -12,6 +12,7 @@
 
 import WebSocket from 'ws';
 import { VOICE_ID, MODEL_ID, ttsEnabled, budgetSpent, budgetAdd } from './tts.js';
+import { guardrail } from './guardrail.js';
 
 const EL_URL = `wss://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream-input` +
   `?model_id=${MODEL_ID}&output_format=mp3_44100_64&auto_mode=true`;
@@ -28,7 +29,7 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
   if (!ttsEnabled()) return null;
   const day = new Date().toISOString().slice(0, 10);
   const alreadySpent = await budgetSpent(day);
-  const BUDGET = parseInt(process.env.TTS_DAILY_CHAR_BUDGET || '40000', 10);
+  const BUDGET = guardrail('TTS_DAILY_CHAR_BUDGET', 40000, { source: 'tts-stream' });
   if (alreadySpent >= BUDGET) return null;
 
   let ws;
