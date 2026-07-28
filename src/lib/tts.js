@@ -18,6 +18,7 @@ import { createHash } from 'crypto';
 import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { guardrail } from './guardrail.js';
+import { notify } from './notify.js';
 
 export const VOICE_ID  = process.env.JARVIS_VOICE_ID || 'lUTamkMw7gOzZbFIwmq4';
 export const MODEL_ID  = 'eleven_flash_v2_5'; // lowest latency tier
@@ -44,6 +45,22 @@ export async function budgetSpent(day) {
     return parseInt(j?.value, 10) || 0;
   } catch { return 0; }
 }
+// Once per day, not per utterance — a budget that is already spent would
+// otherwise fire on every single reply.
+let budgetAnnouncedFor = null;
+function announceBudget(day, spent) {
+  if (budgetAnnouncedFor === day) return;
+  budgetAnnouncedFor = day;
+  notify({
+    source: 'tts', level: 'warn',
+    title: 'ElevenLabs daily voice budget spent — using the browser voice',
+    body: `${spent}/${BUDGET} characters used today. Replies still speak, but in the browser's own voice rather than mine. `
+      + 'Raise TTS_DAILY_CHAR_BUDGET in config/secrets.env to lift the cap. '
+      + 'Note this cap only started being enforced on 2026-07-28 — before that a malformed value parsed to NaN and the limit never applied.',
+    speech: 'Sir, my voice budget for today is spent — I am on the browser voice until it resets.',
+  }).catch(() => {});
+}
+
 export async function budgetAdd(day, chars, prev) {
   try {
     await fetch(`${MEMORY}/memory/kv`, {
@@ -95,6 +112,13 @@ export async function synthesize(rawText) {
   const spent = await budgetSpent(day);
   if (spent + text.length > BUDGET) {
     console.warn(`[tts] daily budget reached (${spent}/${BUDGET} chars) — falling back`);
+    // Craig hears this as "it's fallen to a different voice" with no
+    // explanation. Doctrine on this box is that a downgrade is never silent
+    // (the 2026-07-18 Gemini incident), and this one had no signal at all
+    // because until 2026-07-28 the cap was NaN and never actually fired --
+    // guardrail() made it real, so this path is newly reachable. Announce it
+    // once a day; the fallback itself is correct and still happens.
+    announceBudget(day, spent);
     return { reason: 'budget' };
   }
 

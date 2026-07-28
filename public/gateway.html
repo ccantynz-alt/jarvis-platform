@@ -250,6 +250,10 @@
     // if it were a deliberate interrupt. Bounds staleness to one utterance.
     bargeCancel = false;
     lastSpokenText = text; // compared against the next utterance to catch speaker bleed
+    // Belt and braces: never begin speaking while the mic is live, whatever
+    // path got us here. This is the rule the text filter was standing in for.
+    abortListening();
+    const gen = ++speakGen; // a cancelled utterance must not reopen the ear
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 1.0; u.pitch = 0.85; u.volume = 1; // measured, slightly deep — closest browser TTS gets to a Jarvis timbre
@@ -262,9 +266,18 @@
       || voiceCache.find(v => /en[-_](AU|NZ)/i.test(v.lang))
       || voiceCache.find(v => /^en/i.test(v.lang)) || null;
     u.onstart = () => { setJState('speaking'); hint.textContent = '🔈 speaking…'; };
-    u.onend = () => { markSpeechEnded(); setJState('idle'); if (hint.textContent.startsWith('🔈')) hint.textContent = ''; if (conversationMode) scheduleRelisten(); };
+    u.onend = () => {
+      markSpeechEnded();
+      if (gen !== speakGen) return; // superseded by the next part of the same answer
+      replyPending(false);
+      setJState('idle');
+      if (hint.textContent.startsWith('🔈')) hint.textContent = '';
+      if (conversationMode) scheduleRelisten();
+    };
     u.onerror = (e) => {
       markSpeechEnded();
+      if (gen !== speakGen) return; // cancelled to make way for the next utterance
+      replyPending(false);
       setJState('idle');
       if (bargeCancel) { bargeCancel = false; hint.textContent = ''; if (conversationMode && !listening) scheduleRelisten(); return; }
       hint.textContent = `⚠ voice error: ${e.error || 'unknown'}`;
@@ -301,7 +314,7 @@
         const div = bubble('jarvis' + (m.interim ? ' interim' : ''), m.text || '');
         if (!m.interim && m.intent) meta(div, `${m.intent} · ${m.via} · ${m.ms}ms`);
         speak(m.speech);
-        if (!m.interim && muted) scheduleRelisten(); // muted → no TTS onend to drive the loop
+        if (!m.interim && muted) { replyPending(false); scheduleRelisten(); } // muted → no TTS onend to drive the loop
       } else if (m.type === 'reply_chunk') {
         if (!streamDiv) streamDiv = bubble('jarvis', '');
         streamDiv.textContent += m.text;
@@ -309,7 +322,7 @@
       } else if (m.type === 'reply_done') {
         if (streamDiv) { meta(streamDiv, `${m.via || 'converse'} · ${m.ms}ms`); }
         speak(m.speech); streamDiv = null;
-        if (muted) scheduleRelisten();
+        if (muted) { replyPending(false); scheduleRelisten(); }
       } else if (m.type === 'notify') {
         const n = m.notification;
         bubble('notify ' + (n.level || 'info'), `${n.title}${n.body && n.body !== n.title ? '\n' + n.body : ''}`);
@@ -329,6 +342,10 @@
     text = (text || '').trim();
     if (!text || !ws || ws.readyState !== 1) return;
     bubble('user', text);
+    // Shut the ear NOW. The reply lands seconds later and starts speaking; if
+    // an idle relisten reopened the mic in that gap, Jarvis talks into it.
+    replyPending(true);
+    abortListening();
     ws.send(JSON.stringify({ type: 'utterance', text, mode: 'auto' }));
   }
   $('sendBtn').onclick = () => { primeTTS(); send($('textIn').value); $('textIn').value = ''; };
@@ -370,6 +387,52 @@
   const ECHO_MIN_WORDS  = 4;     // below this, ALWAYS send — see below
   let lastSpeechEndAt = 0, lastSpokenText = '';
 
+  // ── The structural fix (2026-07-28, second pass) ────────────────────────────
+  // Two rounds of tuning the text filter did not stop the loop, which is the
+  // lesson the deck already wrote down on 2026-07-26: "an open mic pointed at a
+  // speaker cannot be fixed with a text-similarity heuristic; the only reliable
+  // cure is not to listen while talking." The filter was treating a symptom.
+  //
+  // The hole: the ear was only shut while SPEAKING, not while a reply was in
+  // FLIGHT. Sequence that loops — recognition ends with no result (silence),
+  // conversation mode relistens 600ms later, and the reply Craig asked for
+  // arrives a few seconds after that and starts speaking straight into a live
+  // mic. Nothing in startListening could know a reply was coming.
+  //
+  // Worse, every speak() calls speechSynthesis.cancel() first, so an interim
+  // reply's utterance fires its onend when the next one cancels it — and that
+  // onend called scheduleRelisten(), opening the mic in the gap between two
+  // parts of the SAME answer.
+  //
+  // So: the ear is shut from the moment Craig's words are sent until Jarvis has
+  // finished speaking and the acoustic tail has passed, and only the newest
+  // utterance is allowed to reopen it.
+  let awaitingReply = false;   // sent, no final reply yet — the mic stays shut
+  let speakGen = 0;            // cancelled utterances must not drive the loop
+  let micAborted = false;      // distinguishes our own abort() from a real end
+  let replyWatchdog = null;    // never let a lost reply deafen hands-free forever
+
+  function abortListening() {
+    clearTimeout(relistenTimer);
+    if (rec && listening) { micAborted = true; try { rec.abort(); } catch {} }
+  }
+
+  // A reply that never arrives (dropped socket, wedged brain) must not leave the
+  // ear shut forever — that is indistinguishable from a broken assistant.
+  function replyPending(on) {
+    awaitingReply = on;
+    clearTimeout(replyWatchdog);
+    if (on) {
+      replyWatchdog = setTimeout(() => {
+        if (!awaitingReply) return;
+        console.warn('[voice] no reply within 60s — reopening the ear');
+        awaitingReply = false;
+        hint.textContent = 'no answer came back — listening again';
+        if (conversationMode) scheduleRelisten();
+      }, 60000);
+    }
+  }
+
   function markSpeechEnded() { lastSpeechEndAt = Date.now(); }
 
   const echoWords = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
@@ -410,10 +473,14 @@
   function startListening(userGesture = false) {
     if (!SR || listening) return;
     if (!userGesture) {
-      if (document.body.dataset.jstate === 'speaking' || speechSynthesis.speaking) return;
+      // Reschedule, never return dead: an early `return` here left conversation
+      // mode silently switched off with no way for Craig to tell.
+      if (awaitingReply) return scheduleRelisten();
+      if (document.body.dataset.jstate === 'speaking' || speechSynthesis.speaking) return scheduleRelisten();
       if (Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return scheduleRelisten();
     }
     speechSynthesis.cancel();
+    micAborted = false;
     rec = new SR();
     rec.lang = 'en-NZ'; rec.interimResults = true; rec.continuous = false;
     let finalText = '';
@@ -429,7 +496,9 @@
       if (e.error === 'not-allowed') setConversation(false);
     };
     rec.onend = () => {
-      listening = false; micBtn.classList.remove('listening'); setJState('idle');
+      listening = false; micBtn.classList.remove('listening');
+      if (micAborted) { micAborted = false; return; } // we closed it deliberately
+      setJState('idle');
       const said = finalText.trim();
       if (said && isSelfEcho(said)) {
         // His own voice off the speaker tail — never send it to the brain,
