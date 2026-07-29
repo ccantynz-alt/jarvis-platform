@@ -40,9 +40,16 @@ test('arming drops speech queued while audio was locked', () => {
 });
 
 test('arming attaches the analyser before opening the ear', () => {
-  const arm = script.match(/function armVoice\(\) \{[\s\S]*?\n\}/)[0];
+  // Strip line comments first: these functions discuss startListening() in
+  // prose above the call, and a naive indexOf matches the comment.
+  const arm = script.match(/function armVoice\(\) \{[\s\S]*?\n\}/)[0]
+    .split('\n').map(l => l.replace(/\/\/.*$/, '')).join('\n');
+  const attach = arm.indexOf('attachAnalyser()');
+  const listen = arm.indexOf('startListening()');
+  assert.notEqual(attach, -1, 'attachAnalyser() call not found in armVoice');
+  assert.notEqual(listen, -1, 'startListening() call not found in armVoice');
   assert.ok(
-    arm.indexOf('attachAnalyser()') < arm.indexOf('startListening()'),
+    attach < listen,
     'echo cancellation comes from the getUserMedia stream in attachAnalyser; ' +
     'opening recognition first means the first utterance is captured without it',
   );
