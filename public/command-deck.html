@@ -855,6 +855,18 @@ function sendCommand(c) {
   addChat('YOU', c);
   if (ws && ws.readyState === 1) {
     S.thinking = true;
+    // S.thinking now gates the mic (see startListening), so a reply that never
+    // lands — dropped socket, wedged brain — would leave the deck permanently
+    // deaf. Bounded: past this, reopen the ear and say so rather than sit
+    // there looking broken.
+    clearTimeout(thinkingWatchdog);
+    thinkingWatchdog = setTimeout(() => {
+      if (!S.thinking) return;
+      console.warn('[voice] no reply within 90s — reopening the ear');
+      S.thinking = false;
+      updateOrbLabel();
+      scheduleRelisten();
+    }, 90000);
     updateOrbLabel();
     ws.send(JSON.stringify({ type: 'command', text: c, v2: typeof V2 !== 'undefined' && V2 }));
   } else if (SIM_MODE) {
@@ -991,7 +1003,13 @@ function startListening() {
   // the only reliable cure is not to listen while talking.
   // Voice barge-in is the acknowledged cost. It is replaced by three routes
   // that always work: the STOP bar, Escape, and tapping the mic button.
-  const speakingBlocks = S.speaking || speechActive;
+  // 2026-07-28: S.thinking added. Craig: "its still looping and picking up the
+  // mic". The ear was shut while SPEAKING but not while a reply was IN FLIGHT.
+  // Recognition ends, the mic reopens on the cooldown, and the answer he asked
+  // for arrives a second later and plays through the speaker into a live mic.
+  // Not listening while talking is only half the rule — the other half is not
+  // listening while an answer is on its way.
+  const speakingBlocks = S.speaking || speechActive || S.thinking || !!streamEl;
   if (!SRCls || listening || voiceMode === 'off' || !armed || speakingBlocks) return;
   if (Date.now() - lastSpeechEndAt < MIC_COOLDOWN_MS) return; // acoustic tail — all platforms
   if (qs.get('core')) return; // screenshot/QA state-forcing — no real mic
@@ -1064,14 +1082,28 @@ function handleUtterance(said) {
   if (S.speaking || speechActive || S.thinking || streamEl) {
     const bm = said.match(WAKE_RE);
     const isEcho = (() => {
-      // Word-overlap against what Jarvis is currently saying on screen: ≥60%
-      // of the heard words appearing in his live reply = his own voice.
-      const spoken = ((streamEl?.textContent || '') + ' ' + ($('latest-reply')?.textContent || '')).toLowerCase();
-      if (!spoken.trim()) return false;
-      const words = said.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-      if (!words.length) return true;
-      const hits = words.filter(w => spoken.includes(w)).length;
-      return hits / words.length >= 0.6;
+      // 2026-07-28 rewrite. The old version scored bag-of-words overlap with
+      // spoken.includes(word) — a SUBSTRING test, so "rest" matched
+      // "restarted" and "the" matched "there" — had no minimum length, and
+      // returned TRUE outright when every word was short. So "yes", "no",
+      // "do it" and "and the rest" were classified as echo and thrown away
+      // while Jarvis was mid-reply. That is the other half of Craig's
+      // complaint: not just looping, but not hearing him when he did speak.
+      //
+      // A real echo is Jarvis's own words in Jarvis's own ORDER. Match whole
+      // words against a contiguous run of what is on screen, and never judge
+      // an utterance too short to carry evidence.
+      const norm = (t) => t.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+      const spoken = norm((streamEl?.textContent || '') + ' ' + ($('latest-reply')?.textContent || ''));
+      const heard = norm(said);
+      if (!spoken.length || heard.length < 4) return false; // too short to judge → let him through
+      let best = 0;
+      for (let i = 0; i < spoken.length; i++) {
+        let hits = 0;
+        for (let j = 0; j < heard.length; j++) if (spoken[i + j] === heard[j]) hits++;
+        if (hits > best) best = hits;
+      }
+      return best / heard.length >= 0.8;
     })();
     const v2TalkOver = typeof V2 !== 'undefined' && V2 && !bm &&
       said.split(/\s+/).filter(Boolean).length >= 3 && !isEcho;
@@ -1114,12 +1146,18 @@ function handleUtterance(said) {
 // real fix (a headset with hardware AEC is the actual cure for a fully
 // open mic+speaker setup) but it removes the software-side race.
 const MIC_COOLDOWN_MS = 600;
+let thinkingWatchdog = null;
 function scheduleRelisten() {
   if (voiceMode === 'off' || !armed) return;
   clearTimeout(relistenTimer);
   const delay = Math.max(srBackoff, MIC_COOLDOWN_MS);
   // Never reopen mid-speech on any platform — see startListening's note.
-  relistenTimer = setTimeout(() => { if (!listening && !S.speaking && !speechActive) startListening(); }, delay);
+  // Re-check on FIRE, not on schedule: a reply can arrive during the delay.
+  // startListening() re-tests every gate anyway, including S.thinking.
+  relistenTimer = setTimeout(() => {
+    if (listening || S.speaking || speechActive || S.thinking || streamEl) return scheduleRelisten();
+    startListening();
+  }, delay);
 }
 
 // CONVERSATION FOLLOW-UP WINDOW (2026-07-26). Craig: "I can't talk back to
@@ -1139,8 +1177,11 @@ function openFollowUpWindow() {
 
 // Chrome quietly kills long recognizer sessions; the watchdog reopens the ear.
 setInterval(() => {
-  const speakingBlocks = S.speaking || speechActive; // never reopen mid-speech
-  if (armed && voiceMode !== 'off' && !listening && !speakingBlocks && !document.hidden) startListening();
+  // This one mattered most: it fires every 3s regardless of what else is
+  // happening, so without S.thinking it would force the mic open in the middle
+  // of the think-then-speak window, every single turn.
+  const busy = S.speaking || speechActive || S.thinking || !!streamEl;
+  if (armed && voiceMode !== 'off' && !listening && !busy && !document.hidden) startListening();
 }, 3000);
 
 const MODE_LABEL = { wake: '👂 WAKE: “JARVIS…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };
