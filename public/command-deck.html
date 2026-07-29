@@ -912,8 +912,19 @@ function armVoice() {
   if (armed || voiceMode === 'off') return;
   armed = true;
   updateOrbLabel();
-  startListening();
+  // Anything queued while audio was locked is STALE — it was composed before
+  // Craig tapped, and speaking it now is both wrong ("I'm already up") and the
+  // thing that bled into the mic. Drop it rather than play it late.
+  if (speechQ.length) {
+    console.warn(`[voice] dropping ${speechQ.length} utterance(s) queued before audio was unlocked`);
+    speechQ.length = 0;
+    updatePendingBadge();
+  }
+  // startListening() re-tests every gate, so if anything IS still speaking the
+  // mic stays shut and the speech-end path reopens it. Never open it here
+  // unconditionally — that was the ordering that let the greeting bleed.
   attachAnalyser();
+  startListening();
 }
 
 async function attachAnalyser() { // mic level visualization — best effort
@@ -1962,7 +1973,14 @@ if (qs.get('demo-briefing')) showBriefing({
   openIssues: 3,
   jobs: [{ platform: 'vapron', task: 'AUTONOMOUS SELF-HEAL — verify https 200' }],
 });
-addChat('JARVIS', 'Good evening, sir. Command Deck online. Establishing live link…');
+// speechText=null — TEXT ONLY, deliberately (2026-07-28). addChat speaks
+// whenever speechText !== null, and two-arg calls pass undefined, so this line
+// WAS spoken. Audio is locked until the first tap, so it sat in the queue and
+// played at the moment armVoice() opened the mic -- Jarvis greeting himself
+// down his own microphone. Craig's deck said it out loud: "that's the boot
+// chime bleeding back through again... I'm already up and we're
+// mid-conversation." A boot status line has no business being spoken late.
+addChat('JARVIS', 'Good evening, sir. Command Deck online. Establishing live link…', null);
 if (SIM_MODE) startSim();
 renderStats();
 connectWS();
