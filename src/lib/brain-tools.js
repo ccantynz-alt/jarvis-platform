@@ -13,7 +13,7 @@
 
 import {
   handleStatus, handlePlatformStatus, handleJobs, handleAsk,
-  handleBriefing, handleRoadmap, previewDispatch,
+  handleBriefing, handleRoadmap, previewDispatch, gateNote,
   platformNames, matchPlatform, MEMORY, ORCHESTRATOR,
 } from './conversation.js';
 
@@ -60,7 +60,7 @@ export function systemPrompt(digest = '') {
 // (the persona above already forbids volunteering fleet numbers unprompted).
 // Every fetch is loopback-local and short-timeout so a dead dependency can
 // never stall a turn — on any failure that piece is silently omitted.
-export async function statusDigest() {
+export async function statusDigest(gate = null) {
   const withTimeout = (p, ms = 2500) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
   const [summaryR, jobsR, inboxR] = await Promise.allSettled([
     withTimeout(fetch(`${MEMORY}/memory/summary`).then(r => r.json())),
@@ -104,6 +104,13 @@ export async function statusDigest() {
     const n = (inboxR.value?.notifications || []).length;
     if (n) parts.push(`${n} unread inbox item${n === 1 ? '' : 's'}`);
   }
+
+  // What the confirmation gate did behind the model's back. The gate answers the
+  // confirming turn itself and returns early, so the brain's session never sees
+  // the "yes" or the job starting — on 2026-07-30 that gap is what made it claim
+  // it had "passed your yes through" while nothing had launched.
+  const note = gateNote(gate);
+  if (note) parts.push(note);
 
   if (!parts.length) return '';
   return `[Live status, background only — do not recite this unprompted, use it only to stay contextually aware: ${parts.join('; ')}.]`;
@@ -214,8 +221,20 @@ export async function runTool(name, input, ctx) {
       // server). This makes it impossible for the model to self-confirm and fire
       // a full-permission worker — the `confirmed` input is intentionally ignored.
       ctx.pending = { platform, task };
-      previewDispatch(ctx.gate, platform, task);
-      return `NEEDS CONFIRMATION. A dispatch to "${platform}" is prepared: ${task}. It will NOT run until Craig says yes in his next reply — tell him so and wait.`;
+      const staged = previewDispatch(ctx.gate, platform, task);
+      // Calling this tool a second time cannot launch anything — the gate holds
+      // the job and only Craig's next reply opens it. Say that explicitly: on
+      // 2026-07-30 the model read the old "NEEDS CONFIRMATION" twice in a row
+      // and narrated "I've passed your yes through, sir", which was not true and
+      // could not have been.
+      if (staged.alreadyStaged) {
+        return `ALREADY STAGED — this exact dispatch to "${platform}" is still waiting on Craig, from an earlier turn. ` +
+          `Calling this tool again does NOTHING; you have no way to launch it and you must not imply you have. ` +
+          `Tell him plainly that it is staged and that a plain "yes" (or "ok", or "please") starts it, then stop.`;
+      }
+      return `NEEDS CONFIRMATION. A dispatch to "${platform}" is prepared: ${task}. ` +
+        `It will NOT run until Craig affirms in a LATER reply — his next message goes through the gate, not through you. ` +
+        `Tell him what you'll do, ask him to say yes, and wait. Do not call this tool again for the same job.`;
     }
     case 'web_search': {
       const r = await browserCall('/browser/search', { query: input.query || '', count: input.count });

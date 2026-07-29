@@ -293,7 +293,7 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
     // including plain chit-chat that never touches the fleet. A slow/down
     // dependency degrades to "no digest this turn," never to added lag.
     const digest = await Promise.race([
-      statusDigest().catch(() => ''),
+      statusDigest(gate).catch(() => ''),
       new Promise((resolve) => setTimeout(() => resolve(''), 150)),
     ]);
 

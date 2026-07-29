@@ -459,6 +459,26 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   silently wiped it. If Jarvis ever "forgets" again, check that key first.
   The dispatch confirmation gate is deliberately NOT shared: a preview shown
   on one surface must not be confirmable from another.
+- **The confirmation gate reads a VOCABULARY, not a phrase list, and never
+  drops a staged job in silence (2026-07-30).** `resolveDispatchGate` /
+  `classifyGateReply` in `src/lib/conversation.js` are the only path from
+  "Craig said go" to a full-permission agent, and on 2026-07-30 that path was
+  shut: he staged a repair, answered **"please"**, and nothing launched. The
+  old `AFFIRM_RE` knew `please do` but not `please`, so the reply counted as an
+  unrelated command — which **silently deleted the pending** and passed the
+  text to the brain, which re-staged the identical job and said *"I've passed
+  your yes through, sir"*. Both halves were bugs. Now: a reply is classified
+  `yes|no|defer|none` against word sets (compact replies only — anything over 8
+  tokens or containing a word outside the sets is a fresh command, and any
+  negation vetoes a launch); a staged job survives `GATE_TTL_TURNS = 3` turns
+  of ordinary talk; re-staging the SAME job does not move its confirmation turn
+  (re-stamping made every "yes" one turn too early); and the gate leaves
+  `gate.launched` / `gate.lapsed` for `gateNote()`, which `statusDigest()`
+  feeds to the brain — the model cannot see the confirming turn (the gate
+  answers it and returns early), which is exactly why it used to invent one.
+  Gate-handled turns are also written to the shared transcript via
+  `recordTurn()`. Tests: `test/dispatch-gate.test.js` — add a case there before
+  widening the vocabulary, a false "yes" launches a production agent.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 

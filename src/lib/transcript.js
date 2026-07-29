@@ -173,13 +173,23 @@ export function saveTranscript() {
  * memory of its own; this is what gives it one.
  */
 export async function recordFallbackTurn(userText, replyText) {
+  return recordTurn(userText, replyText, '[via basic pipeline while the main brain was unavailable] ');
+}
+
+/**
+ * Record an exchange the reasoning brain did not produce.
+ *
+ * Two things answer Craig without the brain: the keyword pipeline (above) and
+ * the dispatch confirmation gate, which intercepts the confirming turn and
+ * returns before any brain runs. Neither used to reach the transcript, so the
+ * brain's next turn had no idea the exchange happened — on 2026-07-30 that made
+ * it talk about a job as still-staged after the gate had already launched it.
+ */
+export async function recordTurn(userText, replyText, prefix = '') {
   try {
     const t = await loadTranscript();
     t.push({ role: 'user', content: String(userText) });
-    t.push({
-      role: 'assistant',
-      content: `[via basic pipeline while the main brain was unavailable] ${String(replyText).slice(0, 500)}`,
-    });
+    t.push({ role: 'assistant', content: `${prefix}${String(replyText).slice(0, 500)}` });
     if (t.length > MAX_MESSAGES) t.splice(0, t.length - MAX_MESSAGES);
     saveTranscript();
   } catch { /* recording is best-effort — never block a reply on it */ }

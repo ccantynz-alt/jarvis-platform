@@ -448,34 +448,185 @@ export async function handleDispatch(rawText, platform, onEvent = () => {}) {
 // came through the agent brain OR the keyword fallback. The gate ({turn, pending})
 // lives on the connection: a preview stamps the turn it was shown in, and the job
 // only runs when the user affirms in a LATER turn. This is the sole execution path.
-export const AFFIRM_RE = /^\s*(y(es|ep|eah|up)?|confirm(ed)?|do it|go ahead|proceed|affirmative|make it so|please do|go for it|sure)\b/i;
-export const NEGATE_RE = /^\s*(no|nope|nah|cancel|stop|don'?t|do not|abort|negative|belay|forget it|leave it)\b/i;
+//
+// 2026-07-30 — THE GATE THAT NEVER OPENED. Craig staged a repair, answered it
+// with a bare "please", and nothing ever launched. Two defects, both here:
+//   1. The yes-vocabulary was a short anchored regex that knew "please do" but
+//      not "please". He confirms out loud, in his own words, through speech
+//      recognition — "please", "ok", "go on", "launch it", "yes mate" are all
+//      the same word to him, and only one of them used to count.
+//   2. Anything that did not match SILENTLY DELETED the staged job. He was never
+//      told, so from his side the gate simply swallowed the confirmation. The
+//      brain then re-staged the identical job and said "I've passed your yes
+//      through, sir" — the exact hallucination the truthfulness rule forbids,
+//      produced because the gate left it nothing truthful to say.
+// So: classify a whole reply against a vocabulary of affirmations rather than a
+// phrase list, hold the pending across a few turns of ordinary conversation
+// instead of dropping it at the first one, and always leave a trace
+// (gate.launched / gate.lapsed) that the brain reads in its status digest.
 
-// Stamp a pending dispatch and return the spoken confirmation prompt. Never runs.
+const GATE_TTL_TURNS = 3;   // turns of unrelated talk a staged job survives
+
+// Lower-case, drop Slack tags and the "hey jarvis" address prefix, keep only
+// letters/digits/apostrophes. Deliberately NOT intent.js's normalizeText: that
+// one strips "please" and "go" as polite lead-ins, which is exactly the signal
+// this gate needs to read.
+function normReply(raw) {
+  let t = String(raw || '').toLowerCase().replace(/<[^>]+>/g, ' ').trim();
+  t = t.replace(/^(hey|hi|ok|okay|yo|hello)?[\s,]*jarvis\b[\s,:!.?-]*/, ' ');
+  return t.replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// A word that on its own means "yes, do the thing".
+const YES_CORE = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'ya', 'yah', 'yes-please', 'aye', 'ok', 'okay', 'okey', 'kay',
+  'sure', 'please', 'pls', 'do', 'go', 'proceed', 'confirm', 'confirmed', 'affirmative',
+  'granted', 'approve', 'approved', 'authorised', 'authorized', 'absolutely', 'definitely',
+  'certainly', 'indeed', 'correct', 'roger', 'agreed', 'agree', 'launch', 'dispatch', 'deploy',
+  'send', 'ship', 'run', 'fire', 'crack', 'continue', 'permission', 'greenlight',
+]);
+
+// Any of these vetoes a launch, whatever else is in the sentence — fail safe.
+const NO_CORE = new Set([
+  'no', 'nope', 'nah', 'naw', 'not', 'negative', 'cancel', 'cancelled', 'abort', 'stop',
+  'forget', 'scrap', 'skip', 'belay', 'never', 'dont', "don't", 'wait', 'hold', 'hang', 'later',
+  'leave', 'ignore', 'nevermind', 'pause', 'park', 'unstage', 'withdraw',
+]);
+
+// Words that carry no instruction of their own. A reply made only of these plus
+// a core word is an acknowledgement, not a new command.
+const FILLER = new Set([
+  'it', 'that', 'this', 'then', 'now', 'sir', 'thanks', 'thank', 'you', 'cheers', 'mate', 'man',
+  'ahead', 'on', 'off', 'out', 'all', 'right', 'righto', 'fine', 'good', 'great', 'perfect',
+  'lovely', 'nice', 'cool', 'well', 'and', 'the', 'a', 'an', 'to', 'i', "i'm", 'im', 'we', 'us',
+  'my', 'me', 'for', 'of', 'by', 'with', 'up', 'one', 'two', 'moment', 'minute', 'sec', 'second',
+  'time', 'course', 'means', 'if', 'would', 'could', 'will', 'can', 'need', 'about', 'worry',
+  'bother', 'mind', 'yet', 'just', 'still', 'so', 'lets', "let's", 'let', 'give', 'happy', 'away',
+]);
+
+const DEFER_RE = /\b(wait|hold|hang|later|not yet|give me|minute|moment|sec|second)\b/;
+
+/**
+ * What is this reply, in the context of a staged dispatch?
+ * 'yes' launch · 'no' drop it · 'defer' keep holding · 'none' a fresh command.
+ *
+ * Pure and exported so the vocabulary is testable without a live orchestrator —
+ * this function is the whole safety boundary between "Craig said go" and a
+ * full-permission agent pushing to a production branch.
+ */
+export function classifyGateReply(raw) {
+  const t = normReply(raw);
+  if (!t) return 'none';
+  const toks = t.split(' ');
+  // A long sentence is a new instruction, never a bare acknowledgement.
+  if (toks.length > 8) return 'none';
+  if (!toks.every(w => YES_CORE.has(w) || NO_CORE.has(w) || FILLER.has(w))) return 'none';
+  if (toks.length <= 6 && DEFER_RE.test(t)) return 'defer';
+  if (toks.some(w => NO_CORE.has(w))) return 'no';
+  return toks.some(w => YES_CORE.has(w)) ? 'yes' : 'none';
+}
+
+const sameTask = (a, b) =>
+  String(a || '').trim().toLowerCase().replace(/\s+/g, ' ') ===
+  String(b || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+/**
+ * Stamp a pending dispatch and return the spoken confirmation prompt. Never runs.
+ *
+ * Re-staging the SAME job does NOT move its confirmation turn forward. The brain
+ * re-calls dispatch_job whenever it thinks a confirmation went missing, and
+ * re-stamping made "yes" permanently one turn too early: every affirmation
+ * arrived on the same turn as a fresh preview, which the gate must refuse.
+ */
 export function previewDispatch(gate, platform, task) {
-  if (gate) gate.pending = { platform, task, turn: gate.turn };
-  const m = `Ready to dispatch to ${platform}: ${task}. Shall I proceed, sir? Say yes to confirm.`;
+  const m = `Ready to dispatch to ${platform}: ${task}. Shall I proceed, sir? Say yes and I'll launch it.`;
+  if (!gate) return { text: m, speech: m, previewed: true };
+  if (gate.pending && gate.pending.platform === platform && sameTask(gate.pending.task, task)) {
+    gate.pending.restaged = (gate.pending.restaged || 0) + 1;
+    gate.pending.expiresTurn = gate.turn + GATE_TTL_TURNS;   // he clearly still wants it
+    return { text: m, speech: m, previewed: true, alreadyStaged: true };
+  }
+  gate.pending = { platform, task, turn: gate.turn, expiresTurn: gate.turn + GATE_TTL_TURNS };
   return { text: m, speech: m, previewed: true };
 }
 
-// Call FIRST on every command. If a dispatch is awaiting confirmation from an
-// EARLIER turn and the user affirms, it runs; if they decline, it's dropped;
-// anything else drops the stale pending and is treated as a fresh command.
+/**
+ * Call FIRST on every command. A dispatch staged in an EARLIER turn runs when
+ * Craig affirms, is dropped when he declines, and otherwise KEEPS WAITING —
+ * ordinary conversation no longer destroys it, and when it finally lapses the
+ * gate says so via gate.lapsed instead of forgetting in silence.
+ */
 export async function resolveDispatchGate(gate, text, onEvent = () => {}) {
-  if (!gate || !gate.pending || gate.pending.turn >= gate.turn) return { handled: false };
+  if (!gate || !gate.pending) return { handled: false };
   const p = gate.pending;
-  if (AFFIRM_RE.test(text)) {
+  // The preview and the yes must be two separate human turns — that is the
+  // whole safety property. A same-turn affirmation is not an affirmation.
+  if (p.turn >= gate.turn) return { handled: false };
+
+  const verdict = classifyGateReply(text);
+
+  if (verdict === 'yes') {
     gate.pending = null;
     const res = await handleDispatch(p.task, p.platform, onEvent);
+    // Let the brain know out loud what its own tool could not do — see
+    // gateNote(). Without this the model has no evidence the job ever ran.
+    gate.launched = { platform: p.platform, task: p.task, jobId: res.data?.jobId || null, ok: !!res.data?.jobId };
     return { handled: true, ...res };
   }
-  if (NEGATE_RE.test(text)) {
+
+  if (verdict === 'no') {
     gate.pending = null;
     const m = `Understood, sir — I'll leave ${p.platform} be.`;
+    gate.lapsed = { platform: p.platform, task: p.task, reason: 'declined' };
     return { handled: true, text: m, speech: m };
   }
-  gate.pending = null;
+
+  if (verdict === 'defer') {
+    p.expiresTurn = gate.turn + GATE_TTL_TURNS;
+    const m = `Standing by, sir — the ${p.platform} job is still staged. Say the word.`;
+    return { handled: true, text: m, speech: m };
+  }
+
+  // A fresh command is not a rejection. Hold the job for a few turns; if he
+  // never comes back to it, drop it and leave a note the digest will surface.
+  if (gate.turn > (p.expiresTurn ?? p.turn + GATE_TTL_TURNS)) {
+    gate.pending = null;
+    gate.lapsed = { platform: p.platform, task: p.task, reason: 'expired' };
+  }
   return { handled: false };
+}
+
+/**
+ * One-shot background note for the brain's status digest: what the gate did that
+ * the model could not see, and what is still waiting on Craig. Reading it clears
+ * it, so a launch is announced once and never re-litigated.
+ *
+ * This is the other half of the 2026-07-30 fix. The gate intercepts the
+ * confirming turn and returns early, so the brain's own session never witnesses
+ * the "yes" or the job starting — which is precisely why it invented a story
+ * about having passed one through.
+ */
+export function gateNote(gate) {
+  if (!gate) return '';
+  const parts = [];
+  if (gate.launched) {
+    const l = gate.launched;
+    parts.push(l.ok
+      ? `the ${l.platform} job you staged is NOW RUNNING — Craig confirmed it and the gate launched it${l.jobId ? ` (job ${String(l.jobId).slice(0, 8)})` : ''}; do not stage it again`
+      : `Craig confirmed the ${l.platform} job but the orchestrator refused it — say so plainly if he asks`);
+    gate.launched = null;
+  }
+  if (gate.lapsed) {
+    const x = gate.lapsed;
+    parts.push(x.reason === 'declined'
+      ? `Craig declined the staged ${x.platform} job — it is gone, do not revive it unless he asks`
+      : `the staged ${x.platform} job lapsed without a yes — mention it if it still matters, or stage it again if he asks`);
+    gate.lapsed = null;
+  }
+  if (gate.pending && gate.pending.turn < gate.turn) {
+    parts.push(`a dispatch to ${gate.pending.platform} is STILL STAGED and waiting on Craig's yes — you cannot launch it yourself, do not call dispatch_job again, just remind him a plain "yes" starts it`);
+  }
+  return parts.join('; ');
 }
 
 export async function handleJobs() {

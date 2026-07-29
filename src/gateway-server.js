@@ -40,7 +40,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, loadRoadmap } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { notify } from './lib/notify.js';
-import { loadTranscript, saveTranscript, recordFallbackTurn } from './lib/transcript.js';
+import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
 
 const PORT         = 9208;
 const ORCHESTRATOR = 'http://127.0.0.1:9205';
@@ -343,6 +343,9 @@ wss.on('connection', (ws, req) => {
           (m) => ws.send(JSON.stringify({ type: 'reply', text: m.text, speech: m.speech, interim: true })));
         if (gated.handled) {
           if (gated.data?.jobId) watchJob(gated.data.jobId, gated.data.platform || 'auto');
+          // Keep the shared conversation whole even when the gate, not the
+          // brain, answered — see recordTurn (2026-07-30).
+          recordTurn(text, gated.speech || gated.text).catch(() => {});
           return ws.send(JSON.stringify({ type: 'reply', text: gated.text, speech: gated.speech, via: 'dispatch-gate', ms: Date.now() - t0 }));
         }
 

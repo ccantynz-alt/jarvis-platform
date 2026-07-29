@@ -39,7 +39,7 @@ import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
 import { openTtsStream } from './lib/tts-stream.js';
-import { loadTranscript, saveTranscript, recordFallbackTurn } from './lib/transcript.js';
+import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
 
 const PORT      = 9210;
 const SCHEDULER = 'http://127.0.0.1:9209';
@@ -727,7 +727,13 @@ wss.on('connection', (ws, req) => {
       // keyword fallback, so no path can launch a worker from one turn.
       const gated = await resolveDispatchGate(dispatchGate, text,
         (m) => send({ type: 'chat', text: m.speech || m.text }));
-      if (gated.handled) return send({ type: 'chat', text: gated.text, speech: gated.speech });
+      if (gated.handled) {
+        // The gate answered instead of the brain — put it in the shared
+        // conversation anyway, or the brain's next turn thinks the job is still
+        // waiting on a yes it never saw arrive (2026-07-30).
+        recordTurn(text, gated.speech || gated.text).catch(() => {});
+        return send({ type: 'chat', text: gated.text, speech: gated.speech });
+      }
       if (hasAgent()) {
         const transcript = await loadTranscript();
         const before = transcript.length;

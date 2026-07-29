@@ -282,7 +282,7 @@ async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null, 
   // Bounded to 150ms (2026-07-21, latency audit) — see brain-claude.js for
   // why this must never add to first-token latency.
   const digest = await Promise.race([
-    statusDigest().catch(() => ''),
+    statusDigest(gate).catch(() => ''),
     new Promise((resolve) => setTimeout(() => resolve(''), 150)),
   ]);
 
