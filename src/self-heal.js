@@ -29,7 +29,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { execFile } from 'child_process';
-import { lookup } from 'dns/promises';
+import { lookup, Resolver } from 'dns/promises';
 import { loadPlatforms } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
@@ -108,15 +108,55 @@ export function hostOf(url) {
  *                  about the domain, so we neither dispatch nor blame it.
  * Collapsing those two would either burn agents on expired domains or blame a
  * customer's DNS for our own resolver hiccup.
+ *
+ * A SECOND OPINION is taken before saying nxdomain (2026-07-30). This box's
+ * resolvers intermittently answer NXDOMAIN for a name that plainly exists:
+ * measured on vapron.ai, the system resolver failed 2 of 6 and 5 of 8 lookups
+ * with `getaddrinfo ENOTFOUND` while 1.1.1.1 answered every time
+ * (149.28.119.158, which is box 158 as the registry says), and eight other
+ * domains were 6/6 in the same sample. glibc treats an NXDOMAIN as authoritative
+ * and does NOT fall through to the next `nameserver` line, so one bad answer from
+ * the first resolver is the whole result.
+ *
+ * That matters here more than anywhere else, because `nxdomain` is the verdict
+ * that ALERTS Craig ("your domain does not exist") and spends one of the day's
+ * capped attempts. Telling him a live platform's domain has vanished, because of
+ * a resolver hiccup, is exactly the false alarm that teaches someone to ignore
+ * alerts. It also likely explains the 13% probe-failure rate on vapron.ai
+ * recorded in fleet-check.sh's comment, which was attributed to a slow site.
+ *
+ * gatetest.ai — genuinely expired — fails at BOTH resolvers, so it still reads
+ * nxdomain and still gets the alert it deserves.
  */
-export async function dnsState(url) {
+const SECOND_OPINION_SERVERS = (process.env.SELF_HEAL_DNS_CHECK || '1.1.1.1,9.9.9.9')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
+async function resolvesElsewhere(host, { resolver = null } = {}) {
+  if (!SECOND_OPINION_SERVERS.length) return false;
+  try {
+    const r = resolver || new Resolver({ timeout: 3000, tries: 1 });
+    if (!resolver) r.setServers(SECOND_OPINION_SERVERS);
+    const addrs = await r.resolve4(host);
+    return Array.isArray(addrs) && addrs.length > 0;
+  } catch {
+    return false;   // it does not resolve there either — the local answer stands
+  }
+}
+
+export async function dnsState(url, { lookupFn = lookup, secondOpinion = resolvesElsewhere } = {}) {
   const host = hostOf(url);
   if (!host) return 'n/a';
   try {
-    await lookup(host);
+    await lookupFn(host);
     return 'ok';
   } catch (e) {
-    return e?.code === 'ENOTFOUND' ? 'nxdomain' : 'unresolvable';
+    if (e?.code !== 'ENOTFOUND') return 'unresolvable';
+    // Do not accuse a domain of not existing on one resolver's word.
+    if (await secondOpinion(host)) {
+      log(`${host}: system resolver said ENOTFOUND but ${SECOND_OPINION_SERVERS[0]} resolves it — treating as OK, and this box's DNS is the thing at fault`);
+      return 'ok';
+    }
+    return 'nxdomain';
   }
 }
 

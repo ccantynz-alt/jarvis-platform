@@ -108,3 +108,60 @@ test('no URL to check is not a DNS verdict', async () => {
   assert.equal(await dnsState(undefined), 'n/a');
   assert.equal(await dnsState('gibberish'), 'n/a');
 });
+
+// ── A resolver hiccup must not be reported as a vanished domain (2026-07-30) ──
+// Measured on the box: the system resolver answered `getaddrinfo ENOTFOUND` for
+// vapron.ai on 2 of 6 and 5 of 8 lookups while 1.1.1.1 resolved it every time
+// (149.28.119.158 — box 158, exactly as the registry says), with eight other
+// domains 6/6 in the same sample. glibc treats NXDOMAIN as authoritative and does
+// not fall through to the next `nameserver` line, so one bad answer is the result.
+//
+// `nxdomain` is the verdict that ALERTS Craig and spends a capped daily attempt,
+// so it is the one that must not be reached on a single resolver's word.
+
+const enotfound = () => { const e = new Error('getaddrinfo ENOTFOUND x'); e.code = 'ENOTFOUND'; throw e; };
+
+test('a live domain the local resolver denies is not called nxdomain', async () => {
+  const s = await dnsState('https://vapron.ai', {
+    lookupFn: enotfound,
+    secondOpinion: async () => true,     // 1.1.1.1 resolves it fine
+  });
+  assert.equal(s, 'ok', 'the local resolver was wrong, and the platform is not to blame');
+});
+
+test('a genuinely expired domain still reads nxdomain and still gets the alert', async () => {
+  // gatetest.ai: fails at BOTH resolvers. This is the case the alert exists for,
+  // and softening it would undo the 2026-07-30 fix that stopped six repair agents
+  // being spent on a registry problem.
+  const s = await dnsState('https://gatetest.ai', {
+    lookupFn: enotfound,
+    secondOpinion: async () => false,
+  });
+  assert.equal(s, 'nxdomain');
+});
+
+test('a resolver timeout is still "unresolvable" and never consults a second opinion', async () => {
+  // EAI_AGAIN says nothing about the domain, so it must not dispatch OR blame —
+  // and it must not spend a second lookup deciding that.
+  let asked = false;
+  const s = await dnsState('https://vapron.ai', {
+    lookupFn: () => { const e = new Error('EAI_AGAIN'); e.code = 'EAI_AGAIN'; throw e; },
+    secondOpinion: async () => { asked = true; return true; },
+  });
+  assert.equal(s, 'unresolvable');
+  assert.equal(asked, false, 'the second opinion is only for an NXDOMAIN claim');
+});
+
+test('a domain that resolves normally never reaches the second opinion at all', async () => {
+  let asked = false;
+  const s = await dnsState('https://zoobicon.com', {
+    lookupFn: async () => ({ address: '216.150.1.1' }),
+    secondOpinion: async () => { asked = true; return false; },
+  });
+  assert.equal(s, 'ok');
+  assert.equal(asked, false, 'the happy path costs nothing');
+});
+
+test('a malformed URL is n/a, not an accusation', async () => {
+  assert.equal(await dnsState('not a url'), 'n/a');
+});
