@@ -75,6 +75,37 @@ Kill switch: `PUSH_DISABLED=1`. Tests: `test/push.test.js`.
 5. Verify: `curl -d "hello" https://ntfy.sh/<topic>` from anywhere should buzz
    every device.
 
+#### Verified 2026-07-30 — the box's half of this works
+
+Checked rather than assumed, because "the code exists" is exactly the mistake that
+kept the off-box watchdog open for a month.
+
+- **The box can publish.** `pushAlert()` run from a service environment returned
+  `{sent: true, status: 200}` and the message appeared in ntfy's own topic cache.
+  Sent at info level — ntfy priority 2, no sound, no vibration — so proving it
+  woke nobody.
+- **It has been publishing for real.** Polling the topic cache (`GET
+  /<topic>/json?poll=1&since=72h`, which sends nothing) shows **9 messages**: five
+  gatetest DNS alerts between 03:18 and 04:48, one critical Gluecron defect, the
+  Gluecron AI-approval finding, the universal-ai-operator data-loss alert, and the
+  silent test above. All at the right priority.
+- **The five identical gatetest alerts in 90 minutes were a real defect**, fixed
+  the same day — self-heal now says that once per day rather than every tick. None
+  since 04:48, which is the proof the fix works.
+- **One alert genuinely failed to send**: at 09:03:21 the metrics service raised
+  "jarvis-browser is not listening" and push.js answered *"no NTFY_TOPIC configured
+  — device alerts are OFF"*, because `jarvis-metrics.service` had no
+  `EnvironmentFile`. Fixed, and the chain re-proved from that same configuration.
+
+**So if your phone has never buzzed, the missing piece is step 3 above — the
+devices are not subscribed.** Nothing on the box is waiting on anything else.
+
+Useful check, any time, from anywhere (sends nothing):
+
+```bash
+curl -s "https://ntfy.sh/<topic>/json?poll=1&since=24h" | jq -r '.title'
+```
+
 ### 2. Off-box watchdog — `.github/workflows/offbox-watchdog.yml` (added 2026-07-30)
 
 The channel for *"Jarvis is dead and therefore cannot tell you"*. Runs on a
