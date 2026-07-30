@@ -57,23 +57,28 @@ const PLATFORM_CONFIG = {
   },
   alecrae: {
     // /opt/alecrae, per config/platforms.json and CLAUDE.md — AlecRae runs on
-    // THIS box. This said /var/www/alecrae, which has never existed here; see
-    // lib/checkout.js for what that silently produced every day.
+    // THIS box. This said /var/www/alecrae, which has never existed here, so the
+    // commands below had never once run; see lib/checkout.js for what that
+    // silently produced every day instead.
     path: process.env.ALECRAE_PATH || '/opt/alecrae',
     urls: ['https://alecrae.com'],
-    // NON-MUTATING on purpose (Rule 4). Correcting the path above means these
-    // commands are about to run for the first time ever, inside a LIVE co-tenant:
-    // alecrae-api and alecrae-web are both active on this box, and /opt/alecrae is
-    // their working tree. `npm run build` was configured, which is wrong twice
-    // over — the repo is bun (packageManager: bun@1.2.0), and `turbo run build`
-    // would regenerate Next.js output underneath the running :4200 server.
-    // `bun run typecheck` reads the code and writes nothing; same reasoning and
-    // same shape as the gluecron entry above.
+    // NON-MUTATING on purpose (Rule 4). Fixing the path meant these commands were
+    // about to run for the first time ever inside a LIVE co-tenant: alecrae-api
+    // and alecrae-web are both active and /opt/alecrae is their working tree.
+    // `npm run build` was configured, which was wrong twice over — the repo is bun
+    // (packageManager: bun@1.2.0), and `turbo run build` would regenerate Next.js
+    // output underneath the running :4200 server. `bun run typecheck` reads the
+    // code and writes nothing; same reasoning and shape as gluecron above.
+    //
+    // MEASURED 2026-07-30, because the first real run OOM-killed jarvis-audit at
+    // 72 seconds: a cold `turbo run typecheck --force` exits 137 under 1536M and
+    // exits 0 under 2G, so the unit's ceiling went to 2560M (~25% headroom; the
+    // box has 7.9G total and 4.9G available). All 36 tasks pass — AlecRae's
+    // TypeScript is clean. A warm run is 807ms and fully cached.
     buildCmd: 'bun run typecheck',
     // testCmd left null deliberately: `turbo run test` in a monorepo that also
-    // carries db:migrate/db:push scripts and k6 load tests is not something to
-    // start unattended against a co-tenant. Turning it on is Craig's call —
-    // flagged in docs/FINDINGS-2026-07-30.md.
+    // carries db:migrate/db:push scripts and k6 load-test targets is not something
+    // to start unattended against a live co-tenant. Enabling it is Craig's call.
     testCmd: null,
     checkCmd: null
   },

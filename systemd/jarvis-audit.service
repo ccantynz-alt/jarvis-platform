@@ -19,7 +19,8 @@ EnvironmentFile=/opt/jarvis/config/secrets.env
 # the general rationale.
 # Kept in step with systemd/dropins/jarvis-audit.service.d/50-memory.conf (2026-07-30),
 # which is what systemd actually enforces on the box. Change both, or neither.
-MemoryMax=1536M
+# 2560M since 2026-07-30 — see the drop-in for the measurement behind it.
+MemoryMax=2560M
 MemorySwapMax=256M
 CPUQuota=150%
 
