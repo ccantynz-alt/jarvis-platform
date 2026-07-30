@@ -51,10 +51,25 @@ the app can be set to punch through the phone's own quiet modes).
   channel exists at all.
 - *Buzzing so often he mutes it.* `info` is held back unless
   `PUSH_MIN_LEVEL=info`; repeated headlines are deduped for `PUSH_DEDUPE_MINUTES`;
-  there's a `PUSH_MAX_PER_HOUR` cap. **`alert` is exempt from both** — an
-  emergency repeating IS the signal. Both limits go through `lib/guardrail.js`,
-  so an inline comment in `secrets.env` can't silently remove them (the
-  2026-07-17 incident).
+  there's a `PUSH_MAX_PER_HOUR` cap. `alert` is exempt from the hourly cap — a
+  storm of *distinct* criticals is signal — but **not from dedupe** (corrected
+  2026-07-30): an identical alert headline waits `PUSH_ALERT_DEDUPE_HOURS`
+  (default 6) before it can buzz again.
+
+  That exemption used to be total, reasoned around self-heal, which caps its own
+  retries. The agent org does not: it re-runs on cron and re-escalates anything
+  still unfixed, so `social-media-voxlen` raised the identical
+  "voxlen.com is a parked for-sale page" alert on 19, 20, 21, 22 and 23 July, and
+  would have kept going for the eleven days the issue has now lasted. Priority 5
+  bypasses Do Not Disturb *by design* (step 4 above), so identical repeats are
+  precisely what teaches someone to mute the one channel that works. A persistent
+  problem should **remind**, not repeat. Two things are deliberately still
+  un-deduped: distinct headlines, and an ESCALATION — the same headline arriving
+  as `alert` after going out as `warn` gets through, because the severity change
+  is itself the news.
+
+  All limits go through `lib/guardrail.js`, so an inline comment in `secrets.env`
+  can't silently remove them (the 2026-07-17 incident).
 
 Kill switch: `PUSH_DISABLED=1`. Tests: `test/push.test.js`.
 

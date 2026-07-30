@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { pushAlert, hasPush, _reset } from '../src/lib/push.js';
 
 const ENV = ['NTFY_TOPIC', 'NTFY_SERVER', 'NTFY_TOKEN', 'PUSH_MIN_LEVEL', 'PUSH_DISABLED',
-  'PUSH_CLICK_URL', 'PUSH_MAX_PER_HOUR', 'PUSH_DEDUPE_MINUTES'];
+  'PUSH_CLICK_URL', 'PUSH_MAX_PER_HOUR', 'PUSH_DEDUPE_MINUTES', 'PUSH_ALERT_DEDUPE_HOURS'];
 
 test.beforeEach(() => {
   for (const k of ENV) delete process.env[k];
@@ -218,4 +218,52 @@ test('notify normalises the synonyms callers actually use', async () => {
   assert.equal(normalizeLevel('INFO'), 'info');
   assert.equal(await quiet(() => normalizeLevel('spicy')), 'warn', 'an invented level is heard, not dropped');
   assert.equal(await quiet(() => normalizeLevel(undefined)), 'warn');
+});
+
+// ── A persistent problem should REMIND, not repeat (2026-07-30) ──────────────
+// 'alert' used to be exempt from dedupe entirely. That reasoning held for
+// self-heal, which caps its own retries, and not for the agent org, which re-runs
+// on cron and re-escalates anything still unfixed. social-media-voxlen escalated
+// the identical "voxlen.com is a parked for-sale page" at alert level on 19, 20,
+// 21, 22 and 23 July — five identical max-priority pushes, and it would have kept
+// going for the eleven days the issue has now lasted. Priority 5 bypasses Do Not
+// Disturb by design, so that is precisely what makes someone mute the one channel
+// that works.
+
+test('an identical alert does not repeat every time an agent re-runs', async () => {
+  process.env.NTFY_TOPIC = 't';
+  process.env.PUSH_ALERT_DEDUPE_HOURS = '6';
+  const f = capture();
+  try {
+    const title = 'voxlen.com redirects to a GoDaddy for-sale page';
+    assert.equal((await pushAlert({ level: 'alert', title })).sent, true, 'the first one must arrive');
+    assert.equal((await pushAlert({ level: 'alert', title })).reason, 'deduped',
+      "tomorrow's identical re-escalation must not buzz again inside the window");
+    assert.equal(f.calls.length, 1, 'exactly one push left the box');
+  } finally { f.restore(); delete process.env.PUSH_ALERT_DEDUPE_HOURS; }
+});
+
+test('distinct alerts are never suppressed by another alert', async () => {
+  // Dedupe is per-headline, so an unfolding incident still arrives in full.
+  process.env.NTFY_TOPIC = 't';
+  const f = capture();
+  try {
+    assert.equal((await pushAlert({ level: 'alert', title: 'memory is not listening' })).sent, true);
+    assert.equal((await pushAlert({ level: 'alert', title: 'orchestrator is not listening' })).sent, true);
+    assert.equal((await pushAlert({ level: 'alert', title: 'the disk is full' })).sent, true);
+    assert.equal(f.calls.length, 3);
+  } finally { f.restore(); }
+});
+
+test('an escalation from warn to alert is new information and gets through', async () => {
+  // The severity change IS the news, so dedupe keys on level as well as headline.
+  process.env.NTFY_TOPIC = 't';
+  const f = capture();
+  try {
+    const title = 'gatetest is unreachable';
+    assert.equal((await pushAlert({ level: 'warn', title })).sent, true);
+    assert.equal((await pushAlert({ level: 'warn', title })).reason, 'deduped');
+    assert.equal((await pushAlert({ level: 'alert', title })).sent, true, 'it got worse — say so');
+    assert.equal((await pushAlert({ level: 'alert', title })).reason, 'deduped', 'but only once');
+  } finally { f.restore(); }
 });

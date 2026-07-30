@@ -39,7 +39,7 @@ const LEVEL_TAGS = { info: 'information_source', warn: 'warning', alert: 'rotati
 
 const state = {
   warned: false,          // "no topic configured" is said once, not per alert
-  recent: new Map(),      // title → last sent ms, for dedupe
+  recent: new Map(),      // title → {at, level} of the last push, for dedupe
   hourStart: 0,
   hourCount: 0,
 };
@@ -95,11 +95,36 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
   if (now - state.hourStart > 3_600_000) { state.hourStart = now; state.hourCount = 0; }
   if (state.hourCount >= perHour && lvl !== 'alert') return { sent: false, reason: 'rate-capped' };
 
-  // Dedupe repeats of the same headline. 'alert' is exempt: a real emergency
-  // repeating IS the signal, and self-heal already caps its own retries.
-  const dedupeMs = guardrail('PUSH_DEDUPE_MINUTES', 10, { source: 'push' }) * 60_000;
+  // Dedupe repeats of the same headline.
+  //
+  // 'alert' used to be exempt entirely, on the reasoning that a real emergency
+  // repeating IS the signal and self-heal caps its own retries. That holds for
+  // self-heal and NOT for the agent org, which re-runs on cron and re-escalates
+  // anything still unfixed — so an identical max-priority push would arrive on
+  // every run, for as long as the issue lasts. Two demonstrations, both real:
+  //
+  //   social-media-voxlen escalated "voxlen.com is a parked for-sale page" at
+  //   alert level on 19, 20, 21, 22 and 23 July — five identical alerts, and it
+  //   would have kept going for the eleven days the issue has now lasted;
+  //   self-heal raised the same gatetest DNS alert five times in 90 minutes on
+  //   2026-07-30 (fixed at the source that day, but push.js is the last line).
+  //
+  // Priority 5 bypasses Do Not Disturb by design — docs/ALERTS.md tells him to
+  // enable that — so identical repeats are exactly what makes someone mute the
+  // one channel that works. The answer is not to silence a persistent problem but
+  // to let it REMIND rather than repeat: alerts keep their own, much longer
+  // window. Dedupe is per-title, so distinct criticals are unaffected; an
+  // unfolding incident with different headlines still comes through in full.
+  // An ESCALATION is never deduped, though: if a headline went out as a warning
+  // and the same headline now arrives as an alert, the severity itself is the new
+  // information. Only a repeat at the same level or lower is suppressed.
+  const dedupeMs = lvl === 'alert'
+    ? guardrail('PUSH_ALERT_DEDUPE_HOURS', 6, { source: 'push' }) * 3_600_000
+    : guardrail('PUSH_DEDUPE_MINUTES', 10, { source: 'push' }) * 60_000;
   const last = state.recent.get(title);
-  if (last && now - last < dedupeMs && lvl !== 'alert') return { sent: false, reason: 'deduped' };
+  if (last && now - last.at < dedupeMs && LEVEL_ORDER[lvl] <= LEVEL_ORDER[last.level]) {
+    return { sent: false, reason: 'deduped' };
+  }
 
   const headers = {
     'Content-Type': 'text/plain; charset=utf-8',
@@ -124,7 +149,7 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
       console.warn(`[push] ntfy responded ${r.status}`);
       return { sent: false, reason: 'http', status: r.status };
     }
-    state.recent.set(title, now);
+    state.recent.set(title, { at: now, level: lvl });
     state.hourCount++;
     if (state.recent.size > 200) state.recent.clear();  // unbounded maps are leaks
     return { sent: true, status: r.status };
