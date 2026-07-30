@@ -29,6 +29,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { execFile } from 'child_process';
+import { lookup } from 'dns/promises';
 import { loadPlatforms } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
@@ -93,6 +94,32 @@ function saveState(p, s) { if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { re
  *
  * Pure and exported so the rollover is testable without waiting for midnight.
  */
+export function hostOf(url) {
+  try { return new URL(url).hostname; } catch { return null; }
+}
+
+/**
+ * Does this URL's hostname resolve? 'ok' | 'nxdomain' | 'unresolvable' | 'n/a'
+ *
+ * The distinction matters and is deliberately three-valued:
+ *   nxdomain     — the name does not exist. A registrar/zone problem. Nothing on
+ *                  this box can fix it, so no repair agent should be spent.
+ *   unresolvable — our resolver failed (EAI_AGAIN, timeout). That says nothing
+ *                  about the domain, so we neither dispatch nor blame it.
+ * Collapsing those two would either burn agents on expired domains or blame a
+ * customer's DNS for our own resolver hiccup.
+ */
+export async function dnsState(url) {
+  const host = hostOf(url);
+  if (!host) return 'n/a';
+  try {
+    await lookup(host);
+    return 'ok';
+  } catch (e) {
+    return e?.code === 'ENOTFOUND' ? 'nxdomain' : 'unresolvable';
+  }
+}
+
 export function rollDay(s, day = today()) {
   if (!s) return s;
   // Trust `lastAttempt` over the stored `day`. The stored value was being
@@ -222,6 +249,36 @@ export async function runOnce() {
       await notify({ source: 'self-heal', level: 'alert', title: `🔴 ${name} is down (manual)`, body: `${url || name} HTTP ${code}, ${downMin}m. Not auto-repairable (${entry.server}).`, speech: `${name} is down and needs manual attention.` });
       saveState(name, s); continue;
     }
+    // ---- is this even a SERVER problem? (2026-07-30) ----
+    // A name that no longer resolves cannot be fixed from this box, and no agent
+    // should be spent discovering that. gatetest.ai taught this the expensive
+    // way: its domain entered .ai redemption on 2026-07-29, DNS went NXDOMAIN,
+    // and self-heal dispatched SIX repair agents in one day — twelve runs in
+    // total — each of which correctly concluded "registry-level, nothing to do
+    // here" after several minutes of a full-permission agent's time. The server
+    // was answering 200 on localhost the whole time.
+    const dns = await dnsState(url);
+    if (dns === 'nxdomain') {
+      log(`${name}: DOWN because ${hostOf(url)} does not resolve — registry/DNS, not this box. No agent dispatched.`);
+      // Counts as an attempt on purpose: it puts the cooldown in front of the
+      // next check so this notify can't repeat every five minutes.
+      s.lastAttempt = now();
+      s.attemptsToday += 1;
+      await notify({
+        source: 'self-heal', level: 'alert',
+        title: `${name} is down because its DOMAIN does not resolve`,
+        body: `${url} returns nothing because ${hostOf(url)} has no DNS record — an expired/parked domain or a ` +
+          `deleted zone, not a server fault. Check the registrar. Nothing on this box can fix it, so I have not ` +
+          `spent a repair agent (attempt ${s.attemptsToday}/${MAX_ATTEMPTS_PER_DAY} today).`,
+        speech: `Sir, ${name} is down because its domain no longer resolves. That is a registrar problem — I can't fix it from here.`,
+      });
+      saveState(name, s); continue;
+    }
+    if (dns === 'unresolvable') {
+      log(`${name}: DNS lookup for ${hostOf(url)} failed temporarily — waiting for the next tick rather than guessing`);
+      saveState(name, s); continue;   // no attempt counted: our resolver, not their domain
+    }
+
     if (now() - s.lastAttempt < COOLDOWN_MIN * 60000) { log(`${name}: in cooldown (${Math.round((now()-s.lastAttempt)/60000)}m/${COOLDOWN_MIN}m)`); saveState(name, s); continue; }
     if (s.attemptsToday >= MAX_ATTEMPTS_PER_DAY) {
       log(`${name}: daily cap hit (${s.attemptsToday}/${MAX_ATTEMPTS_PER_DAY}) — escalate`);

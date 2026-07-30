@@ -79,3 +79,32 @@ test('a missing state object is handled rather than thrown on', () => {
   assert.equal(rollDay(null, '2026-07-30'), null);
   assert.equal(rollDay(undefined, '2026-07-30'), undefined);
 });
+
+// ── "is this even a server problem?" ────────────────────────────────────────
+// gatetest.ai's domain entered .ai redemption on 2026-07-29. DNS went NXDOMAIN,
+// and self-heal dispatched SIX full-permission repair agents in one day (twelve
+// runs in total), each of which spent minutes concluding "registry-level, nothing
+// to do here" while the server answered 200 on localhost the whole time.
+
+import { hostOf, dnsState } from '../src/self-heal.js';
+
+test('hostOf survives whatever is in the URL table', () => {
+  assert.equal(hostOf('https://gatetest.ai'), 'gatetest.ai');
+  assert.equal(hostOf('https://www.bookaride.co.nz/path?x=1'), 'www.bookaride.co.nz');
+  assert.equal(hostOf('not a url'), null);
+  assert.equal(hostOf(undefined), null);
+});
+
+test('a name that does not exist is nxdomain, not a server fault', async () => {
+  // .invalid is reserved by RFC 2606 precisely so this can never resolve.
+  assert.equal(await dnsState('https://jarvis-self-heal-test.invalid'), 'nxdomain');
+});
+
+test('a resolvable name is ok', async () => {
+  assert.equal(await dnsState('https://localhost'), 'ok');
+});
+
+test('no URL to check is not a DNS verdict', async () => {
+  assert.equal(await dnsState(undefined), 'n/a');
+  assert.equal(await dnsState('gibberish'), 'n/a');
+});
