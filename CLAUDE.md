@@ -53,6 +53,14 @@ found late — see Rule 0 note below):**
   `status`/`health_score` to `platform_state` via `/memory/platform/update`.
   2+ consecutive misses → `status=error`. Also tracks flap history per
   platform (oscillating healthy/error) separately from steady downtime.
+  **`TimeoutStartSec=600` was added 2026-07-30** — `Type=oneshot` DISABLES the
+  start timeout by default, and the memory write had no `--max-time`, so a
+  stalled memory-server could hang the run forever; systemd then skips every
+  timer activation while the unit sits in `activating`. Since this is what
+  notices a platform is down, and self-heal only ever acts on the status it
+  writes, the whole detect-and-repair chain would have gone quiet with every
+  service still showing green. If you add another `oneshot` unit here, set the
+  timeout explicitly — the default is not a default.
 - **`src/self-heal.js`** — `jarvis-self-heal.timer`, every 5 min (per
   `config/self-heal.env`, reconstructed 2026-07-24). Watches for
   `platform_state.status === 'error'` (fleet-check's signal) and
