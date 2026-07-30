@@ -42,9 +42,30 @@ const GATEWAY_URL   = cfg.JARVIS_GATEWAY_URL || 'https://jarvis.tailbd6217.ts.ne
 const WORKER_TOKEN  = cfg.JARVIS_WORKER_TOKEN || '';
 const WORKER_ID     = cfg.WORKER_ID || `pc-${os.hostname()}`;
 const WORKSPACE_ROOT = path.resolve(cfg.WORKSPACE_ROOT || 'C:\\dev');
-const POLL_MS       = Number(cfg.POLL_MS) || 10_000;
-const HEARTBEAT_MS  = Number(cfg.HEARTBEAT_MS) || 30_000;
-const DEFAULT_TIMEOUT_MIN = Number(cfg.TIMEOUT_MIN) || 30;
+/**
+ * Numeric config, the guardrail.js way (2026-07-30) — this file reads its own
+ * env FILE rather than process.env, so it can't use lib/guardrail.js directly,
+ * but it has the same two hazards:
+ *   - `Number(x) || default` throws away a legitimate ZERO. Found the hard way:
+ *     WATCHDOG_AFTER_MIN=0 ("alert immediately", which is exactly what a test
+ *     wants) silently became 5 minutes, and the watchdog looked broken.
+ *   - an inline comment (`POLL_MS=10000 # ms`) makes Number() NaN.
+ * So: take the leading token, accept 0, and fall back only when unusable.
+ */
+function num(name, fallback, { allowZero = true } = {}) {
+  const raw = cfg[name];
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  const n = Number(String(raw).trim().split(/\s|#/)[0]);
+  if (!Number.isFinite(n) || n < 0 || (!allowZero && n === 0)) {
+    log(`BAD CONFIG ${name}=${JSON.stringify(raw)} — using ${fallback}`);
+    return fallback;
+  }
+  return n;
+}
+
+const POLL_MS       = num('POLL_MS', 10_000, { allowZero: false });
+const HEARTBEAT_MS  = num('HEARTBEAT_MS', 30_000, { allowZero: false });
+const DEFAULT_TIMEOUT_MIN = num('TIMEOUT_MIN', 30, { allowZero: false });
 const KILL_FILE     = cfg.KILL_FILE || path.join(process.env.ProgramData || 'C:\\ProgramData', 'jarvis', 'KILL');
 
 if (!WORKER_TOKEN) {
@@ -209,7 +230,9 @@ async function runJob(job) {
 // three signals are needed before anything is said, which is the same shape as
 // self-heal's DNS check: distinguish "their fault", "our fault" and "cannot
 // tell" instead of collapsing them.
-const WATCHDOG_AFTER_MIN = Number(cfg.WATCHDOG_AFTER_MIN) || 5;
+// allowZero: 0 means "say it on the first failed poll" — a real ops choice, and
+// what a test needs. `|| 5` used to eat it.
+const WATCHDOG_AFTER_MIN = num('WATCHDOG_AFTER_MIN', 5);
 const PUBLIC_HEALTH_URL  = cfg.PUBLIC_HEALTH_URL || 'http://66.42.121.161:9212/health';
 const INTERNET_PROBE_URL = cfg.INTERNET_PROBE_URL || 'https://1.1.1.1/';
 const NTFY_TOPIC         = cfg.NTFY_TOPIC || '';
@@ -240,14 +263,22 @@ const reachable = async (url, ms = 8000) => {
 let outageSince = null;
 let alerted = null;                  // which kind we last alerted about
 
+// Desktop message boxes are the right default on a PC someone is sitting at,
+// and wrong for a headless/always-on box or a test run — a popup saying THE
+// FLEET BOX IS NOT ANSWERING is not something to produce while proving the code
+// works. WATCHDOG_DESKTOP=0 turns them off; the log and the push still carry it.
+const WATCHDOG_DESKTOP = cfg.WATCHDOG_DESKTOP !== '0';
+
 async function alertLocally(title, body) {
   log(`WATCHDOG: ${title} — ${body}`);
   // Best-effort desktop notification. msg.exe is present on Windows Pro and
   // needs no module; it is allowed to fail silently on Home.
-  try {
-    spawn('msg', ['*', `/TIME:600`, `Jarvis: ${title}. ${body}`], { stdio: 'ignore', shell: false })
-      .on('error', () => {});
-  } catch { /* not available — the push and the log still carry it */ }
+  if (WATCHDOG_DESKTOP) {
+    try {
+      spawn('msg', ['*', '/TIME:600', `Jarvis: ${title}. ${body}`], { stdio: 'ignore', shell: false })
+        .on('error', () => {});
+    } catch { /* msg.exe absent (Home edition) — the push and the log still carry it */ }
+  }
   // The push is what reaches him when he is away from this screen. It goes
   // DIRECT from the PC, so it works precisely when the box cannot send it.
   if (!NTFY_TOPIC) { log('WATCHDOG: no NTFY_TOPIC in config/pc-worker.env — desktop + log only'); return; }
