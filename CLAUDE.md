@@ -636,6 +636,15 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    until `gh workflow run offbox-watchdog.yml -f test_alert=true` has actually
    buzzed a device** — "the code exists" is exactly the mistake that kept this
    open for a month.
+   **Measured 2026-07-30 (partial — this entry stays OPEN):** the workflow itself
+   is running and healthy — 8 scheduled runs that day, all green, averaging one
+   per **~49 minutes**, which confirms the ~1h detection window rather than the 5
+   minutes it asks for. And the ntfy leg from the BOX is proved: a push from a
+   service environment returned HTTP 200 and ntfy's own topic cache
+   (`GET /<topic>/json?poll=1&since=72h` — sends nothing, safe any time) holds 9
+   real messages. So what is unproven is now narrow and specific: the workflow's
+   own push half, which needs the repo secret, and whether any of it lands on a
+   device, which needs Craig to subscribe. Neither is something this box can do.
    The abandoned history, kept because it explains the constraint:
    Full messy history in
    docs/OFF-BOX-WATCHDOG.md, but the short version: two different Claude
