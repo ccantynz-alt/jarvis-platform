@@ -131,3 +131,51 @@ test('parseDuration', () => {
   assert.equal(parseDuration('mute 1 day'), 24 * 60 * 60 * 1000);
   assert.equal(parseDuration('mute'), null);
 });
+
+// ── A failed digest must not be lost (2026-07-30) ────────────────────────────
+// flushDigest used to splice the whole queue out and persist the emptied state
+// BEFORE attempting the send, so a Slack outage discarded up to 200 batched
+// notifications from memory and from disk. The only caller is a 60s timer whose
+// handler is `.catch(console.error)`, so nothing downstream noticed either.
+
+test('a digest whose send fails is kept and retried, not discarded', async () => {
+  let fail = true;
+  const sent = [];
+  const center = new NotifyCenter({
+    send: async (text) => { if (fail) throw new Error('slack is down'); sent.push(text); },
+    now: () => NOON_NZ,
+    statePath: null,
+    digestIntervalMs: 30 * 60 * 1000,
+  });
+
+  await center.notify({ level: 'info', text: 'audit finished on zoobicon' });
+  await center.notify({ level: 'info', text: 'audit finished on vapron' });
+
+  await assert.rejects(() => center.flushDigest({ force: true }), /slack is down/);
+  assert.equal(center.digestQueue.length, 2, 'the items are still queued after a failed send');
+
+  fail = false;
+  await center.flushDigest({ force: true });
+  assert.equal(center.digestQueue.length, 0, 'and they go out on the retry');
+  assert.match(sent[0], /zoobicon/);
+  assert.match(sent[0], /vapron/);
+});
+
+test('anything queued while the send is in flight survives the flush', async () => {
+  const sent = [];
+  let center;
+  center = new NotifyCenter({
+    // Arrives DURING the await, exactly like a real notify landing mid-post.
+    send: async (text) => { await center.notify({ level: 'info', text: 'arrived late' }); sent.push(text); },
+    now: () => NOON_NZ,
+    statePath: null,
+    digestIntervalMs: 30 * 60 * 1000,
+  });
+
+  await center.notify({ level: 'info', text: 'first' });
+  await center.flushDigest({ force: true });
+
+  assert.match(sent[0], /first/);
+  assert.equal(center.digestQueue.length, 1, 'the late arrival is still queued for the next digest');
+  assert.match(center.digestQueue[0].text, /arrived late/);
+});

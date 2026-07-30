@@ -127,12 +127,38 @@ function lastProcessedSessionId() {
   return row?.maxId || 0;
 }
 
+// How far back to look for a session that ended out of id order. Ample for a
+// long-running session, short enough that turning this on can never rescan
+// history.
+const STRAGGLER_WINDOW_H = 36;
+
+/**
+ * Sessions that have ENDED and have no deploy-gate run recorded.
+ *
+ * The high-water mark alone was wrong (2026-07-30, found by the code-health
+ * spine): session ids are assigned at session START, but a row only becomes
+ * visible to this poller at session END, so the two orders differ whenever
+ * sessions overlap — and overlapping sessions on this box are routine. Session
+ * 100 starts at 10:00 and runs long; 101 starts at 10:05 and ends at 10:30; the
+ * poller processes 101, the mark moves to 101, and session 100's real file
+ * changes are NEVER gate-scanned. Silently, forever.
+ *
+ * The LEFT JOIN is the actual fix — "no run recorded" instead of "id above a
+ * mark". The mark stays as a FLOOR so that enabling this cannot suddenly rescan
+ * every session that predates deploy-gate; a straggler below the mark is picked
+ * up only if it ended inside STRAGGLER_WINDOW_H.
+ */
 function newlyEndedSessions(afterId) {
+  const since = new Date(Date.now() - STRAGGLER_WINDOW_H * 3600_000).toISOString();
   return db.prepare(`
-    SELECT * FROM sessions
-    WHERE ended_at IS NOT NULL AND id > ?
-    ORDER BY id ASC
-  `).all(afterId);
+    SELECT s.* FROM sessions s
+    LEFT JOIN deploy_gate_runs r ON r.session_id = s.id
+    WHERE s.ended_at IS NOT NULL
+      AND r.session_id IS NULL
+      AND (s.id > ? OR s.ended_at > ?)
+    ORDER BY s.ended_at ASC
+    LIMIT 20
+  `).all(afterId, since);
 }
 
 function hasRealFileChanges(session) {

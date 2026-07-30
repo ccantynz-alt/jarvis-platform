@@ -159,6 +159,14 @@ try { db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT'); } catch { /* alread
 // /opt/alecrae was 28 commits behind its remote during the first live sweep, so
 // a finding can be real for the code on this box and already fixed upstream.
 // Without the sha, nobody can tell those two cases apart later.
+// platform_state.consecutive_critical is read AND written by this file's
+// /memory/platform/update, but the only migration that created it lived in
+// audit-runner.js — a different service (2026-07-30, found by the code-health
+// spine). On a fresh box or a rebuilt DB, if jarvis-audit hasn't started yet (or
+// is masked, or failed), better-sqlite3 throws "no such column" on every call:
+// express 500s, fleet-check.sh's 10-minute writes are all discarded, and
+// self-heal sees an empty fleet. A table's owner must create its own columns.
+try { db.exec('ALTER TABLE platform_state ADD COLUMN consecutive_critical INTEGER DEFAULT 0'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE code_findings ADD COLUMN commit_sha TEXT'); } catch { /* already present */ }
 // When a finding was last RE-CHECKED against current code (2026-07-30). Without
 // this the table only ever grows: nothing marked anything `fixed`, so a confirmed

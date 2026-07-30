@@ -221,8 +221,16 @@ export class NotifyCenter {
     this.lastDigestFlush = this.now();
     if (this.digestQueue.length === 0) return null;
 
-    const items = this.digestQueue.splice(0, this.digestQueue.length);
-    this.saveState();
+    // Read, don't remove (2026-07-30, found by the code-health spine). This used
+    // to splice the whole queue out and persist the emptied state BEFORE
+    // attempting the send — so a Slack outage, a bad token or a network blip
+    // discarded up to 200 batched notifications from memory AND from disk, with
+    // one console line to show for it. The caller in slack-bridge.js is a 60s
+    // timer whose only handler is `.catch(e => console.error(...))`, so nothing
+    // downstream noticed either. Items are now removed only after the send
+    // resolves, which means a failed digest is retried on the next flush rather
+    // than lost.
+    const items = this.digestQueue.slice();
 
     const icon = { critical: '🚨', warning: '⚠️', info: '•' };
     const order = { critical: 0, warning: 1, info: 2 };
@@ -236,7 +244,13 @@ export class NotifyCenter {
     if (items.length > MAX_LINES) lines.push(`_...and ${items.length - MAX_LINES} more_`);
 
     const msg = `🗞 *Jarvis digest — ${items.length} update(s)*\n${lines.join('\n')}`;
-    await this.send(msg);
+    await this.send(msg);   // throws → queue untouched, retried next flush
+
+    // Delivered. Drop exactly the items that went out, by identity rather than
+    // by count: anything queued WHILE the send was in flight must survive.
+    const sent = new Set(items);
+    this.digestQueue = this.digestQueue.filter(q => !sent.has(q));
+    this.saveState();
     return msg;
   }
 
