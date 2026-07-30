@@ -53,9 +53,20 @@ Every 3 hours (`jarvis-code-health.timer`), one sweep:
    the opposite — and which defaults to refuted when unsure. Confirmed findings
    are ones Craig can act on without checking the work.
 6. **File by fingerprint.** `POST /memory/findings` upserts into `code_findings`.
-7. **Report proportionately.** A confirmed critical is a device push. Other new
-   findings are an inbox item. A clean sweep says so only in the log — this runs
-   forever, and "I looked and it's fine" is not a notification.
+7. **Re-check the oldest confirmed findings** for that platform (up to
+   `CODE_HEALTH_MAX_RECHECK`, oldest-checked first). This is the **only** thing
+   that ever marks a finding `fixed`. Without it the table only grows: a defect
+   Craig repaired stays "confirmed" forever, `get_code_findings` keeps reciting
+   it, and the regression signal (`fixed` → found again) can never fire because
+   nothing was ever fixed. Only an explicit `still_present: false` closes a
+   finding — no verdict, an unparseable verdict or a dead agent all mean "we
+   still believe it", because burying a real defect is the more expensive
+   mistake.
+8. **Report proportionately.** A confirmed critical is a device push. Other new
+   findings are an inbox item. A sweep that only closed things gets one quiet
+   line — it is the good news this system otherwise never delivers. A wholly
+   clean sweep says so only in the log; this runs forever, and "I looked and
+   it's fine" is not a notification.
 
 ## Why fingerprints, and what they cost
 
@@ -105,6 +116,7 @@ limit here goes through `guardrail()`.
 | `CODE_HEALTH_MAX_VERIFY` | 4 | adversarial verifiers per sweep (each is a subscription turn) |
 | `CODE_HEALTH_REVIEW_MIN` | 25 | review agent wall clock |
 | `CODE_HEALTH_VERIFY_MIN` | 8 | verifier wall clock |
+| `CODE_HEALTH_MAX_RECHECK` | 2 | old confirmed findings re-checked per sweep (the only thing that marks one `fixed`) |
 | `CODE_HEALTH_SKIP` | `craig-pc,screenshot-to-code,vapron` | never reviewed |
 
 Skipped by default: `craig-pc` (a worker node, not a codebase),

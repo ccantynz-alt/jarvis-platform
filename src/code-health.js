@@ -48,10 +48,13 @@ const MEMORY = 'http://127.0.0.1:9200';
 const OWN_IP = process.env.OWN_IP || '66.42.121.161';
 
 const MODE = process.env.CODE_HEALTH_MODE || 'dry-run';   // off | dry-run | live
-const g = (name, fallback) => guardrail(name, fallback, { source: 'code-health' });
+// allowZero because 0 is a meaningful setting for some of these ("never
+// re-check"), and guardrail() otherwise treats a deliberate 0 as malformed.
+const g = (name, fallback, allowZero = false) => guardrail(name, fallback, { source: 'code-health', allowZero });
 const SWEEP_COOLDOWN_H  = g('CODE_HEALTH_COOLDOWN_HOURS', 20);  // per platform
 const MAX_FINDINGS       = g('CODE_HEALTH_MAX_FINDINGS', 8);    // per sweep
 const MAX_VERIFICATIONS  = g('CODE_HEALTH_MAX_VERIFY', 4);      // per sweep
+const MAX_RECHECK        = g('CODE_HEALTH_MAX_RECHECK', 2, true); // old findings re-checked per sweep
 const REVIEW_TIMEOUT_MIN = g('CODE_HEALTH_REVIEW_MIN', 25);
 const VERIFY_TIMEOUT_MIN = g('CODE_HEALTH_VERIFY_MIN', 8);
 
@@ -163,6 +166,33 @@ function reviewPrompt(platform, lens, outFile) {
     'behaviour or a fragile path; low = a real but minor defect.',
     '',
     `When the file is written, print exactly: WROTE ${outFile} (<n> findings)`,
+  ].join('\n');
+}
+
+function recheckPrompt(platform, f) {
+  return [
+    `You are RE-CHECKING an old code-health finding against the CURRENT state of the ` +
+    `"${platform}" codebase. You are in the repository root. The question is narrow: is this ` +
+    `defect still there?`,
+    '',
+    `FINDING: ${f.title}`,
+    `FILE: ${f.file_path || '(none recorded)'}${f.line ? `:${f.line}` : ''}`,
+    `RECORDED WHEN THE REPO WAS AT: ${f.commit_sha || '(unrecorded)'}`,
+    `WHY IT WAS A DEFECT: ${f.evidence || '(not recorded)'}`,
+    '',
+    'Open the file as it is NOW. Line numbers will have moved — find the code, not the line. ' +
+    'The file may have been renamed or deleted, and the fix may be somewhere else entirely (a new ' +
+    'guard in a caller counts as fixed).',
+    '',
+    'READ ONLY — change nothing, run nothing that mutates state.',
+    '',
+    'Be conservative in BOTH directions. Saying "fixed" when it is not buries a real defect ' +
+    'permanently; saying "still there" when it is fixed keeps nagging Craig about work he already ' +
+    'did. If the code has been restructured so much that you cannot tell, say still_present=true ' +
+    'and explain — an unclear answer must not close a finding.',
+    '',
+    'Print ONLY this JSON, nothing else:',
+    '{"still_present": true|false, "why": "one or two sentences quoting what you found now"}',
   ].join('\n');
 }
 
@@ -333,12 +363,69 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     filed.push(entry);
   }
 
+  // ── close the loop: has anything already been fixed? ──
+  const closed = await recheckOldFindings(platform, cwd);
+
   state[platform] = { lastSweep: Date.now(), lensIndex: lensIndex + 1 };
   saveState(state);
   try { rmSync(outFile, { force: true }); } catch {}
 
-  await report(platform, lens, filed, checkout);
-  return { platform, lens: lens.key, findings: filed };
+  await report(platform, lens, filed, checkout, closed);
+  return { platform, lens: lens.key, findings: filed, closed };
+}
+
+/**
+ * Re-check the least-recently-checked confirmed findings for this platform.
+ *
+ * Without this the table only grows. Nothing else ever sets `fixed`: a defect
+ * Craig repaired stayed "confirmed" forever, get_code_findings kept reciting it,
+ * and the regression detection (fixed → found again) could never fire because
+ * nothing was ever fixed in the first place. That is the firehose failure mode
+ * one level up from the one fingerprints solve.
+ *
+ * Bounded to CODE_HEALTH_MAX_RECHECK agents per sweep, and only for the platform
+ * being swept, so the cost per sweep stays flat however large the table grows.
+ */
+async function recheckOldFindings(platform, cwd) {
+  const closed = [];
+  if (MAX_RECHECK < 1) return closed;
+  let rows = [];
+  try {
+    rows = await fetch(`${MEMORY}/memory/findings?platform=${encodeURIComponent(platform)}&status=confirmed&limit=100`)
+      .then(r => r.json());
+  } catch (e) {
+    log(`recheck: could not read findings (${e.message})`);
+    return closed;
+  }
+  if (!Array.isArray(rows) || !rows.length) return closed;
+
+  const staleFirst = rows
+    .sort((a, b) => String(a.last_checked || a.first_seen).localeCompare(String(b.last_checked || b.first_seen)))
+    .slice(0, MAX_RECHECK);
+
+  for (const f of staleFirst) {
+    const v = await spawnClaude({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
+    if (v.limitHeld) { log('recheck: usage-limited, stopping re-checks for this sweep'); break; }
+    let verdict = null;
+    try {
+      const m = v.stdout.match(/\{[\s\S]*\}/);
+      if (m) verdict = JSON.parse(m[0]);
+    } catch { /* unparseable → treated as "still present" below */ }
+
+    // Only an explicit false closes a finding. No verdict, an unparseable
+    // verdict, or a dead agent all mean "we still believe it" — burying a real
+    // defect is the more expensive mistake.
+    if (verdict && verdict.still_present === false) {
+      const why = String(verdict.why || '').slice(0, 600);
+      await patchFinding(f.id, { status: 'fixed', checked: true, verdict: `RE-CHECKED and gone: ${why}` });
+      closed.push({ ...f, why });
+      log(`FIXED (re-check) [${f.severity}] ${f.title} — ${why.slice(0, 120)}`);
+    } else {
+      await patchFinding(f.id, { checked: true });
+      log(`still present (re-check) [${f.severity}] ${f.title}`);
+    }
+  }
+  return closed;
 }
 
 /**
@@ -347,16 +434,33 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
  * says so only in the log: "I looked and it's clean" is not worth a notification,
  * and this runs every few hours forever.
  */
-async function report(platform, lens, filed, checkout = {}) {
+async function report(platform, lens, filed, checkout = {}, closed = []) {
   const fresh = filed.filter(f => f.created && f.status !== 'dismissed');
   const confirmedCritical = fresh.filter(f => f.status === 'confirmed' && f.severity === 'critical');
   const regressions = filed.filter(f => f.regressed);
 
-  if (!fresh.length && !regressions.length) { log('nothing new to report'); return; }
+  // A sweep that only CLOSED things is worth one quiet line: it is the good news
+  // this system otherwise never delivers, and it tells Craig the table is being
+  // kept honest rather than just growing.
+  if (!fresh.length && !regressions.length) {
+    if (closed.length) {
+      log(`nothing new; ${closed.length} old finding(s) confirmed fixed`);
+      await notify({
+        source: 'code-health', level: 'info',
+        title: `${platform}: ${closed.length} code finding${closed.length === 1 ? '' : 's'} now fixed`,
+        body: `${lens.key} pass found nothing new. Closed:\n` + closed.map(c => `- [${c.severity}] ${c.title}`).join('\n'),
+        speech: `Good news on ${platform} — ${closed.length} of the old code findings are fixed.`,
+      });
+      return;
+    }
+    log('nothing new to report');
+    return;
+  }
 
   const lines = fresh.map(f => `[${f.severity}/${f.kind}] ${f.title} — ${f.file_path || '?'}${f.line ? ':' + f.line : ''}` +
     (f.status === 'confirmed' ? ' (verified)' : f.status === 'open' ? ' (unproven)' : ''));
   for (const r of regressions) lines.push(`[REGRESSION] ${r.title} — was fixed, it is back`);
+  for (const c of closed) lines.push(`[FIXED] ${c.title}`);
 
   const level = confirmedCritical.length ? 'alert' : regressions.length ? 'warn' : 'info';
   const title = confirmedCritical.length

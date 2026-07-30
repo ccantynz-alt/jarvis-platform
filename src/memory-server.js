@@ -160,6 +160,12 @@ try { db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT'); } catch { /* alread
 // a finding can be real for the code on this box and already fixed upstream.
 // Without the sha, nobody can tell those two cases apart later.
 try { db.exec('ALTER TABLE code_findings ADD COLUMN commit_sha TEXT'); } catch { /* already present */ }
+// When a finding was last RE-CHECKED against current code (2026-07-30). Without
+// this the table only ever grows: nothing marked anything `fixed`, so a confirmed
+// finding stayed confirmed after it was repaired and get_code_findings would keep
+// reciting repaired bugs — the same firehose failure this design fights, one
+// level up. Re-check candidates are ordered by COALESCE(last_checked, first_seen).
+try { db.exec('ALTER TABLE code_findings ADD COLUMN last_checked TEXT'); } catch { /* already present */ }
 
 const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
 PLATFORMS.forEach(p => {
@@ -616,21 +622,24 @@ app.get('/memory/findings/summary', (req, res) => {
 
 // PATCH /memory/findings/:id — a verifier's verdict, or a fix landing
 app.patch('/memory/findings/:id', (req, res) => {
-  const { status, verdict, fix_job_id, severity } = req.body || {};
+  const { status, verdict, fix_job_id, severity, checked } = req.body || {};
   if (status && !FINDING_STATUSES.includes(status)) {
     return res.status(400).json({ error: `status must be one of ${FINDING_STATUSES.join('|')}` });
   }
-  const resolved = status === 'fixed' || status === 'dismissed' ? new Date().toISOString() : null;
+  const now = new Date().toISOString();
+  const resolved = status === 'fixed' || status === 'dismissed' ? now : null;
   const r = db.prepare(`
     UPDATE code_findings SET
       status = COALESCE(?, status),
       verdict = COALESCE(?, verdict),
       fix_job_id = COALESCE(?, fix_job_id),
       severity = COALESCE(?, severity),
+      last_checked = COALESCE(?, last_checked),
       resolved_at = CASE WHEN ? IS NOT NULL THEN ? ELSE resolved_at END
     WHERE id = ?
   `).run(status || null, verdict || null, fix_job_id || null,
-    SEVERITIES.includes(severity) ? severity : null, resolved, resolved, req.params.id);
+    SEVERITIES.includes(severity) ? severity : null,
+    checked ? now : null, resolved, resolved, req.params.id);
   if (!r.changes) return res.status(404).json({ error: 'finding not found' });
   res.json({ ok: true });
 });
