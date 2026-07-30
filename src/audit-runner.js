@@ -112,14 +112,30 @@ const PLATFORM_CONFIG = {
   //     not Craig's own code — auto-committing "fixes" here risks silently
   //     diverging from upstream in a way nobody would notice until an
   //     update conflicts with it.
-  'universal-ai-operator': {
-    path: process.env.UAO_PATH || '/root/universal-ai-operator',
-    urls: [], // no public domain (platforms.json) — screenshots skipped, build/test still run
-    buildCmd: 'docker compose build',
-    testCmd: null,
-    checkCmd: null,
-    noAutoFix: true
-  },
+  // universal-ai-operator REMOVED from the audit 2026-07-30, and the reason is
+  // worth reading before anyone puts it back.
+  //
+  // It was configured `buildCmd: 'docker compose build'` against
+  // /root/universal-ai-operator — a directory that contains no compose file at
+  // all (Dockerfile, master_engine.py, target_code/, venv/, two .txt files). That
+  // command could never have succeeded, so every daily audit scored
+  // 100 - 20 = 80 → 'warning' and said nothing, for the same reason zoobicon and
+  // alecrae did: a failure that produces a plausible number is invisible.
+  //
+  // The new lib/checkout.js guard caught it immediately — correctly — but the
+  // consequence was a warn-level notify EVERY DAY about a fact already known and
+  // documented, which would have pushed to Craig's phone daily. Alert fatigue
+  // manufactured by an alert I added that morning is not an improvement.
+  //
+  // It also cannot use the URL-only variant: `urls: []`, because it has no public
+  // domain. So there is genuinely nothing for THIS runner to do with it, and
+  // saying so plainly beats a daily false alarm. Note the code-health spine still
+  // reviews it (8 open findings there, including the truncating writes into
+  // target_code/zoobicon) — that coverage is unaffected.
+  //
+  // To restore it: give the repo a compose file, or set buildCmd to a real
+  // non-mutating check (a Python syntax pass over *.py would have caught the
+  // generated-code SyntaxError the spine found in jarvis_setup_wizard.py).
   'screenshot-to-code': {
     path: process.env.SCREENSHOT_TO_CODE_PATH || '/opt/screenshot-to-code',
     urls: ['http://127.0.0.1:5173', 'http://127.0.0.1:7001'], // loopback-only per platforms.json, no public domain

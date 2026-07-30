@@ -44,10 +44,26 @@ function safeExec(cmd, fallback = '0') {
 // anywhere on the line, which is how earlier revisions reported co-tenant
 // processes as Jarvis health (see the vapron note below). Compare the LISTENING
 // address's trailing port instead.
-function checkPort(port) {
-  const listening = safeExec(`ss -tlnH 2>/dev/null | awk '{print $4}'`, '');
-  const re = new RegExp(`[:.]${port}$`);
-  return listening.split('\n').some(addr => re.test(addr.trim())) ? 'ONLINE' : 'OFFLINE';
+// One `ss` per sweep, not one per port (2026-07-30, found by the code-health
+// spine reviewing the exact-match fix above — written the same morning). safeExec
+// is synchronous, so calling this once per service meant every collectMetrics()
+// forked eleven shell pipelines and blocked the event loop on all of them. That
+// runs on each WebSocket connect, on the collector's own interval, and on every
+// GET /metrics/current — so the HUD polling made the box measure itself.
+function listeningPorts() {
+  const out = safeExec(`ss -tlnH 2>/dev/null | awk '{print $4}'`, '');
+  const ports = new Set();
+  for (const addr of out.split('\n')) {
+    // Trailing port of the LISTENING address: 127.0.0.1:9200, [::1]:9200, *:80.
+    const m = addr.trim().match(/[:.](\d+)$/);
+    if (m) ports.add(m[1]);
+  }
+  return ports;
+}
+
+function checkPort(port, ports = null) {
+  const set = ports || listeningPorts();
+  return set.has(String(port)) ? 'ONLINE' : 'OFFLINE';
 }
 
 function collectMetrics() {
@@ -71,9 +87,12 @@ function collectMetrics() {
     // All of them, not four (2026-07-30). The HUD showed memory/screenshot/audit
     // and nothing else, so eight services could die without even appearing on
     // the panel Craig watches — never mind alerting.
-    jarvis: Object.fromEntries(Object.entries(JARVIS_SERVICES).map(
-      ([name, port]) => [name, name === 'metrics' ? 'ONLINE' : checkPort(port)],
-    )),
+    jarvis: (() => {
+      const ports = listeningPorts();   // one subprocess for all of them
+      return Object.fromEntries(Object.entries(JARVIS_SERVICES).map(
+        ([name, port]) => [name, name === 'metrics' ? 'ONLINE' : checkPort(port, ports)],
+      ));
+    })(),
     // NOTE: no local `vapron` port block — vapron runs on box 158, not here.
     // Local port checks matched unrelated co-tenant processes (:3000/:443) and
     // reported false health. vapron health comes from fleet-check/the heartbeat.

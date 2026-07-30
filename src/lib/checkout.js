@@ -35,6 +35,10 @@ import { join } from 'path';
 export const BUILD_MANIFESTS = [
   'package.json',       // node / bun
   'docker-compose.yml',
+  'docker-compose.yaml', // same thing, other spelling — do not make a platform
+  'compose.yml',         // invisible to the audit over a file extension
+  'compose.yaml',
+  'Dockerfile',         // `docker build .` is a real build even with no compose file
   'Cargo.toml',         // rust (voxlen's tauri side)
   'pyproject.toml',
   'requirements.txt',

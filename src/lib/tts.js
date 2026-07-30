@@ -27,7 +27,14 @@ const CACHE_CAP_BYTES = 50 * 1024 * 1024;
 // A malformed budget must not become NaN: `spent + len > NaN` is false, so
 // the cap would silently vanish and ElevenLabs spend would run unbounded.
 const BUDGET    = guardrail('TTS_DAILY_CHAR_BUDGET', 40000, { source: 'tts' });
-const MEMORY    = 'http://127.0.0.1:9200';
+// Read per call, not frozen at import: test/tts-stream.test.js has to be able to
+// point this at a stub. Without that seam the suite talked to the LIVE memory
+// server (2026-07-30, found by the code-health spine) — so running `npm test` on
+// the box added its test phrases to the real ElevenLabs daily character budget
+// via /memory/kv/incr, and once that budget was genuinely spent openTtsStream
+// returned null and the tests failed for a reason that had nothing to do with the
+// code under test. A test suite must not be able to spend money.
+const memBase = () => process.env.JARVIS_MEMORY_URL || 'http://127.0.0.1:9200';
 
 mkdirSync(CACHE_DIR, { recursive: true });
 
@@ -48,7 +55,7 @@ export function ttsEnabled() {
 let budgetReadFailedAt = 0;
 export async function budgetSpent(day) {
   try {
-    const r = await fetch(`${MEMORY}/memory/kv/tts-budget-${day}`);
+    const r = await fetch(`${memBase()}/memory/kv/tts-budget-${day}`);
     if (!r.ok && r.status !== 404) throw new Error(`memory KV returned ${r.status}`);
     const j = await r.json();
     return parseInt(j?.value, 10) || 0;
@@ -93,7 +100,7 @@ function announceBudget(day, spent) {
  */
 export async function budgetAdd(day, chars, _ignoredPrev) {
   try {
-    await fetch(`${MEMORY}/memory/kv/incr`, {
+    await fetch(`${memBase()}/memory/kv/incr`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: `tts-budget-${day}`, by: chars }),
     });

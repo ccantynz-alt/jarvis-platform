@@ -361,6 +361,13 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     // same-file-proximity would hide a genuinely different defect behind one
     // dismissal, which is far worse than an occasional duplicate. This just makes
     // the duplicate visible to whoever reads it next.
+    // Held in a variable, not just written, because `verdict` belongs to the
+    // verifier and it patches the same field a few lines below — so on any
+    // finding that got verified, this note was written and then immediately
+    // overwritten (2026-07-30, found by the spine reviewing itself). Those are
+    // precisely the findings someone reads. Every verdict written after this point
+    // appends it.
+    let dupNote = null;
     if (res.created && f.file_path) {
       try {
         const siblings = await fetch(`${MEMORY}/memory/findings?platform=${encodeURIComponent(platform)}&status=dismissed&limit=50`)
@@ -369,14 +376,14 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
         if (sameFile.length) {
           const ids = sameFile.map(s => `#${s.id}`).join(', ');
           log(`note: ${f.file_path} already has ${sameFile.length} DISMISSED finding(s) (${ids}) — this may be a reworded duplicate`);
-          await patchFinding(res.id, {
-            verdict: `Filed as new, but ${f.file_path} already carries dismissed finding(s) ${ids}. Fingerprints key on the ` +
-              `title's significant words, so a paraphrase of an already-dismissed defect files again — check those before ` +
-              `spending time on this one.`,
-          });
+          dupNote = `NOTE: ${f.file_path} already carries dismissed finding(s) ${ids}. Fingerprints key on the `
+            + `title's significant words, so a paraphrase of an already-dismissed defect files again — check those before `
+            + 'spending time on this one.';
+          await patchFinding(res.id, { verdict: dupNote });
         }
       } catch { /* advisory only — never let this break a sweep */ }
     }
+    const withNote = (verdict) => (dupNote ? `${verdict}\n\n${dupNote}` : verdict);
 
     // Only NEW findings get verified. Re-verifying something already judged is
     // pure spend, and a sticky `dismissed` in memory-server means a refuted
@@ -392,16 +399,16 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
 
       if (real === true) {
         entry.status = 'confirmed';
-        await patchFinding(res.id, { status: 'confirmed', verdict: String(verdict.why || '').slice(0, 800), severity: verdict.severity });
+        await patchFinding(res.id, { status: 'confirmed', verdict: withNote(String(verdict.why || '').slice(0, 800)), severity: verdict.severity });
         if (verdict.severity) entry.severity = verdict.severity;
         log(`CONFIRMED [${entry.severity}] ${f.title}`);
       } else if (real === false) {
         entry.status = 'dismissed';
-        await patchFinding(res.id, { status: 'dismissed', verdict: String(verdict.why || '').slice(0, 800) });
+        await patchFinding(res.id, { status: 'dismissed', verdict: withNote(String(verdict.why || '').slice(0, 800)) });
         log(`refuted — dismissed: ${f.title} (${String(verdict.why || '').slice(0, 120)})`);
       } else {
         entry.status = 'open';
-        await patchFinding(res.id, { verdict: 'verifier produced no usable verdict — left unproven' });
+        await patchFinding(res.id, { verdict: withNote('verifier produced no usable verdict — left unproven') });
         log(`unproven (no verdict) — left open: ${f.title}`);
       }
     }

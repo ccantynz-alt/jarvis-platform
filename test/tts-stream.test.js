@@ -24,6 +24,33 @@ delete process.env.TTS_DISABLED;
 process.env.TTS_HANDSHAKE_MS = '400';
 process.env.TTS_FIRST_AUDIO_MS = '400';
 
+// A budget stub, because the first version of this file talked to the LIVE
+// memory-server on :9200 (2026-07-30, found by the code-health spine reviewing it
+// hours after it shipped). openTtsStream reads the day's ElevenLabs spend before
+// opening and writes charsSent back on close, so running `npm test` on the box
+// charged the real daily character budget with these test phrases — and once that
+// budget was genuinely spent, openTtsStream returned null and every test here
+// failed for a reason unrelated to the code under test. The stub also lets the
+// suite ASSERT that nothing was written, which is stronger than not noticing.
+const budgetWrites = [];
+const budgetStub = httpServer((req, res) => {
+  if (req.method === 'POST') {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => { budgetWrites.push(raw); res.end('{"ok":true}'); });
+    return;
+  }
+  res.end(JSON.stringify({ key: 'tts-budget', value: '0' }));
+});
+await new Promise((r) => budgetStub.listen(0, '127.0.0.1', r));
+process.env.JARVIS_MEMORY_URL = `http://127.0.0.1:${budgetStub.address().port}`;
+// unref, or a listening socket keeps the event loop alive after the last test and
+// the run hangs instead of exiting — which is exactly what it did on the dev
+// checkout, where every test in this file is skipped and nothing else was holding
+// the process open. Same lesson as the fixture's terminate(): a test that hangs
+// reports nothing at all.
+budgetStub.unref();
+
 // Unlike the rest of test/, this file needs the real `ws` package (both to drive
 // tts-stream.js and to stand up a fake ElevenLabs). node_modules only exists on
 // the box, so skip loudly rather than fail when running from a dev checkout —
@@ -161,4 +188,16 @@ it('a socket that accepts TCP and never completes the upgrade fails instead of h
   delete process.env.ELEVENLABS_WS_BASE;
   for (const s of held) s.destroy();   // same reason as wsFixture.close()
   await new Promise((r) => tcp.close(r));
+});
+
+it('the suite never charges the real ElevenLabs budget', { timeout: 20000 }, async () => {
+  // Everything above ran against the local stub, so any spend recorded here went
+  // to the stub and not to the box's live counter. What this asserts is that the
+  // seam is actually in use: if JARVIS_MEMORY_URL were ignored, budgetAdd would
+  // have gone to :9200 and this list would be empty while real money moved.
+  assert.ok(budgetWrites.length > 0,
+    'expected the stub to have received the budget writes — if it got none, tts.js is talking to :9200 instead');
+  assert.match(budgetWrites.join(' '), /tts-budget-/);
+  assert.equal(process.env.JARVIS_MEMORY_URL.includes('127.0.0.1:9200'), false,
+    'the stub must not be the real memory server');
 });
