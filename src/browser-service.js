@@ -147,11 +147,22 @@ app.post('/browser/fetch', async (req, res) => {
 });
 
 // ── /browser/render — Playwright: screenshot + DOM + links ───────────────────
-let browser = null, renderInFlight = 0;
+let browser = null, renderInFlight = 0, launching = null;
 async function getBrowser() {
   if (browser && browser.isConnected()) return browser;
-  browser = await chromium.launch({ executablePath: CHROME, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
-  return browser;
+  // Memoise the LAUNCH, not just the result (2026-07-30, found by the
+  // code-health spine's concurrency lens). Two renders arriving while no browser
+  // existed both failed the isConnected() check and both awaited their own
+  // chromium.launch(); the second assignment overwrote the first, leaving a live
+  // Chromium with no handle to close it. On a box that also runs AlecRae,
+  // Gluecron, GateTest and Coolify, a leaked browser is a Rule 4 problem — and
+  // this file already carries a comment about 22 leaked gatetest processes.
+  if (launching) return launching;
+  launching = chromium.launch({
+    executablePath: CHROME,
+    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+  }).then((b) => { browser = b; return b; }).finally(() => { launching = null; });
+  return launching;
 }
 
 app.post('/browser/render', async (req, res) => {

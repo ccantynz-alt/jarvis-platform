@@ -249,10 +249,23 @@ app.get('/org', async (_req, res) => {
 
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`[jarvis-agents] listening on http://127.0.0.1:${PORT} (mode=${MODE})`);
-  setInterval(() => {
-    const now = new Date();
-    scheduleTick(now).catch((e) => console.error('[agents] tick error:', e.message));
-    routeReports().catch(() => {});
-    synthMissingReports().catch(() => {});
+  // One tick at a time (2026-07-30, found by the code-health spine's concurrency
+  // lens). These three were fired without awaiting or guarding, so a
+  // report-routing pass slower than TICK_MS overlapped itself — and routeReports
+  // sends alert-level notifications, which means Craig got the SAME escalation
+  // pushed twice. Anything that can page him needs to be idempotent or serial;
+  // this makes it serial, which is the honest one-line version.
+  let tickInFlight = false;
+  setInterval(async () => {
+    if (tickInFlight) { console.warn('[agents] previous tick still running — skipping this one'); return; }
+    tickInFlight = true;
+    try {
+      const now = new Date();
+      await scheduleTick(now).catch((e) => console.error('[agents] tick error:', e.message));
+      await routeReports().catch(() => {});
+      await synthMissingReports().catch(() => {});
+    } finally {
+      tickInFlight = false;
+    }
   }, TICK_MS);
 });

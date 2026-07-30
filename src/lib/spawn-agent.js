@@ -101,7 +101,17 @@ export function spawnProcess(cmd, args, { cwd, env, timeoutMin = 30, timeoutMs }
 // Spawn a local claude worker on a task prompt. If the run dies on a USAGE
 // LIMIT, flip to Craig's other subscription login (claude-auth) and retry the
 // job ONCE on that account — the fleet keeps moving through 5-hour resets.
-export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMin = 30 }) {
+/**
+ * `onRetry` is awaited immediately before the account-flip retry, so the caller
+ * can record that a SECOND full-length run is starting (2026-07-30).
+ *
+ * Without it the retry is invisible: the job row keeps its original started_at
+ * while the work legitimately runs for up to 2× timeoutMin, and the
+ * orchestrator's zombie reaper — whose whole justification is "past its timeout,
+ * the process is certainly gone" — would declare a live agent dead while it was
+ * still editing and pushing a production repo, and tell Craig so.
+ */
+export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMin = 30, onRetry = null }) {
   const args = ['--dangerously-skip-permissions', '--print'];
   if (model) args.push('--model', model);
   args.push(prompt);
@@ -113,7 +123,14 @@ export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMi
     if (cls.kind === 'usage_limit') {
       const current = getActiveProfile()?.name;
       const next = await reportExhausted(current, cls.resetAt).catch(() => null);
-      if (next && next !== current) result = await run(); // fresh env picks up the flip
+      if (next && next !== current) {
+        // Tell the caller BEFORE the second run starts — see onRetry above.
+        // Promise.resolve so a SYNCHRONOUS callback works too — `onRetry(...).catch?.()`
+        // would have thrown a TypeError on a callback that returns undefined,
+        // taking down the very retry it exists to announce.
+        if (onRetry) await Promise.resolve(onRetry({ from: current, to: next })).catch(() => {});
+        result = await run(); // fresh env picks up the flip
+      }
       else result.limitHeld = true; // every account exhausted — caller should re-queue, not fail
     }
   }

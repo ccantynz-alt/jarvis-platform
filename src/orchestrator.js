@@ -250,6 +250,23 @@ async function runLocalJob(row) {
     model: row.model || DEFAULT_WORKER_MODEL,
     extraEnv: platformEnv(row.platform),
     timeoutMin: row.timeout_min,
+    // A usage-limit account flip starts a SECOND full-length run under this same
+    // row, so restart the clock (2026-07-30). Without this the reaper below sees
+    // a job past its timeout and declares the worker dead while it is still
+    // editing and pushing — the reaper's justification is only true if
+    // started_at reflects the run that is ACTUALLY in progress.
+    onRetry: async ({ from, to }) => {
+      try {
+        await jobTransition(row.id, 'running', `usage-limit flip ${from} → ${to}: second attempt, clock restarted`, {
+          started_at: new Date().toISOString(),
+        });
+        console.log(`[orchestrator] job ${row.id} retrying on ${to} — reap clock restarted`);
+      } catch (e) {
+        // The reaper may now fail this job early. Say so loudly rather than
+        // letting a false "reaped a stuck job" alert be the only trace.
+        console.error(`[orchestrator] could not restart the reap clock for ${row.id} (${e.message}) — a long retry may be reaped early`);
+      }
+    },
   });
   // Both subscription logins are exhausted. spawnClaude has already tried the
   // other account and set limitHeld — the work was never attempted, so calling
@@ -558,6 +575,14 @@ async function schedulerTick() {
  * SIGTERMs at timeout_min and SIGKILLs 10s later. So once a job is past its own
  * timeout plus a slack margin, either the status write was lost or the process
  * vanished without settling. Either way there is nothing left to wait for.
+ *
+ * That guarantee has ONE exception, and it was live for seven hours before the
+ * code-health spine caught it (2026-07-30): spawnClaude retries once on a
+ * usage-limit account flip, a second full-length window under the same row. With
+ * started_at unmoved, this reaper would fail a job that was legitimately still
+ * running — killing the alert's credibility along with the job's status. That is
+ * why runLocalJob now passes onRetry and restarts the clock; this rule depends on
+ * started_at describing the run ACTUALLY in progress, not the first one.
  *
  * tryTransition(..., from: 'running') means a genuine late completion still wins
  * the race — the reaper can never overwrite a real result.
