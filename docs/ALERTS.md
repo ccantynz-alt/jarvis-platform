@@ -136,10 +136,30 @@ not a risk while this repo is worked on daily.
    neither Craig's PC nor the master box can SSH to 158 (`Permission denied
    (publickey)`, including with `.ssh/orchestrator`). Needs a key installed
    before anyone can build this.
-2. **The PC worker as a fast local watcher.** `src/pc-worker.js` already polls
-   the gateway every few seconds from Craig's Windows machine. N consecutive
-   failures → a Windows toast + a push. Not always-on, but it would cut detection
-   from minutes to seconds whenever his PC is awake.
+2. ~~**The PC worker as a fast local watcher.**~~ **DONE 2026-07-30** — and it
+   became the *primary* fast detector once the Actions cadence turned out to be
+   hourly. `src/pc-worker.js` already polls the gateway every 10s from Craig's
+   Windows machine, so after `WATCHDOG_AFTER_MIN` (default 5) of failure it
+   diagnoses three ways rather than crying wolf:
+
+   | signal | conclusion | action |
+   |---|---|---|
+   | gateway answers | fine | nothing |
+   | no internet from the PC | **our** end (wifi) | say NOTHING |
+   | internet fine, public `:9212` dead too | the box really is down | desktop message + max-priority push |
+   | `:9212` answers, gateway does not | tailscale / gateway service / token | quieter message, box is alive |
+
+   The push goes DIRECT from the PC, so it works precisely when the box cannot
+   send anything. Recovery is announced too. Knobs live in
+   `config/pc-worker.env.example` (`WATCHDOG_AFTER_MIN`, `PUBLIC_HEALTH_URL`,
+   `INTERNET_PROBE_URL`, `WATCHDOG_DESKTOP`, and the same `NTFY_TOPIC` — which
+   Craig still has to copy in, since the PC cannot read the box's secrets.env).
+   All four paths were exercised against the real box before this was believed;
+   classifier tests in `test/pc-watchdog.test.js`.
+
+   Caveat that keeps the GitHub job worthwhile: this only runs while the PC is
+   awake. The two are complementary — Actions covers the sleeping hours at ~1h
+   resolution, the PC covers the waking ones at ~10s.
 3. **Two-way from the lock screen.** Push is one-way. Talking to Jarvis still
    means opening the deck or the gateway. A Telegram bot bridged to the same
    brain and the same shared transcript (`lib/transcript.js`) would make every
