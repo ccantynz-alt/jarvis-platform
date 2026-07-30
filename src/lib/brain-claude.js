@@ -191,7 +191,20 @@ function startSession(model = MODEL()) {
   return s;
 }
 
-function disposeSession(reason) {
+/**
+ * @param {string} reason
+ * @param {{rewarm?: boolean}} [opts] rewarm=false when the CALLER is about to
+ *   start a session itself. The background re-warm below runs SYNCHRONOUSLY up
+ *   to its first await, so by the time dispose returns there is already a live
+ *   session again — and the retry loop's `const fresh = !session || session.dead`
+ *   therefore saw `fresh === false` and skipped `startSession(escalateTo)`.
+ *   That silently disabled three separate documented behaviours: the escalated
+ *   tier was never used, the model-rejection fallback to the everyday tier was
+ *   never used, and a timeout retry never got the cold-spawn allowance it exists
+ *   for (the comment in that branch even says it relies on this). Found by the
+ *   code-health spine, 2026-07-30.
+ */
+function disposeSession(reason, { rewarm = true } = {}) {
   const s = session;
   session = null;
   if (s && !s.dead) {
@@ -205,7 +218,7 @@ function disposeSession(reason) {
   // right when the user was already waiting on a retry. Fire-and-forget;
   // warmupClaudeBrain() already no-ops if a session exists or auth is
   // missing, and swallows its own errors.
-  warmupClaudeBrain().catch(() => {});
+  if (rewarm) warmupClaudeBrain().catch(() => {});
 }
 
 /** Kill the live session (next turn starts fresh under the active profile). */
@@ -299,8 +312,15 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
 
     let escalateTo = null; // set when a turn fails non-fatally → retry on a higher tier
     for (let attempt = 0; attempt < 2; attempt++) {
+      const want = escalateTo || undefined;
+      // A session warmed in the background can be on the WRONG tier for this
+      // attempt. Dispose it properly rather than overwriting the variable —
+      // reassigning would leak a live CLI child with nobody holding its handle.
+      if (session && !session.dead && want && session.model !== want) {
+        disposeSession(`tier change → ${want}`, { rewarm: false });
+      }
       const fresh = !session || session.dead;
-      if (fresh) session = startSession(escalateTo || undefined);
+      if (fresh) session = startSession(want);
       const s = session;
       const ctx = { pending: null, dispatched: null, gate };
       currentCtx = ctx;
@@ -317,7 +337,11 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
       } catch (e) {
         const cls = classifyFailure({ message: e.message, stderr: String(e.resultMessage?.result || '') });
         console.error(`[brain-claude] turn failed (${cls.kind}) on ${s.profile}/${s.model}: ${e.message.slice(0, 200)}`);
-        disposeSession(`turn failure: ${cls.kind}`);
+        // rewarm:false — every branch below either retries in this loop (and
+        // starts its own session, on the tier it actually wants) or throws, and
+        // the throw path re-warms explicitly. A background re-warm here is what
+        // used to make the retry look "not fresh".
+        disposeSession(`turn failure: ${cls.kind}`, { rewarm: false });
         // 2026-07-24: retries are only worth it while there's budget left —
         // a second 90s attempt after a slow first failure is exactly how the
         // "10 minute wait" compounded. Past the caller's deadline, fail fast
@@ -356,6 +380,10 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
           console.warn(`[brain-claude] escalating retry to ${escalateTo}`);
           continue;
         }
+        // Giving up on this turn: warm a session now so the NEXT one doesn't pay
+        // a cold start on top of whatever just went wrong (the 2026-07-21 point
+        // of re-warming at all).
+        warmupClaudeBrain().catch(() => {});
         throw e;                          // agent.js fails over (and announces)
       } finally {
         currentCtx = null;
