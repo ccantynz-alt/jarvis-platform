@@ -99,7 +99,7 @@ limit here goes through `guardrail()`.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `CODE_HEALTH_MODE` | `dry-run` | `off` · `dry-run` (review + log, file nothing) · `live` |
+| `CODE_HEALTH_MODE` | `live` (since 2026-07-30) | `off` · `dry-run` (review + log, file nothing) · `live` |
 | `CODE_HEALTH_COOLDOWN_HOURS` | 20 | before the same platform is swept again |
 | `CODE_HEALTH_MAX_FINDINGS` | 8 | taken from one sweep, worst first |
 | `CODE_HEALTH_MAX_VERIFY` | 4 | adversarial verifiers per sweep (each is a subscription turn) |
@@ -132,6 +132,13 @@ curl -s 'http://127.0.0.1:9200/memory/findings?open_only=1&limit=10' | jq .
 curl -s http://127.0.0.1:9200/memory/findings/summary | jq .
 journalctl -u jarvis-code-health -n 50 --no-pager
 ```
+
+**Check the commit, too.** Every finding records `commit_sha` — the checkout it
+was found in. Local checkouts drift: `/opt/alecrae` was 28 commits behind its
+remote during the very first live sweep (a separate on-box
+`alecrae-drift-check.timer` had just recorded exactly that), so a finding can be
+entirely real for the code on this box and already fixed upstream. The sweep says
+how old the reviewed HEAD is, and warns in the notification past a week.
 
 And read three findings against the actual code. The failure mode that matters
 is not a missed bug — it is a **confident wrong one**, because that is what

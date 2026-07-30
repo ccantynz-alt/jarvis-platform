@@ -155,6 +155,11 @@ try { db.exec('ALTER TABLE jobs ADD COLUMN model TEXT'); } catch { /* already pr
 // (worker slept/crashed) back to queued instead of waiting forever.
 try { db.exec('ALTER TABLE jobs ADD COLUMN lease_until TEXT'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT'); } catch { /* already present */ }
+// Which commit a code finding was found IN (2026-07-30). Local checkouts drift:
+// /opt/alecrae was 28 commits behind its remote during the first live sweep, so
+// a finding can be real for the code on this box and already fixed upstream.
+// Without the sha, nobody can tell those two cases apart later.
+try { db.exec('ALTER TABLE code_findings ADD COLUMN commit_sha TEXT'); } catch { /* already present */ }
 
 const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
 PLATFORMS.forEach(p => {
@@ -546,12 +551,12 @@ app.post('/memory/findings', (req, res) => {
     const r = db.prepare(`
       INSERT INTO code_findings
         (fingerprint, platform, severity, kind, title, file_path, line, evidence,
-         suggested_fix, status, lens, first_seen, last_seen, seen_count, job_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+         suggested_fix, status, lens, first_seen, last_seen, seen_count, job_id, commit_sha)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `).run(f.fingerprint, f.platform, severity, f.kind || 'correctness', f.title,
       f.file_path || null, Number.isFinite(f.line) ? f.line : null, f.evidence || null,
       f.suggested_fix || null, FINDING_STATUSES.includes(f.status) ? f.status : 'open',
-      f.lens || null, now, now, f.job_id || null);
+      f.lens || null, now, now, f.job_id || null, f.commit_sha || null);
     return res.json({ id: r.lastInsertRowid, created: true });
   }
 

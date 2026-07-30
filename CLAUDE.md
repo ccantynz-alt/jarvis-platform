@@ -89,7 +89,13 @@ found late — see Rule 0 note below):**
   escalates, and a `fixed` finding that reappears is reopened as a
   regression. **It fixes nothing** — findings become work only through the
   dispatch confirmation gate, and the brain reads them via
-  `get_code_findings`. Shipped at `CODE_HEALTH_MODE=dry-run`. Spec:
+  `get_code_findings`. **`CODE_HEALTH_MODE=live` since 2026-07-30** — shipped
+  dry-run, flipped after two sweeps were run by hand and their findings read
+  against the actual code (7 real defects in Jarvis itself, all fixed that day;
+  3 adversarially-confirmed highs in AlecRae's mail stack). Findings record the
+  `commit_sha` they were found in, because a local checkout can be behind its
+  remote (/opt/alecrae was 28 commits behind during the first live sweep) and a
+  real finding there may already be fixed upstream. Spec:
   **docs/CODE-HEALTH.md**; pure logic + tests: `src/lib/findings.js`,
   `test/findings.test.js`.
 

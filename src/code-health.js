@@ -34,6 +34,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
 import { loadPlatforms } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
@@ -94,6 +95,27 @@ export function eligiblePlatforms(registry, { ownIp = OWN_IP, skip = SKIP, exist
     .filter(([, e]) => e.server === ownIp && e.path && exists(e.path))
     .map(([name]) => name)
     .sort();
+}
+
+/**
+ * What commit is this checkout actually on, and how old is it?
+ *
+ * A finding is only true of the code that was READ. During the first live sweep
+ * /opt/alecrae was 28 commits behind its remote (a separate on-box
+ * alecrae-drift-check.timer had just recorded exactly that), so a real finding
+ * here can be already-fixed upstream — and without the sha nobody can tell those
+ * two apart weeks later. Read-only: `git log`, never `git fetch`.
+ */
+function checkoutInfo(cwd) {
+  const git = (args) => execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 10_000 }).trim();
+  try {
+    const sha = git(['rev-parse', '--short', 'HEAD']);
+    const iso = git(['log', '-1', '--format=%cI']);
+    const ageDays = Math.round((Date.now() - new Date(iso).getTime()) / 86_400_000);
+    return { sha, iso, ageDays };
+  } catch {
+    return { sha: null, iso: null, ageDays: null };   // not a git checkout, or git is unhappy
+  }
 }
 
 // ── Prompts ──────────────────────────────────────────────────────────────────
@@ -206,7 +228,9 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
 
   const { platform, lens, lensIndex } = target;
   const cwd = registry[platform].path;
-  log(`sweep start: ${platform} [${lens.key}] in ${cwd} (mode=${MODE})`);
+  const checkout = checkoutInfo(cwd);
+  log(`sweep start: ${platform} [${lens.key}] in ${cwd} (mode=${MODE})` +
+    (checkout.sha ? ` at ${checkout.sha}, HEAD is ${checkout.ageDays}d old` : ''));
 
   // A stale claude binary takes the whole fleet down quietly — the same gate the
   // orchestrator uses before it spends a job.
@@ -251,6 +275,7 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
   const normalized = rawFindings
     .map(r => normalizeFinding(r, { platform, lens: lens.key }))
     .filter(Boolean)
+    .map(f => ({ ...f, commit_sha: checkout.sha }))
     .sort((a, b) => severityRank(a.severity) - severityRank(b.severity))
     .slice(0, MAX_FINDINGS);
 
@@ -308,7 +333,7 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
   saveState(state);
   try { rmSync(outFile, { force: true }); } catch {}
 
-  await report(platform, lens, filed);
+  await report(platform, lens, filed, checkout);
   return { platform, lens: lens.key, findings: filed };
 }
 
@@ -318,7 +343,7 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
  * says so only in the log: "I looked and it's clean" is not worth a notification,
  * and this runs every few hours forever.
  */
-async function report(platform, lens, filed) {
+async function report(platform, lens, filed, checkout = {}) {
   const fresh = filed.filter(f => f.created && f.status !== 'dismissed');
   const confirmedCritical = fresh.filter(f => f.status === 'confirmed' && f.severity === 'critical');
   const regressions = filed.filter(f => f.regressed);
@@ -334,11 +359,19 @@ async function report(platform, lens, filed) {
     ? `${confirmedCritical.length} critical code defect${confirmedCritical.length === 1 ? '' : 's'} in ${platform}`
     : `Code review: ${fresh.length} new finding${fresh.length === 1 ? '' : 's'} in ${platform}`;
 
+  // Say which code was read. A finding against a checkout that is weeks behind
+  // its remote may already be fixed upstream, and Craig should not have to
+  // discover that himself after chasing one.
+  const staleNote = checkout.sha
+    ? `\n\nReviewed ${checkout.sha}, committed ${checkout.ageDays}d ago.` +
+      (checkout.ageDays > 7 ? ' This checkout may be behind its remote — check before fixing.' : '')
+    : '';
+
   await notify({
     source: 'code-health',
     level,
     title,
-    body: `${platform} — ${lens.key} pass\n${lines.join('\n')}`,
+    body: `${platform} — ${lens.key} pass\n${lines.join('\n')}${staleNote}`,
     speech: confirmedCritical.length
       ? `Code review found ${confirmedCritical.length} critical problem${confirmedCritical.length === 1 ? '' : 's'} in ${platform}.`
       : `Code review on ${platform} found ${fresh.length} new thing${fresh.length === 1 ? '' : 's'} worth a look.`,
