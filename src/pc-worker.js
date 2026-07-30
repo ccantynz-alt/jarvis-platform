@@ -330,9 +330,14 @@ async function pollOnce() {
   try {
     job = await api('claim', { worker_id: WORKER_ID });
   } catch (e) {
-    log(`claim failed: ${e.message}`);
     await watchdog(false).catch(() => {});   // watchdog must never break the worker
-    return;
+    // Rethrow so loop()'s backoff actually applies (2026-07-30, found by the
+    // code-health spine). A failed claim was caught here and returned normally,
+    // so the one failure the backoff was written for — "tailnet down, gateway
+    // restarting", per its own comment — was the one failure it never saw, and
+    // the worker kept polling at full rate through an outage. loop() logs the
+    // message along with the new interval, so nothing is lost by not logging here.
+    throw e;
   }
   await watchdog(true).catch(() => {});
   if (job) await runJob(job);

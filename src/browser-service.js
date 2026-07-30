@@ -237,6 +237,16 @@ app.post('/browser/search', async (req, res) => {
     // Keyless fallback: DuckDuckGo HTML endpoint.
     const r = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
       { headers: { 'User-Agent': 'Mozilla/5.0 JarvisBrowser/1.0' }, signal: AbortSignal.timeout(FETCH_TIMEOUT) });
+    // A blocked search is a failure, not an empty result set (2026-07-30, found
+    // by the code-health spine). DuckDuckGo answers a rate-limited or blocked
+    // scraper with 403/429 and an HTML page containing no `result__a` links, so
+    // the parser below found nothing and this returned `{results: []}` with HTTP
+    // 200 — the brain was told "there are no results for that", which it has no
+    // way to distinguish from a genuine miss, and would answer Craig accordingly.
+    if (!r.ok) {
+      audit({ action: 'search', query, provider: 'duckduckgo', error: `HTTP ${r.status}` });
+      return res.status(502).json({ error: `duckduckgo returned HTTP ${r.status}`, provider: 'duckduckgo' });
+    }
     const html = await r.text();
     const results = [];
     const re = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -247,7 +257,16 @@ app.post('/browser/search', async (req, res) => {
       const title = m[2].replace(/<[^>]+>/g, '').trim();
       if (href.startsWith('http') && title) results.push({ title, url: href, snippet: '' });
     }
-    audit({ action: 'search', query, provider: 'duckduckgo', n: results.length, ms: Date.now() - t0 });
+    // Zero results from a 200 page is the other quiet failure: this is a scraper
+    // against someone else's HTML, so a class rename upstream turns every search
+    // into "nothing found" indefinitely. Distinguish it in the audit log rather
+    // than waiting to notice the brain has stopped being able to look things up.
+    if (results.length === 0) {
+      console.warn(`[browser] duckduckgo returned 200 but no parsable results for "${query.slice(0, 60)}" — check the result__a selector`);
+      audit({ action: 'search', query, provider: 'duckduckgo', n: 0, unparsable: html.length, ms: Date.now() - t0 });
+    } else {
+      audit({ action: 'search', query, provider: 'duckduckgo', n: results.length, ms: Date.now() - t0 });
+    }
     res.json({ provider: 'duckduckgo', results });
   } catch (e) {
     audit({ action: 'search', query, error: e.message });

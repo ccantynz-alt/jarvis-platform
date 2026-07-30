@@ -863,12 +863,19 @@ app.post('/slack/image-alert', async (req, res) => {
       return res.status(500).json({ error: `getUploadURL failed: ${urlRes.error}` });
     }
 
-    // Step 2: PUT the file
-    await fetch(urlRes.upload_url, {
+    // Step 2: PUT the file. The response used to be discarded entirely, so an
+    // expired upload URL or a rejected body carried on to completeUploadExternal
+    // and surfaced (if at all) as a confusing "completeUpload failed" — with the
+    // real cause a status code nobody had looked at.
+    const putRes = await fetch(urlRes.upload_url, {
       method: 'PUT',
       headers: { 'Content-Type': 'image/png' },
       body: fileData,
     });
+    if (!putRes.ok) {
+      console.error(`[slack] file PUT failed: HTTP ${putRes.status}`);
+      return res.status(502).json({ error: `upload PUT failed: HTTP ${putRes.status}`, file_id: urlRes.file_id });
+    }
 
     // Step 3: complete upload, post to channel
     const channel = (SLACK_CHANNEL || '#jarvis').replace(/^#/, '');
@@ -883,9 +890,13 @@ app.post('/slack/image-alert', async (req, res) => {
 
     if (!completeRes.ok) {
       console.error('[slack] completeUpload failed:', completeRes.error);
+      // HTTP 200 with {ok:false} is the same false-success shape this route was
+      // fixed for above: a caller checking the status code was told the visual
+      // alert had been posted when it had not.
+      return res.status(502).json({ ok: false, error: `completeUpload failed: ${completeRes.error}`, file_id: urlRes.file_id });
     }
 
-    res.json({ ok: completeRes.ok, file_id: urlRes.file_id });
+    res.json({ ok: true, file_id: urlRes.file_id });
   } catch (e) {
     console.error('[slack] image-alert error:', e.message);
     res.status(500).json({ error: e.message });

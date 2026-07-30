@@ -7,6 +7,13 @@ Type=oneshot
 ExecStart=/opt/jarvis/scripts/fleet-check.sh
 WorkingDirectory=/opt/jarvis
 
+# TimeoutStartSec is DISABLED by default for Type=oneshot — a hung run would sit
+# in "activating" forever and systemd skips timer activations while it does, so
+# the fleet probe (and therefore self-heal's only down-signal) stops without
+# anything going red. 600s = the timer period; the worst legitimate run is ~375s
+# (11 platforms × a 12s probe + 2s + a 20s retry).
+TimeoutStartSec=600
+
 # Rule 4 safety net (2026-07-20) — see jarvis-memory.service for rationale.
 MemoryMax=512M
 CPUQuota=100%

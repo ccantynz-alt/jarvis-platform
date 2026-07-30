@@ -86,7 +86,16 @@ while IFS='|' read -r name url expected; do
   if [ "$transitions" -ge "$FLAP_THRESHOLD" ]; then
     note="$note | FLAPPING: $transitions transitions in last $FLAP_HISTORY checks"
   fi
-  curl -s -X POST "$MEM" -H 'Content-Type: application/json' \
+  # --max-time here as well as on the probes above (2026-07-30, found by the
+  # code-health spine). The probes were bounded and this write was not, so a
+  # memory-server that accepted the connection and stalled would hang this loop
+  # forever — and because the unit is Type=oneshot (timeout disabled by default,
+  # now set explicitly) systemd would skip every subsequent timer activation
+  # while it sat there "activating". Nothing would report it: fleet-check IS the
+  # thing that notices a platform is down, and self-heal only ever acts on the
+  # status it writes, so the whole detect-and-repair chain would go quiet with
+  # every service still showing green.
+  curl -s -X POST "$MEM" -H 'Content-Type: application/json' --max-time 10 \
     -d "{\"platform\":\"$name\",\"status\":\"$status\",\"health_score\":$score,\"notes\":\"$note\"}" \
     -o /dev/null 2>/dev/null
   summary="$summary $name=${code:-000}"

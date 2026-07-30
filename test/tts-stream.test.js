@@ -37,24 +37,43 @@ try {
 }
 const it = WebSocketServer && openTtsStream ? test : test.skip;
 
-/** A ws server that accepts, optionally answers, and reports what it received. */
+/**
+ * A ws server that accepts, optionally answers, and reports what it received.
+ *
+ * close() TERMINATES live client sockets before closing the http server:
+ * http.close() waits for open connections, and these tests deliberately leave a
+ * connection open (that being the whole point), so a polite close never returns
+ * and the run hangs with no failure — which is how the first version of this
+ * file wedged `npm test` on the box.
+ */
 async function wsFixture(onText) {
   const http = httpServer();
   await new Promise((r) => http.listen(0, '127.0.0.1', r));
   const wss = new WebSocketServer({ server: http });
+  const live = new Set();
   wss.on('connection', (sock) => {
+    live.add(sock);
+    sock.on('close', () => live.delete(sock));
+    sock.on('error', () => {});
     sock.on('message', (raw) => {
       let m; try { m = JSON.parse(raw.toString()); } catch { return; }
       onText?.(m, sock);
     });
   });
   const port = http.address().port;
-  return { base: `ws://127.0.0.1:${port}`, close: () => new Promise((r) => { wss.close(); http.close(r); }) };
+  return {
+    base: `ws://127.0.0.1:${port}`,
+    close: async () => {
+      for (const s of live) { try { s.terminate(); } catch {} }
+      await new Promise((r) => wss.close(r));
+      await new Promise((r) => http.close(r));
+    },
+  };
 }
 
 const settle = () => new Promise((r) => setTimeout(r, 1200));
 
-it('an opened stream that never renders audio reports an error instead of going quiet', async () => {
+it('an opened stream that never renders audio reports an error instead of going quiet', { timeout: 20000 }, async () => {
   // Accepts the socket, takes the text, and renders nothing — a slow or wedged
   // ElevenLabs, not a dead one. This is the case that produced a silent turn.
   const fx = await wsFixture(() => { /* deliberately mute */ });
@@ -71,11 +90,12 @@ it('an opened stream that never renders audio reports an error instead of going 
   assert.match(errors[0].message, /no audio from ElevenLabs/);
   assert.equal(stream.audioAny, false);
 
+  stream.abort();
   delete process.env.ELEVENLABS_WS_BASE;
   await fx.close();
 });
 
-it('a stream that does render audio is left alone', async () => {
+it('a stream that does render audio is left alone', { timeout: 20000 }, async () => {
   // The deadline must not fire on a working stream, and must not fire on a
   // stream that simply has not been given any text yet.
   const fx = await wsFixture((m, sock) => {
@@ -98,11 +118,12 @@ it('a stream that does render audio is left alone', async () => {
   assert.equal(chunks.length, 1);
   assert.equal(stream.audioAny, true, 'and audioAny distinguishes this from text merely being sent');
 
+  stream.abort();
   delete process.env.ELEVENLABS_WS_BASE;
   await fx.close();
 });
 
-it('an idle stream with no text sent is not failed by the audio deadline', async () => {
+it('an idle stream with no text sent is not failed by the audio deadline', { timeout: 20000 }, async () => {
   const fx = await wsFixture(() => {});
   process.env.ELEVENLABS_WS_BASE = fx.base;
 
@@ -111,16 +132,21 @@ it('an idle stream with no text sent is not failed by the audio deadline', async
   await settle();   // longer than the deadline, but nothing was ever spoken
 
   assert.equal(errors.length, 0, 'the deadline is armed by sending text, not by connecting');
-  stream.abort();
 
+  stream.abort();
   delete process.env.ELEVENLABS_WS_BASE;
   await fx.close();
 });
 
-it('a socket that accepts TCP and never completes the upgrade fails instead of hanging', async () => {
+it('a socket that accepts TCP and never completes the upgrade fails instead of hanging', { timeout: 20000 }, async () => {
   // The original finding: TLS/TCP completes, the HTTP upgrade never gets an
   // answer, and ws without handshakeTimeout waits forever in silence.
-  const tcp = createServer(() => { /* accept and hold, answer nothing */ });
+  const held = new Set();
+  const tcp = createServer((s) => {   // accept and hold, answer nothing
+    held.add(s);
+    s.on('error', () => {});
+    s.on('close', () => held.delete(s));
+  });
   await new Promise((r) => tcp.listen(0, '127.0.0.1', r));
   process.env.ELEVENLABS_WS_BASE = `ws://127.0.0.1:${tcp.address().port}`;
 
@@ -133,5 +159,6 @@ it('a socket that accepts TCP and never completes the upgrade fails instead of h
   assert.ok(Date.now() - started < 3000, 'and it does so promptly');
 
   delete process.env.ELEVENLABS_WS_BASE;
+  for (const s of held) s.destroy();   // same reason as wsFixture.close()
   await new Promise((r) => tcp.close(r));
 });
