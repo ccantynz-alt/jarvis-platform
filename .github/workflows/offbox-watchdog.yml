@@ -120,7 +120,11 @@ jobs:
           # Three tries, spaced — one dropped packet is not an outage, and a
           # false 3am alert is how a channel earns itself a mute.
           for attempt in 1 2 3; do
-            CODE=$(curl -s -o /tmp/health.out -w '%{http_code}' -m 10 "${HEALTH_URL}" || echo 000)
+            # curl already prints 000 for a connection failure; adding our own
+            # fallback here produced "HTTP 000000" in the alert body, which is
+            # exactly the sort of thing that reads as a bug at 3am.
+            CODE=$(curl -s -o /tmp/health.out -w '%{http_code}' -m 10 "${HEALTH_URL}" || true)
+            CODE="${CODE:-000}"
             echo "attempt ${attempt}: HTTP ${CODE} $(cat /tmp/health.out 2>/dev/null | head -c 60)"
             if [ "${CODE}" = "200" ]; then
               echo "box is alive"

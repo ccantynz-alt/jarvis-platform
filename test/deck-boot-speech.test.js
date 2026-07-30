@@ -13,7 +13,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
 
-const html = readFileSync(new URL('../public/command-deck.html', import.meta.url), 'utf8');
+// Normalise line endings FIRST. On a Windows checkout git hands these files back
+// as CRLF, and `.` in a JS regex does not match `\r` (it is a line terminator) —
+// so the comment-stripping below silently did nothing and this suite failed on
+// Craig's PC while passing on the box. A static assertion that only holds on one
+// machine is worse than no assertion: it trains you to ignore a red run.
+const html = readFileSync(new URL('../public/command-deck.html', import.meta.url), 'utf8')
+  .replace(/\r\n/g, '\n');
 const script = html.slice(html.indexOf('<script'), html.lastIndexOf('</script>'));
 
 // Boot-time addChat calls: everything after the "── Boot ──" banner runs

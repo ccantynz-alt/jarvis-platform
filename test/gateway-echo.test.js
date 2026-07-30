@@ -17,7 +17,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'fs';
 
-const html = readFileSync(new URL('../public/gateway.html', import.meta.url), 'utf8');
+// CRLF-normalised: see the note in deck-boot-speech.test.js — a Windows
+// checkout gives \r\n, and `.` never matches \r.
+const html = readFileSync(new URL('../public/gateway.html', import.meta.url), 'utf8')
+  .replace(/\r\n/g, '\n');
 
 function extract(re, label) {
   const m = html.match(re);
