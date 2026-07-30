@@ -459,6 +459,16 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   silently wiped it. If Jarvis ever "forgets" again, check that key first.
   The dispatch confirmation gate is deliberately NOT shared: a preview shown
   on one surface must not be confirmable from another.
+- **Alerts reach his DEVICES now, not just open tabs (2026-07-30).** Every
+  notification path before this needed something of Craig's to be listening —
+  the inbox is a pull, gateway/deck pushes only land in a connected tab, TTS
+  needs a live page. `src/lib/push.js` is step 5 of `notify()`: an HTTP POST to
+  an ntfy topic, fanning out to the app on every device. The topic name IS the
+  credential — `NTFY_TOPIC` in secrets.env, never in git, treat it like a
+  password. `warn`/`alert` only by default (`PUSH_MIN_LEVEL`), deduped, hourly
+  capped, `alert` exempt from both, all limits via `guardrail()`. Kill switch
+  `PUSH_DISABLED=1`. Full channel map + per-device setup: **docs/ALERTS.md**.
+  Tests: `test/push.test.js`.
 - **The confirmation gate reads a VOCABULARY, not a phrase list, and never
   drops a staged job in silence (2026-07-30).** `resolveDispatchGate` /
   `classifyGateReply` in `src/lib/conversation.js` are the only path from
@@ -482,8 +492,32 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
-1. **No external watcher — STILL NOT ACTUALLY TRUSTED, despite two separate
-   redesign attempts on 2026-07-20.** Full messy history in
+1. **No external watcher — REPLACED 2026-07-30, not patched.** The whole
+   cloud-routine approach below was abandoned: three attempts, two
+   contradictory "fixes", and hard evidence it had never delivered a single
+   alert. It now lives in **`.github/workflows/offbox-watchdog.yml`** — a
+   GitHub Actions runner, every 5 minutes, three spaced probes of the public
+   `:9212/health`, raising TWO independent alarms on total failure: a
+   max-priority ntfy push (`NTFY_TOPIC` repo secret) **and** the job failing,
+   which makes GitHub email Craig from its own infrastructure with no secret
+   needed. Off-box by definition, unrestricted egress, free and unlimited
+   minutes on this public repo, and it touches nothing private (no tailnet, no
+   SSH key, no Jarvis credential) because it must run when the box is a smoking
+   hole. See docs/ALERTS.md for the channel map and docs/OFF-BOX-WATCHDOG.md
+   for why the routine design was dropped rather than fixed.
+   **Two things still outstanding, both Craig's:** (a) `gh secret set
+   NTFY_TOPIC --repo ccantynz-alt/jarvis-platform` to turn on the push half
+   (until then it logs a `::warning::` and relies on the email — deliberately,
+   because failing every 5 minutes over its own config would be 288 emails a
+   day); (b) SSH access to box 158, which is the *better* watcher (always on,
+   tailnet, deeper checks, 5-minute timer, and the standalone-script pattern is
+   already accepted there) and is currently blocked by `Permission denied
+   (publickey)` from both his PC and the master box. **Do not mark this cleared
+   until `gh workflow run offbox-watchdog.yml -f test_alert=true` has actually
+   buzzed a device** — "the code exists" is exactly the mistake that kept this
+   open for a month.
+   The abandoned history, kept because it explains the constraint:
+   Full messy history in
    docs/OFF-BOX-WATCHDOG.md, but the short version: two different Claude
    Code sessions worked on this in parallel without knowing about each
    other, reached different root-cause theories, and neither could fully

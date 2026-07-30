@@ -257,3 +257,73 @@ days) as of 2026-07-19T18:30 UTC, each one re-arming itself for another hour
 indefinitely. This is unrelated to Jarvis and wasn't touched or deleted —
 just flagging that it exists and looks like it may be stuck in a long-running
 loop worth a human look via https://claude.ai/code/routines.
+
+---
+
+# RESOLVED 2026-07-30 — stop using cloud routines for this
+
+Everything above stays as the record of how this went wrong twice. The design
+that replaced it is `.github/workflows/offbox-watchdog.yml`, documented in
+`ALERTS.md`. Read this section before touching either.
+
+## Why the cloud-routine approach was abandoned, not fixed
+
+Both previous designs ran inside a Claude Code cloud routine. That sandbox
+egresses through an allowlisting proxy which answers `CONNECT tunnel failed,
+403` for `ntfy.sh` **and** for `login.tailscale.com`,
+`controlplane.tailscale.com` and `pkgs.tailscale.com` — confirmed twice,
+independently (2026-07-19 and again 2026-07-22 with a one-shot diagnostic from
+inside the real sandbox). So:
+
+- the ntfy design could not deliver;
+- the tailnet-join redesign could not even install tailscale;
+- both needed the same network-policy change, which only Craig can make;
+- and neither could be verified from inside the tool that was supposed to run it.
+
+Two sessions produced two contradictory "fixes" for a routine that, on the
+evidence, had never delivered a single alert. The fault was not in either fix.
+It was in the choice of host.
+
+## What replaced it
+
+A GitHub Actions runner. It is off-box by definition, always available, has
+unrestricted egress, and on this public repo the minutes are free and unlimited.
+Every 5 minutes it probes `http://66.42.121.161:9212/health` three times, spaced,
+and on total failure raises **two independent alarms**:
+
+1. a max-priority ntfy push to every device (needs the `NTFY_TOPIC` repo secret);
+2. the job failing, which makes GitHub email Craig from its own infrastructure —
+   **no secret required**, so this half works today and still works if ntfy is
+   the thing that's broken.
+
+It touches nothing private: no tailnet, no SSH key, no Jarvis credential. That is
+a hard requirement, not a simplification — this job has to run when the box is a
+smoking hole.
+
+Deliberate design choice worth keeping: a missing `NTFY_TOPIC` logs a
+`::warning::` and the run still passes. Failing every 5 minutes to complain about
+its own configuration would be 288 failure emails a day, which trains him to
+ignore the one channel that must work.
+
+## Verification (the thing every previous attempt lacked)
+
+```bash
+gh workflow run offbox-watchdog.yml -f test_alert=true   # proves delivery on demand
+gh run list --workflow=offbox-watchdog.yml --limit 5     # proves it is actually running
+```
+
+A watchdog is not "done" because it exists. It is done when a test alert has
+arrived on Craig's phone and a run list shows it firing on schedule. Do not mark
+this cleared on the strength of the code alone — that is the exact mistake this
+document exists to record.
+
+## Still better, when it becomes possible
+
+Box 158 (Vapron) is always on, on the tailnet, and already runs a standalone
+`jarvis-heartbeat.timer` posting *into* the gateway — the accepted pattern for
+non-Jarvis code on that box. A 5-minute watchdog script there would beat a
+GitHub runner on both latency and depth of check. **Blocked as of 2026-07-30:**
+no SSH access to 158 from Craig's PC or from the master box, including with
+`.ssh/orchestrator` (`Permission denied (publickey)`). Get a key installed
+first; keep the Actions watchdog either way as the independent second pair of
+eyes.

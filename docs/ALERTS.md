@@ -1,0 +1,149 @@
+# How Jarvis reaches Craig — every channel, and what each one can't do
+
+> Written 2026-07-30, after: *"honestly we need a reliable set across all my
+> devices for alerts and communication between myself and jarvis."*
+>
+> Rule 0 applies to this file. If you add or remove a channel, update it here in
+> the same commit.
+
+## The problem with what existed
+
+Jarvis had five ways to tell Craig something, and **every one of them needed
+something of his to be open or polling**:
+
+| Channel | Reaches him when… | Fails when… |
+|---|---|---|
+| memory inbox (`:9200/memory/notifications`) | he goes looking | always, unprompted — it's a pull |
+| gateway push (`:9208/internal/notify`) | a gateway tab is connected | no tab open |
+| deck push (`:9210/internal/notify`) | a deck tab is connected | no tab open |
+| TTS / spoken | a page exists to speak from | no page |
+| Slack (`:9203`, frozen-legacy but live) | Slack is installed and unmuted | muted, or he isn't in Slack |
+
+Close the laptop and walk out of the house — the exact moment an alert matters —
+and Jarvis was shouting into an empty room. Worse, the one channel designed for
+"the box is dead" (the off-box watchdog) had been provably unable to deliver
+anything for weeks; see `OFF-BOX-WATCHDOG.md`.
+
+## The channels now
+
+### 1. Device push — `src/lib/push.js` (added 2026-07-30)
+
+A plain HTTP POST to an [ntfy](https://ntfy.sh) topic. `notify()` calls it last,
+after the durable inbox write and the in-house pushes, so a slow relay can never
+delay anything local.
+
+Chosen because it needs **no account and no app-store credential**: the topic
+name *is* the credential. Which means:
+
+- it lives in `config/secrets.env` as `NTFY_TOPIC` and **never in git**;
+- anyone who learns it can read every alert and post fakes — treat it exactly
+  like a password, and rotate by generating a new one and re-subscribing;
+- Rule 5 is satisfied: no SDK, no client library, one `fetch`.
+
+Levels map to ntfy priority: `info` → 2, `warn` → 4, `alert` → 5 (max, which
+the app can be set to punch through the phone's own quiet modes).
+
+**Defaults are set by the two ways an alert channel dies:**
+
+- *Silently delivering nothing.* `pushAlert()` returns `{sent, reason, status}`
+  instead of fire-and-forget; a missing topic warns once at boot; a dead relay or
+  an HTTP refusal is logged with its status. `hasPush()` answers whether the
+  channel exists at all.
+- *Buzzing so often he mutes it.* `info` is held back unless
+  `PUSH_MIN_LEVEL=info`; repeated headlines are deduped for `PUSH_DEDUPE_MINUTES`;
+  there's a `PUSH_MAX_PER_HOUR` cap. **`alert` is exempt from both** — an
+  emergency repeating IS the signal. Both limits go through `lib/guardrail.js`,
+  so an inline comment in `secrets.env` can't silently remove them (the
+  2026-07-17 incident).
+
+Kill switch: `PUSH_DISABLED=1`. Tests: `test/push.test.js`.
+
+#### Craig — one-time setup per device
+
+1. Install **ntfy**: [iOS](https://apps.apple.com/app/ntfy/id1625396347) ·
+   [Android / F-Droid](https://ntfy.sh/docs/subscribe/phone/) · desktop: any
+   browser at `https://ntfy.sh/app`.
+2. Get the topic (it's a secret, so read it from the box rather than pasting it
+   anywhere):
+   ```bash
+   ssh root@66.42.121.161 'grep ^NTFY_TOPIC= /opt/jarvis/config/secrets.env'
+   ```
+3. In the app: **Subscribe to topic** → paste it. Do that on the phone, the iPad,
+   and the desktop; every subscribed device gets every alert.
+4. In the app's settings, allow **critical/max-priority** notifications to
+   override Do Not Disturb — otherwise a 3am box death waits for morning.
+5. Verify: `curl -d "hello" https://ntfy.sh/<topic>` from anywhere should buzz
+   every device.
+
+### 2. Off-box watchdog — `.github/workflows/offbox-watchdog.yml` (added 2026-07-30)
+
+The channel for *"Jarvis is dead and therefore cannot tell you"*. Runs on a
+GitHub Actions runner every 5 minutes: three spaced probes of the box's one
+public liveness port (`:9212/health`), and if all three fail it raises **two
+independent alarms** — a max-priority push, and the job itself failing, which
+makes GitHub email him from its own infrastructure. If ntfy is the broken thing,
+the email still arrives.
+
+Why Actions and not another cloud routine: the two previous designs both ran in
+a Claude cloud-routine sandbox whose egress proxy answers `403` for `ntfy.sh`
+*and* every `tailscale.com` host — confirmed twice. It could not deliver and
+could not be fixed without a network-policy change only Craig can make. A
+runner is off-box by definition, has unrestricted egress, and on this **public**
+repo the minutes are free and unlimited.
+
+It touches nothing private on purpose — no tailnet, no SSH key, no Jarvis
+credential — so it still works when the box is a smoking hole.
+
+**Craig — one command to enable the push half** (the email half already works):
+
+```bash
+gh secret set NTFY_TOPIC --repo ccantynz-alt/jarvis-platform
+# paste the same NTFY_TOPIC value from the box's config/secrets.env
+```
+
+Until then the workflow logs a `::warning::` and relies on the failure email —
+deliberately, because failing the job every 5 minutes to complain about its own
+configuration would send 288 emails a day and teach him to ignore the one
+channel that has to work.
+
+Prove delivery any time, without waiting for an outage:
+```bash
+gh workflow run offbox-watchdog.yml -f test_alert=true
+```
+
+Known limits: GitHub delays scheduled runs under load, so the real detection
+window is 5–20 minutes; and a scheduled workflow is disabled after 60 days of
+repository inactivity (not a risk while this repo is worked on daily).
+
+### 3. Still-missing pieces (do these next, in this order)
+
+1. **A watcher on box 158.** The best off-box watcher is the other box Craig
+   already owns: always on, on the tailnet, 5-minute timer, and it can check far
+   more than a liveness port. `jarvis-heartbeat.timer` on 158 already posts
+   *into* the gateway, so the pattern (a standalone script, not Jarvis code — the
+   estate doctrine) is established and accepted. **Blocked:** as of 2026-07-30
+   neither Craig's PC nor the master box can SSH to 158 (`Permission denied
+   (publickey)`, including with `.ssh/orchestrator`). Needs a key installed
+   before anyone can build this.
+2. **The PC worker as a fast local watcher.** `src/pc-worker.js` already polls
+   the gateway every few seconds from Craig's Windows machine. N consecutive
+   failures → a Windows toast + a push. Not always-on, but it would cut detection
+   from minutes to seconds whenever his PC is awake.
+3. **Two-way from the lock screen.** Push is one-way. Talking to Jarvis still
+   means opening the deck or the gateway. A Telegram bot bridged to the same
+   brain and the same shared transcript (`lib/transcript.js`) would make every
+   device a two-way surface, including the phone's lock screen. Needs one thing
+   from Craig: a bot token from @BotFather.
+
+## Who raises what
+
+`notify({source, level, title, body, speech})` in `src/lib/notify.js` is the ONE
+entry point — inbox write, then gateway, then deck, then legacy Slack, then
+device push. Anything that wants to reach Craig goes through it (or
+`POST /internal/notify` on the gateway/deck, which is the same thing from
+off-process).
+
+Unsolicited *Slack* traffic additionally passes through `NotifyCenter`
+(`src/notify-center.js`) for quiet hours, mute, and digesting. Device push has
+its own, simpler guards (above) rather than reusing that state machine — its
+whole purpose is the alert that must not be batched away.

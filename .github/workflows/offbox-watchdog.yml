@@ -1,0 +1,120 @@
+# Off-box watchdog — "a mind that can't report its own death isn't really
+# advanced, it's just lucky" (Jarvis to Craig, 2026-07-28).
+#
+# KNOWN DEBT #1 has been open since the start and has burned two redesigns. The
+# history is in docs/OFF-BOX-WATCHDOG.md; the short version is that every design
+# so far ran inside a Claude cloud routine, whose sandbox egresses through an
+# allowlisting proxy that answers `CONNECT tunnel failed, 403` for ntfy.sh AND
+# for every tailscale.com host — confirmed twice, independently. So the watchdog
+# could not deliver, and could not be made to deliver without a network-policy
+# change only Craig can make.
+#
+# A GitHub Actions runner has none of those problems: it is off-box by
+# definition, it is always available, its egress is unrestricted, and on a PUBLIC
+# repo the minutes are free and unlimited. The only secret it needs is the ntfy
+# topic, which lives in repo secrets — never in this file, which anyone can read.
+#
+# Two independent alert channels come out of one job:
+#   1. a max-priority ntfy push to every device Craig has the app on;
+#   2. the job FAILING, which makes GitHub email him on its own infrastructure.
+# If ntfy is the thing that's broken, channel 2 still fires.
+#
+# Deliberately NOT here: anything that needs the tailnet, an SSH key, or a
+# Jarvis credential. This job must be able to run when the box is a smoking
+# hole, so it may only touch the one public liveness port (:9212, see CLAUDE.md)
+# and the public relay.
+
+name: off-box watchdog
+
+on:
+  schedule:
+    # Every 5 minutes. GitHub delays scheduled runs under load — treat the real
+    # detection window as 5-20 minutes, which is still infinitely better than
+    # the nothing that came before.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: 'Send a test push instead of only checking (proves delivery)'
+        type: boolean
+        default: false
+
+# A stuck run must never block the next one, and two watchdogs shouting at once
+# is worse than one.
+concurrency:
+  group: offbox-watchdog
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # ONE shell step on purpose. docs/OFF-BOX-WATCHDOG.md records that a
+      # multi-step routine silently dropped its second step — the reason a
+      # watchdog looked healthy for weeks while delivering nothing.
+      - name: Probe the box and alert if it is gone
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          HEALTH_URL: http://66.42.121.161:9212/health
+          TEST_ALERT: ${{ inputs.test_alert }}
+        run: |
+          set -u
+          SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+
+          # Channel 2 (this job failing → GitHub emails Craig) needs no secret,
+          # so a missing topic degrades the watchdog instead of disabling it.
+          #
+          # It deliberately does NOT exit 1 here: a watchdog that fails every 5
+          # minutes because it is unconfigured sends 288 failure emails a day and
+          # teaches him to ignore exactly the channel that has to work. Warn in
+          # the log, keep probing, and only fail when the box is actually down.
+          if [ -z "${NTFY_TOPIC}" ]; then
+            echo "::warning::NTFY_TOPIC secret is not set — device push is OFF for this watchdog." \
+                 "Set it with: gh secret set NTFY_TOPIC --repo ${GITHUB_REPOSITORY} (value: NTFY_TOPIC from the box's config/secrets.env)." \
+                 "Until then the only alert channel is this job failing, which GitHub emails you about."
+          fi
+
+          push() { # push <priority> <tags> <title> <body>
+            if [ -z "${NTFY_TOPIC}" ]; then
+              echo "would push [$1/$2] $3 — but no topic is configured"
+              return 0
+            fi
+            curl -sS -m 20 \
+              -H "Title: $3" \
+              -H "Priority: $1" \
+              -H "Tags: $2" \
+              -H "Click: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+              -d "$4" \
+              "${SERVER}/${NTFY_TOPIC}"
+          }
+
+          if [ "${TEST_ALERT}" = "true" ]; then
+            push 4 test_tube "Watchdog test" "Off-box watchdog delivery test from GitHub Actions run ${GITHUB_RUN_ID}. The box was not checked."
+            if [ -z "${NTFY_TOPIC}" ]; then
+              echo "::error::asked for a test alert with no NTFY_TOPIC set — nothing was delivered"
+              exit 1
+            fi
+            echo "test alert sent"
+            exit 0
+          fi
+
+          # Three tries, spaced — one dropped packet is not an outage, and a
+          # false 3am alert is how a channel earns itself a mute.
+          for attempt in 1 2 3; do
+            CODE=$(curl -s -o /tmp/health.out -w '%{http_code}' -m 10 "${HEALTH_URL}" || echo 000)
+            echo "attempt ${attempt}: HTTP ${CODE} $(cat /tmp/health.out 2>/dev/null | head -c 60)"
+            if [ "${CODE}" = "200" ]; then
+              echo "box is alive"
+              exit 0
+            fi
+            [ "${attempt}" -lt 3 ] && sleep 20
+          done
+
+          # Every attempt failed. Alert on both channels: the push, and this
+          # job's own failure (which GitHub emails him about independently).
+          push 5 rotating_light "Jarvis box is not answering" \
+            "The Vultr box (66.42.121.161) failed 3 liveness probes over ~40s from an off-box runner. Last HTTP code: ${CODE}. Jarvis cannot report this itself — that is why this job exists."
+          echo "::error::Jarvis box failed 3 off-box liveness probes (last code ${CODE})"
+          exit 1
