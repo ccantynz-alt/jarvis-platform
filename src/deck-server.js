@@ -740,50 +740,93 @@ wss.on('connection', (ws, req) => {
         // Voice v2 (docs/VOICE-V2.md): stream speech server-side while the
         // brain streams text. Sentences feed ONE ElevenLabs stream; mp3
         // chunks go to the client as binary frames on this same socket.
+        //
+        // The stream opens LAZILY, on the first finished sentence (2026-07-30).
+        // It used to open before the brain had said anything, and ElevenLabs'
+        // stream-input socket terminates after 20 SECONDS with no text — while
+        // brain-claude's own warm first-token watchdog is itself 20s, and a turn
+        // with a tool call is routinely slower. So a perfectly healthy reply
+        // killed its own voice stream before speaking a word: Craig's 22:34 UTC
+        // deck session showed exactly that ("Have not received a new text input
+        // within the timeout of 20 seconds"). Opening when there is something to
+        // say costs one WS handshake and removes the whole race.
         let session = null;
         if (msg.v2) {
-          session = { discard: false, tts: null, buf: '', spokenAny: false };
-          session.tts = await openTtsStream({
+          session = { discard: false, tts: null, opening: null, buf: '', queue: [], spokenAny: false, failed: false };
+          voiceSession = session; // claim the turn NOW so an interrupt during the open still lands
+        }
+        const openStream = () => {
+          if (!session || session.discard || session.failed) return Promise.resolve(null);
+          if (session.tts) return Promise.resolve(session.tts);
+          if (session.opening) return session.opening;
+          session.opening = openTtsStream({
             onAudio: (chunk) => { if (!session.discard && ws.readyState === 1) ws.send(chunk); },
             onDone: () => { if (!session.discard) send({ type: 'audio_ctl', ev: 'end' }); },
             onError: (e) => {
               console.error('[deck] v2 tts stream failed:', e.message);
               if (!session.discard) send({ type: 'audio_ctl', ev: 'fallback' }); // client re-voices via v1
               session.tts = null;
+              session.failed = true;
             },
-          }).catch(() => null);
-          if (session.tts) { voiceSession = session; send({ type: 'audio_ctl', ev: 'start' }); }
-          else session = null; // TTS off/over budget → pure v1 behaviour
-        }
+          }).catch(() => null).then((tts) => {
+            if (!tts) { session.failed = true; return null; }   // TTS off or over budget
+            if (session.discard) { tts.abort(); return null; }  // interrupted mid-handshake
+            session.tts = tts;
+            send({ type: 'audio_ctl', ev: 'start' });
+            return tts;
+          });
+          return session.opening;
+        };
+        const drainSpeech = () => {
+          while (session?.queue.length && session.tts && !session.discard) {
+            session.tts.sendText(session.queue.shift());
+            session.spokenAny = true;
+          }
+        };
+        const flushSpeech = () => {
+          if (!session?.queue.length || session.discard || session.failed) return;
+          if (session.tts) return drainSpeech();
+          openStream().then(() => drainSpeech());
+        };
         const SENT_END = /[.!?]["')\]]?(?:\s|$)/;
         const feedSpeech = (chunk) => {
-          if (!session?.tts || session.discard) return;
+          if (!session || session.discard || session.failed) return;
           session.buf += chunk;
           let m;
           while ((m = session.buf.match(SENT_END))) {
             const cut = m.index + m[0].length;
-            session.tts.sendText(session.buf.slice(0, cut));
-            session.spokenAny = true;
+            session.queue.push(session.buf.slice(0, cut));
             session.buf = session.buf.slice(cut);
           }
+          flushSpeech();
         };
         try {
           // runAgent pushes user+assistant turns onto transcript itself.
           const full = await runAgent(transcript, text,
             (chunk) => { send({ type: 'chat_chunk', text: chunk }); feedSpeech(chunk); }, dispatchGate);
           saveTranscript();
-          if (session?.tts && !session.discard) {
-            if (session.buf.trim()) session.tts.sendText(session.buf); // the tail fragment
-            if (!session.spokenAny && !session.buf.trim() && full.text) session.tts.sendText(full.text.slice(0, 1200));
-            session.tts.end();
+          if (session && !session.discard) {
+            if (session.buf.trim()) session.queue.push(session.buf);            // the tail fragment
+            else if (!session.spokenAny && !session.queue.length && full.text) session.queue.push(full.text.slice(0, 1200));
+            if (session.queue.length) { await openStream(); drainSpeech(); }
+            session.tts?.end();
+            // Nothing was voiced server-side (TTS disabled, over budget, or the
+            // stream never opened). A v2 client does NOT speak the streamed text
+            // itself, so without this it just sits there in silence — the
+            // failure mode where Jarvis loses his voice the moment the daily
+            // ElevenLabs budget runs out, and never says why.
+            if (!session.spokenAny) {
+              console.warn('[deck] v2 turn voiced nothing server-side — telling the client to speak it');
+              send({ type: 'audio_ctl', ev: 'fallback' });
+            }
           }
           const back = noteBrainHealthy();
           if (back) send({ type: 'notify', level: 'info', title: back, speech: back });
-          // In v2 the server already voiced the reply — suppress client re-speak
-          // by sending speech:null (v1 clients never set msg.v2, so unaffected).
-          return send({ type: 'chat', text: full.text || 'Done, sir.', speech: session ? null : full.speech });
+          // Suppress client re-speak ONLY when the server actually spoke. v1
+          // clients never set msg.v2, so they always get their speech text.
+          return send({ type: 'chat', text: full.text || 'Done, sir.', speech: session?.spokenAny ? null : full.speech });
         } catch (e) {
-          if (session) { session.tts?.abort(); if (voiceSession === session) voiceSession = null; }
+          if (session) { session.tts?.abort(); session.discard = true; if (voiceSession === session) voiceSession = null; }
           // Both brain providers unusable (no credits, outage) — undo this
           // turn's partial transcript and fall through to the intent pipeline.
           transcript.splice(before);
