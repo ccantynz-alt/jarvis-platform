@@ -67,6 +67,24 @@ found late — see Rule 0 note below):**
   systemd `EnvironmentFile` not stripping inline comments off numeric
   guardrail values) — treat this as **already running live in production**,
   not a dormant/experimental system.
+  **DNS pre-check (2026-07-30):** before dispatching, self-heal resolves the
+  platform's hostname. `nxdomain` → alert Craig, count the attempt, dispatch
+  NOTHING (a name that does not exist cannot be repaired from this box);
+  `unresolvable` (EAI_AGAIN/timeout — our resolver, not their domain) → wait for
+  the next tick without counting an attempt. This came from gatetest.ai expiring
+  into .ai redemption on 2026-07-29: self-heal spent SIX repair agents in one
+  day, twelve runs in total, each correctly concluding "registry-level, nothing
+  to do here" after minutes of a full-permission agent's time, while Next.js
+  answered 200 on 10.0.1.1:3000 throughout.
+  **The daily cap is now actually daily (2026-07-30).** `rollDay()` owns the
+  rollover for BOTH the down-path and the recovered-platform loop, and derives
+  the reset from `lastAttempt` rather than the stored `day` — which was
+  re-stamped every tick and so carried no history. Before this, the
+  recovered-platform loop wrote `day: today()` while carrying yesterday's count
+  forward, so the reset could never fire and one bad day disabled a platform's
+  autonomous repair PERMANENTLY. It was live: bookaride claimed "1 attempt
+  today" for an attempt made 2026-07-12, gluecron the 14th, zoobicon the 13th,
+  and gatetest sat at 5 of 6.
   **Rule 0 note:** `jarvis-self-heal.service`/`.timer` were missing from
   this repo's `systemd/` folder entirely until 2026-07-24 — the exact same
   gap `jarvis-browser.service` had (a real unit that exists only on the
