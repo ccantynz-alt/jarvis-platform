@@ -32,6 +32,7 @@ import { readFileSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { NotifyCenter, parseDuration } from './notify-center.js';
 import { detectIntent, matchPlatform, normalizeText } from './intent.js';
+import { parseAllowlist, senderAllowed } from './lib/slack-auth.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
