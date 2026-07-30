@@ -24,6 +24,14 @@ wss.on('connection', (ws) => {
   ws.on('error', () => clients.delete(ws));
 });
 
+// The canonical port map (CLAUDE.md's service table). Jarvis owns 9200–9212.
+// 9212 is the dashboard's public liveness ping, deliberately separate from 9206.
+const JARVIS_SERVICES = {
+  memory: 9200, screenshot: 9201, metrics: 9202, slack: 9203, audit: 9204,
+  orchestrator: 9205, dashboard: 9206, 'deploy-gate': 9207, gateway: 9208,
+  agents: 9209, deck: 9210, browser: 9211,
+};
+
 function safeExec(cmd, fallback = '0') {
   try {
     return execSync(cmd, { encoding: 'utf8', timeout: 5000 }).trim();
@@ -32,9 +40,14 @@ function safeExec(cmd, fallback = '0') {
   }
 }
 
+// Exact port match (2026-07-30). `grep :${port}` matched the port as a substring
+// anywhere on the line, which is how earlier revisions reported co-tenant
+// processes as Jarvis health (see the vapron note below). Compare the LISTENING
+// address's trailing port instead.
 function checkPort(port) {
-  const result = safeExec(`ss -tlnp 2>/dev/null | grep :${port}`, '');
-  return result.length > 0 ? 'ONLINE' : 'OFFLINE';
+  const listening = safeExec(`ss -tlnH 2>/dev/null | awk '{print $4}'`, '');
+  const re = new RegExp(`[:.]${port}$`);
+  return listening.split('\n').some(addr => re.test(addr.trim())) ? 'ONLINE' : 'OFFLINE';
 }
 
 function collectMetrics() {
@@ -55,12 +68,12 @@ function collectMetrics() {
     disk: parseInt(diskRaw) || 0,
     load: parseFloat(loadRaw) || 0,
     uptime: Math.floor(process.uptime()),
-    jarvis: {
-      memory: checkPort(9200),
-      screenshot: checkPort(9201),
-      metrics: 'ONLINE',
-      audit: checkPort(9204)
-    },
+    // All of them, not four (2026-07-30). The HUD showed memory/screenshot/audit
+    // and nothing else, so eight services could die without even appearing on
+    // the panel Craig watches — never mind alerting.
+    jarvis: Object.fromEntries(Object.entries(JARVIS_SERVICES).map(
+      ([name, port]) => [name, name === 'metrics' ? 'ONLINE' : checkPort(port)],
+    )),
     // NOTE: no local `vapron` port block — vapron runs on box 158, not here.
     // Local port checks matched unrelated co-tenant processes (:3000/:443) and
     // reported false health. vapron health comes from fleet-check/the heartbeat.
@@ -158,10 +171,59 @@ function makeGuard(label, warnAt, critAt) {
 const memGuard = makeGuard('Memory', MEM_WARN, MEM_CRIT);
 const diskGuard = makeGuard('Disk', DISK_WARN, DISK_CRIT);
 
+// ── Jarvis watches itself (2026-07-30) ──────────────────────────────────────
+//
+// The fleet-watcher had no watcher. Nothing anywhere notified when one of
+// Jarvis's OWN services died: no OnFailure= on any unit, nothing checking unit
+// state, and the HUD only looked at four ports. Demonstrated the same evening —
+// jarvis-slack crash-looped for a minute after a bad deploy of mine and the
+// inbox recorded absolutely nothing. The only self-liveness that existed was
+// external (the GitHub watchdog and the PC worker), and both only probe whether
+// the BOX answers, which a dead jarvis-slack does not affect at all.
+//
+// Deliberately NOT systemd OnFailure=: with Restart=always a unit is
+// "activating", not "failed", while it crash-loops, so OnFailure fires late or
+// never — and it would mean editing twelve unit files that are documented as not
+// fully in sync with this repo. A port probe catches every case, including a
+// process that is alive but no longer listening.
+const SERVICE_DOWN_CHECKS = 2;   // ~60s at GUARD_INTERVAL_MS — rides out a restart
+const downStreaks = {};
+const downAlerted = new Set();
+
+function watchOwnServices(jarvis) {
+  for (const [name, status] of Object.entries(jarvis)) {
+    if (name === 'metrics') continue;   // if this loop is running, metrics is up
+    const down = status !== 'ONLINE';
+    downStreaks[name] = down ? (downStreaks[name] || 0) + 1 : 0;
+
+    if (down && downStreaks[name] >= SERVICE_DOWN_CHECKS && !downAlerted.has(name)) {
+      downAlerted.add(name);
+      const secs = Math.round(downStreaks[name] * GUARD_INTERVAL_MS / 1000);
+      notify({
+        source: 'metrics',
+        level: 'alert',
+        title: `jarvis-${name} is not listening on :${JARVIS_SERVICES[name]}`,
+        body: `It has failed ${downStreaks[name]} consecutive port checks (~${secs}s). Nothing else in the estate ` +
+          `alerts on a dead Jarvis service — the off-box watchdog and the PC worker only prove the BOX answers. ` +
+          `Check: systemctl status jarvis-${name} && journalctl -u jarvis-${name} -n 50 --no-pager`,
+        speech: `Sir, jarvis ${name} has stopped listening.`,
+      }).catch(() => {});
+    } else if (!down && downAlerted.has(name)) {
+      downAlerted.delete(name);
+      notify({
+        source: 'metrics', level: 'info',
+        title: `jarvis-${name} is back`,
+        body: `Listening on :${JARVIS_SERVICES[name]} again.`,
+      }).catch(() => {});
+    }
+  }
+}
+
 setInterval(() => {
   const m = collectMetrics();
   memGuard(m.mem);
   diskGuard(m.disk);
+  watchOwnServices(m.jarvis);
 }, GUARD_INTERVAL_MS);
 
 // HTTP endpoints
