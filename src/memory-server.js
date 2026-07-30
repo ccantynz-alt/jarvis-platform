@@ -280,20 +280,39 @@ app.post('/memory/platform/update', (req, res) => {
   // those back to null/0, wiping out audit-runner.js's own bookkeeping
   // between its daily runs, including the consecutive_critical counter the
   // self-repair guardrail depends on. Read-then-preserve fixes it.
-  const existing = db.prepare('SELECT last_audit, last_screenshot, consecutive_critical FROM platform_state WHERE platform = ?').get(platform);
+  //
+  // 2026-07-30 (found by the code-health spine): that 2026-07-23 fix preserved
+  // the three columns it listed and left the OTHER three being destroyed by
+  // omission. `JSON.stringify(last_known_errors || [])` wrote `[]` and
+  // `health_score || 0` wrote 0 whenever a caller simply didn't mention them:
+  //   - fleet-check.sh posts status/health_score/notes every 10 minutes and never
+  //     sends last_known_errors, so the audit's recorded errors were erased six
+  //     times an hour;
+  //   - orchestrator.js's logToMemory posts status/notes only, so EVERY job
+  //     completion zeroed health_score — and conversation.js reads
+  //     `health_score > 80` as healthy, so a perfectly fine platform showed as
+  //     unhealthy right after any agent ran. That is the "false reports of
+  //     websites being down" family all over again.
+  // Omission now means "leave it alone"; only an explicit value writes. An
+  // explicit 0 or [] still lands, which is why these are `!== undefined` checks
+  // and not `||`.
+  const existing = db.prepare('SELECT * FROM platform_state WHERE platform = ?').get(platform);
+  const keep = (v, fallback) => (v === undefined || v === null ? fallback : v);
   db.prepare(`
     INSERT OR REPLACE INTO platform_state
     (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, notes, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     platform,
-    status || 'unknown',
-    JSON.stringify(last_known_errors || []),
+    keep(status, existing?.status ?? 'unknown'),
+    last_known_errors === undefined || last_known_errors === null
+      ? (existing?.last_known_errors ?? '[]')
+      : JSON.stringify(last_known_errors),
     existing?.last_audit ?? null,
     existing?.last_screenshot ?? null,
-    health_score || 0,
+    keep(health_score, existing?.health_score ?? 0),
     existing?.consecutive_critical ?? 0,
-    notes || null,
+    keep(notes, existing?.notes ?? null),
     new Date().toISOString()
   );
   res.json({ ok: true });

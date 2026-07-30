@@ -55,6 +55,7 @@ const SWEEP_COOLDOWN_H  = g('CODE_HEALTH_COOLDOWN_HOURS', 20);  // per platform
 const MAX_FINDINGS       = g('CODE_HEALTH_MAX_FINDINGS', 8);    // per sweep
 const MAX_VERIFICATIONS  = g('CODE_HEALTH_MAX_VERIFY', 4);      // per sweep
 const MAX_RECHECK        = g('CODE_HEALTH_MAX_RECHECK', 2, true); // old findings re-checked per sweep
+const RECHECK_MIN_AGE_H  = g('CODE_HEALTH_RECHECK_MIN_AGE_HOURS', 24); // don't re-check what we just checked
 const REVIEW_TIMEOUT_MIN = g('CODE_HEALTH_REVIEW_MIN', 25);
 const VERIFY_TIMEOUT_MIN = g('CODE_HEALTH_VERIFY_MIN', 8);
 
@@ -399,9 +400,18 @@ async function recheckOldFindings(platform, cwd) {
   }
   if (!Array.isArray(rows) || !rows.length) return closed;
 
+  // Don't re-check something we only just looked at. Without this the sweep
+  // spends a verifier turn re-checking a finding IT confirmed ninety seconds
+  // earlier — observed on the 2026-07-30 jarvis sweep — because a fresh finding
+  // has no last_checked and therefore sorts first.
+  const cutoff = new Date(Date.now() - RECHECK_MIN_AGE_H * 3600_000).toISOString();
   const staleFirst = rows
-    .sort((a, b) => String(a.last_checked || a.first_seen).localeCompare(String(b.last_checked || b.first_seen)))
-    .slice(0, MAX_RECHECK);
+    .map(f => ({ f, checkedAt: String(f.last_checked || f.first_seen || '') }))
+    .filter(x => x.checkedAt < cutoff)
+    .sort((a, b) => a.checkedAt.localeCompare(b.checkedAt))
+    .slice(0, MAX_RECHECK)
+    .map(x => x.f);
+  if (!staleFirst.length) { log('recheck: nothing old enough to be worth re-checking'); return closed; }
 
   for (const f of staleFirst) {
     const v = await spawnClaude({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });

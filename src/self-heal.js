@@ -73,6 +73,41 @@ function stateOf(p) {
 }
 function saveState(p, s) { if (!existsSync(STATE_DIR)) mkdirSync(STATE_DIR, { recursive: true }); writeFileSync(join(STATE_DIR, `${p}.json`), JSON.stringify(s)); }
 
+/**
+ * `day` and `attemptsToday` may only ever move as a PAIR.
+ *
+ * The bug this fixes (found by the code-health spine, 2026-07-30, and it
+ * permanently disabled autonomous repair for any platform that ever hit its
+ * daily cap): the recovered-platform loop below runs every tick for every
+ * platform that is NOT currently down — so, normally, all of them every 5
+ * minutes — and it wrote `day: today()` while carrying the old `attemptsToday`
+ * forward. The only reset lived in the down-path (`if (s.day !== today())`), so
+ * it could never fire: by the time a platform went down again, `s.day` already
+ * equalled today. A platform that spent all 6 attempts on one bad day then hit
+ * "daily cap hit — escalate" on every future outage, forever, with nothing but
+ * an alert to show for it.
+ *
+ * Deliberately NOT "reset the count on recovery": the cap is per DAY, not per
+ * outage, and a flapping platform that recovers between attempts would otherwise
+ * get an unbounded repair budget.
+ *
+ * Pure and exported so the rollover is testable without waiting for midnight.
+ */
+export function rollDay(s, day = today()) {
+  if (!s) return s;
+  // Trust `lastAttempt` over the stored `day`. The stored value was being
+  // stamped forward every tick, so it carries no history — and on the real box
+  // it had already gone incoherent: bookaride said "1 attempt today" for an
+  // attempt actually made on 2026-07-12, gluecron on the 14th, zoobicon on the
+  // 13th, and gatetest was sitting at 5 of a cap of 6. Deriving the reset from
+  // when work ACTUALLY happened both fixes the bug and repairs those files on
+  // the next tick, with no hand-editing.
+  const attemptDay = s.lastAttempt ? new Date(s.lastAttempt).toISOString().slice(0, 10) : null;
+  const countIsToday = attemptDay === day;
+  if (s.day === day && (countIsToday || !s.attemptsToday)) return s;
+  return { ...s, day, attemptsToday: countIsToday ? s.attemptsToday : 0 };
+}
+
 async function memSummary() {
   const r = await fetch(`${MEMORY}/memory/summary`);
   const t = (await r.text()).replace(/<!DOCTYPE[\s\S]*$/i, '').trim();
@@ -143,9 +178,12 @@ export async function runOnce() {
     if (downNames.has(name)) continue;
     const f = join(STATE_DIR, `${name}.json`);
     if (existsSync(f)) {
-      const s = stateOf(name);
+      // rollDay, not `day: today()` — see rollDay's comment. Stamping today's
+      // date while carrying yesterday's attempt count forward is what made the
+      // daily cap permanent instead of daily.
+      const s = rollDay(stateOf(name));
       if (s.firstDown) { log(`${name}: recovered — clearing self-heal state`); }
-      saveState(name, { firstDown: null, lastAttempt: s.lastAttempt, day: today(), attemptsToday: s.attemptsToday });
+      saveState(name, { firstDown: null, lastAttempt: s.lastAttempt, day: s.day, attemptsToday: s.attemptsToday });
     }
   }
 
@@ -169,8 +207,9 @@ export async function runOnce() {
     if (entry.status !== 'active') { log(`${name}: skip (registry status ${entry.status})`); continue; }
     // Repairable only if local, or a reachable remote box (IPv4 server). Vercel/hostname-only → notify-only.
     const reachable = entry.server === OWN_IP || /^\d{1,3}(\.\d{1,3}){3}$/.test(entry.server || '');
-    const s = stateOf(name);
-    if (s.day !== today()) { s.day = today(); s.attemptsToday = 0; }
+    // Same helper as the recovered-platform loop above — one place decides how a
+    // day rolls over, so the two paths cannot disagree again.
+    const s = rollDay(stateOf(name));
     if (!s.firstDown) s.firstDown = now();
     const downMin = Math.round((now() - s.firstDown) / 60000);
     const url = URLS[name];
