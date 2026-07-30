@@ -36,7 +36,7 @@ Notes:
 |---------|------|------|------|---------|
 | jarvis-memory | src/memory-server.js | 9200 | loopback | Cross-session SQLite memory + notifications inbox + durable job queue + agent reports |
 | jarvis-screenshot | src/screenshot-service.js | 9201 | loopback | CDP screenshot capture |
-| jarvis-metrics | src/metrics-collector.js | 9202 | loopback | Real server metrics + WebSocket |
+| jarvis-metrics | src/metrics-collector.js | 9202 | loopback | Real server metrics + WebSocket + **the only thing that alerts when a Jarvis service itself dies** (2026-07-30). Probes all 12 ports every 30s (ONE `ss` call, not one per port) and reports a dead service via `notify()`. "The port isn't answering" is FOUR situations and they get different treatment — see `src/lib/service-verdict.js`: `restarting` (systemd activating/deactivating) is silent and accumulates no strike; `failed` (ActiveState=failed) alerts on the FIRST probe, since systemd has already given up; `stopped` (inactive, deliberate) is `warn` after ~2 min, so a deploy gap passes in silence; `notlistening` (systemd says running, port disagrees — the dangerous one) alerts after ~60s. Those numbers exist because the first version paged Craig for a 50-second deploy restart of mine. |
 | jarvis-audit | src/audit-runner.js | 9204 | loopback | Build + test audit runner |
 | jarvis-orchestrator | src/orchestrator.js | 9205 | loopback | Dispatch engine — durable job queue (SQLite `jobs` table via :9200) + scheduler tick; spawns Claude agents (local + SSH) via src/lib/spawn-agent.js |
 | jarvis-dashboard | src/dashboard-server.js | 9206 | loopback, exposed ONLY via `tailscale serve --https=8445` | Status panel + screenshot browser; token = JARVIS_DASHBOARD_TOKEN in secrets.env, login once per device via `?token=` |
@@ -126,6 +126,17 @@ did). Trust that command, not this list:**
   real finding there may already be fixed upstream. Spec:
   **docs/CODE-HEALTH.md**; pure logic + tests: `src/lib/findings.js`,
   `test/findings.test.js`.
+  **A path existing is not the same as code being there (2026-07-30).** The timer
+  picked `zoobicon` at `/root/zoobicon` — a directory holding only a `.claude`
+  folder — spent a review agent, returned 0 findings in 25s, and recorded the
+  platform as SWEPT with a 20-hour cooldown, so the flagship read as reviewed
+  having never been read. `eligiblePlatforms()` now also requires
+  `hasSource(path)` (`src/lib/checkout.js`) and logs the skip. Note that is a
+  DIFFERENT test from the audit runner's `checkoutProblem()`: "is there code to
+  read" (any source file, 2 levels deep) versus "could this be built" (a
+  manifest). universal-ai-operator is loose Python with no manifest — reviewable,
+  not buildable — and getting those backwards silently drops a platform from one
+  system or the other.
 - **`scripts/backup-memory.sh`** — `jarvis-backup.timer`, daily 03:30 UTC.
   SQLite memory-store backup (the "no DB backups" debt cleared 2026-07-06).
 - **`scripts/pull-vapron-backup.sh`** — `jarvis-vapron-backup.timer`, daily
@@ -771,6 +782,11 @@ no DB backups. Cleared 2026-07-12: Slack notification firehose (NotifyCenter:
 digest/mute/rate-limit) and misrouted Slack commands (src/intent.js rewrite)
 — see git log.
 Cleared 2026-07-19: resource guards / pre-OOM alerting (metrics-collector.js).
+Cleared 2026-07-30: nothing alerted when a Jarvis SERVICE died — no OnFailure= on
+any unit, nothing watching unit state, and the HUD showing four ports of twelve.
+Demonstrated live the same day when a bad deploy of mine crash-looped jarvis-slack
+for a minute and the inbox recorded nothing. metrics-collector.js now watches all
+twelve and classifies why a port is quiet before deciding how loudly to say so.
 Cleared 2026-07-20 (code side, Gateway/voice path only): Haiku intent
 classification's ~3-10s CLI cold-start in `classifyIntent`
 (src/lib/conversation.js) now tries the HTTP Messages API first (~300ms),
