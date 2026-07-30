@@ -41,12 +41,23 @@ export function workerEnv(extraEnv = {}) {
 
 // Spawn any worker command with a hard timeout. Resolves (never rejects) with
 // { code, stdout, stderr, timedOut }. SIGTERM at timeout, SIGKILL 10s later.
-export function spawnProcess(cmd, args, { cwd, env, timeoutMin = 30 } = {}) {
+//
+// `detached: true` puts the child in its OWN process group so a timeout can kill
+// the whole TREE, not just the process we launched (2026-07-30, from a
+// code-health finding about deploy-gate: GateTest launches Chromium, and killing
+// the node wrapper left the browser running. On a box that also hosts AlecRae,
+// Gluecron, GateTest and Coolify, leaked browsers are a Rule 4 problem, not an
+// untidiness problem). Each spawn gets its own group, so a group kill can only
+// ever reach that spawn's own descendants.
+//
+// `timeoutMs` overrides `timeoutMin` for callers whose limit is sub-minute.
+export function spawnProcess(cmd, args, { cwd, env, timeoutMin = 30, timeoutMs } = {}) {
   return new Promise((resolve) => {
     const proc = spawn(cmd, args, {
       cwd,
       env: env || workerEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     });
 
     let stdout = '';
@@ -54,11 +65,18 @@ export function spawnProcess(cmd, args, { cwd, env, timeoutMin = 30 } = {}) {
     let timedOut = false;
     let settled = false;
 
+    // Signal the whole group; fall back to the single process if the group is
+    // gone (already reaped) or the platform refuses a negative pid.
+    const killTree = (sig) => {
+      try { process.kill(-proc.pid, sig); }
+      catch { try { proc.kill(sig); } catch { /* already dead */ } }
+    };
+
     const killTimer = setTimeout(() => {
       timedOut = true;
-      proc.kill('SIGTERM');
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 10_000).unref();
-    }, timeoutMin * 60_000);
+      killTree('SIGTERM');
+      setTimeout(() => killTree('SIGKILL'), 10_000).unref();
+    }, timeoutMs || timeoutMin * 60_000);
 
     proc.stdout.on('data', (d) => { stdout += d.toString(); });
     proc.stderr.on('data', (d) => { stderr += d.toString(); });

@@ -33,7 +33,7 @@
  * safety net for platforms that don't have it wired yet.
  */
 
-import { execSync } from 'child_process';
+import { spawnProcess } from './lib/spawn-agent.js';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -150,7 +150,7 @@ function hasRealFileChanges(session) {
  * gatetest-deploy-gate.yml uses in CI (webUrl/wpUrl/targetUrl — the
  * shared fallback chain every live module already reads).
  */
-function runGateTestScan(url) {
+async function runGateTestScan(url) {
   const workspace = mktempWorkspace();
   try {
     mkdirSync(join(workspace, '.gatetest'), { recursive: true });
@@ -159,17 +159,18 @@ function runGateTestScan(url) {
       JSON.stringify({ webUrl: url, wpUrl: url, targetUrl: url })
     );
 
-    let exitCode = 0;
-    let output = '';
-    try {
-      output = execSync(
-        `node "${GATETEST_PATH}/bin/gatetest.js" --suite web --project "${workspace}"`,
-        { encoding: 'utf8', timeout: SCAN_TIMEOUT_MS, stdio: 'pipe' }
-      );
-    } catch (e) {
-      exitCode = typeof e.status === 'number' ? e.status : 1;
-      output = (e.stdout || '') + '\n' + (e.stderr || '');
-    }
+    // spawnProcess, not execSync (2026-07-30, from a code-health finding):
+    // execSync's `timeout` kills only the node wrapper, and GateTest launches
+    // Chromium — so every timed-out scan used to leave a browser running on a
+    // box that also hosts AlecRae, Gluecron, GateTest and the Coolify stack.
+    // spawnProcess puts the scan in its own process group and kills the tree.
+    const res = await spawnProcess('node',
+      [`${GATETEST_PATH}/bin/gatetest.js`, '--suite', 'web', '--project', workspace],
+      { env: process.env, timeoutMs: SCAN_TIMEOUT_MS });
+    const exitCode = res.timedOut ? 1 : (typeof res.code === 'number' ? res.code : 1);
+    const output = res.timedOut
+      ? `${res.stdout}\nSCAN TIMED OUT after ${Math.round(SCAN_TIMEOUT_MS / 1000)}s (process tree killed)\n${res.stderr}`
+      : `${res.stdout}\n${res.stderr}`;
 
     let report = null;
     try {
@@ -213,7 +214,7 @@ async function processSession(session) {
   logEvent('SCAN', `session ${session.id} (${platform}) deployed — scanning ${url}`);
   let result;
   try {
-    result = runGateTestScan(url);
+    result = await runGateTestScan(url);
   } catch (e) {
     logEvent('SCAN_FAIL', `session ${session.id} (${platform}): ${e.message}`);
     recordRun(session.id, platform, url, 'scan-failed', 0, e.message);
