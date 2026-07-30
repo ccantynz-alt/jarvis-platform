@@ -37,6 +37,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, appendFileSync, rmS
 import { execFileSync } from 'child_process';
 import { join } from 'path';
 import { loadPlatforms } from './lib/conversation.js';
+import { hasSource } from './lib/checkout.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import { spawnClaude, ensureClaudeVerified } from './lib/spawn-agent.js';
@@ -91,13 +92,27 @@ function saveState(state) {
 
 /**
  * Platforms whose code is actually READABLE from this box: active, registered
- * with a path, hosted here, and not on the skip list. A review of a codebase we
- * cannot open would be a review of the model's imagination.
+ * with a path, hosted here, not on the skip list, and with source actually in
+ * that path. A review of a codebase we cannot open would be a review of the
+ * model's imagination.
+ *
+ * The last condition was added 2026-07-30 after the timer proved it necessary: it
+ * picked `zoobicon` at /root/zoobicon, a directory holding nothing but a `.claude`
+ * folder, spent a review agent, returned zero findings in 25 seconds and then
+ * recorded the platform as SWEPT — so Craig's flagship would have read as reviewed,
+ * with a 20-hour cooldown, having never been read. `exists(path)` was true, which
+ * was the whole of the test. Exactly the mistake the audit runner made with
+ * /var/www, in a second place, found the same day.
  */
-export function eligiblePlatforms(registry, { ownIp = OWN_IP, skip = SKIP, exists = existsSync } = {}) {
+export function eligiblePlatforms(registry, { ownIp = OWN_IP, skip = SKIP, exists = existsSync, source = hasSource } = {}) {
   return Object.entries(registry)
     .filter(([name, e]) => e && e.status === 'active' && !skip.has(name) && e.executor !== 'pc')
     .filter(([, e]) => e.server === ownIp && e.path && exists(e.path))
+    .filter(([name, e]) => {
+      if (source(e.path)) return true;
+      log(`skipping ${name}: ${e.path} exists but contains no source — nothing to review`);
+      return false;
+    })
     .map(([name]) => name)
     .sort();
 }

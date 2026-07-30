@@ -23,7 +23,7 @@
  * score — and the caller's job is to report that reason loudly.
  */
 
-import { existsSync, statSync } from 'fs';
+import { existsSync, statSync, readdirSync } from 'fs';
 import { join } from 'path';
 
 /**
@@ -66,4 +66,46 @@ export function checkoutProblem(config, fs = {}) {
     return `${path} contains no build manifest (looked for ${BUILD_MANIFESTS.slice(0, 3).join(', ')}…) — it is not a usable checkout`;
   }
   return null;
+}
+
+/**
+ * Is there any source code in here at all?
+ *
+ * A different question from checkoutProblem() above, and it needs to be: that one
+ * asks "could this be BUILT" (a manifest), which is right for the audit runner. The
+ * code-health spine only READS code, so a directory of loose .py files with no
+ * manifest is perfectly reviewable and must not be excluded.
+ *
+ * Written 2026-07-30 after watching the spine's own timer waste a sweep. It picked
+ * `zoobicon` at /root/zoobicon — a directory containing nothing but a `.claude`
+ * folder — logged "NOT a git checkout, no commit recorded", spent a review agent,
+ * returned zero findings in 25 seconds, and then RECORDED THE PLATFORM AS SWEPT.
+ * So Craig's flagship would have shown as reviewed, with a 20-hour cooldown before
+ * anything looked again, having never been read. eligiblePlatforms() checked that
+ * the path existed and stopped there — the same mistake, in a second place, that
+ * the audit runner made with /var/www.
+ *
+ * Shallow on purpose: two levels is plenty to tell a repository from an empty
+ * folder, and this runs on every sweep.
+ */
+export const SOURCE_RE = /\.(js|mjs|cjs|jsx|ts|tsx|py|rs|go|rb|php|java|kt|swift|sh|sql|html|css|scss|vue|svelte|toml|tf)$/i;
+const SCAN_SKIP = new Set([
+  'node_modules', '.git', 'venv', '.venv', 'env', 'dist', 'build', 'out',
+  '.next', '__pycache__', 'target', 'vendor', '.turbo', 'coverage', '.claude',
+]);
+
+export function hasSource(dir, { readdir = readdirSync, depth = 2 } = {}) {
+  let entries;
+  try { entries = readdir(dir, { withFileTypes: true }); } catch { return false; }
+  const subdirs = [];
+  for (const e of entries) {
+    const name = e.name;
+    if (e.isDirectory?.()) {
+      if (!SCAN_SKIP.has(name) && !name.startsWith('.')) subdirs.push(join(dir, name));
+    } else if (SOURCE_RE.test(name)) {
+      return true;
+    }
+  }
+  if (depth <= 1) return false;
+  return subdirs.some((d) => hasSource(d, { readdir, depth: depth - 1 }));
 }

@@ -15,7 +15,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkoutProblem, BUILD_MANIFESTS } from '../src/lib/checkout.js';
+import { checkoutProblem, BUILD_MANIFESTS, hasSource } from '../src/lib/checkout.js';
 
 /** Describe a filesystem by listing what exists, rather than creating it. */
 const fsWith = (paths) => ({
@@ -80,4 +80,63 @@ test('every supported stack on the estate counts as buildable', () => {
 test('the real filesystem is used when no injection is given', () => {
   // Guards against the injection seam quietly becoming mandatory.
   assert.match(checkoutProblem({ path: '/definitely/not/here/at/all' }), /does not exist/);
+});
+
+// ── hasSource: is there anything here to review? (2026-07-30) ────────────────
+// The code-health timer picked zoobicon at /root/zoobicon — a directory holding
+// nothing but a `.claude` folder — spent a review agent, returned zero findings in
+// 25 seconds, and recorded the platform as SWEPT with a 20-hour cooldown. Craig's
+// flagship would have read as reviewed without ever being read. eligiblePlatforms
+// tested that the path existed and stopped there.
+
+const dirent = (name, isDir = false) => ({ name, isDirectory: () => isDir });
+/** Describe a tree as { dir: [entries] } without touching a filesystem. */
+const treeReader = (tree) => (dir) => {
+  const key = String(dir).split('\\').join('/');   // join() gives backslashes on Windows
+  if (!(key in tree)) throw new Error(`ENOENT ${key}`);
+  return tree[key];
+};
+
+test('a directory holding only .claude has no source — the zoobicon case', () => {
+  const read = treeReader({ '/root/zoobicon': [dirent('.claude', true)] });
+  assert.equal(hasSource('/root/zoobicon', { readdir: read }), false);
+});
+
+test('a real repository has source', () => {
+  const read = treeReader({
+    '/root/bookaride': [dirent('package.json'), dirent('api', true), dirent('node_modules', true)],
+    '/root/bookaride/api': [dirent('bookings.js')],
+  });
+  assert.equal(hasSource('/root/bookaride', { readdir: read }), true);
+});
+
+test('loose Python with no manifest counts as reviewable', () => {
+  // The distinction that matters: checkoutProblem() would refuse this for lacking
+  // a build manifest, and it is perfectly readable. The spine only reads.
+  const read = treeReader({ '/root/uao': [dirent('master_engine.py'), dirent('venv', true)] });
+  assert.equal(hasSource('/root/uao', { readdir: read }), true);
+  assert.match(checkoutProblem({ path: '/root/uao' }, { exists: (p) => p === '/root/uao', isDir: () => true }),
+    /no build manifest/, 'and the build-oriented guard still refuses it, correctly');
+});
+
+test('build output and dependencies do not count as source', () => {
+  // Otherwise every empty project with a node_modules would look reviewable.
+  const read = treeReader({
+    '/root/empty': [dirent('node_modules', true), dirent('dist', true), dirent('.git', true), dirent('README.md')],
+  });
+  assert.equal(hasSource('/root/empty', { readdir: read }), false);
+});
+
+test('an unreadable directory is not source rather than an exception', () => {
+  assert.equal(hasSource('/does/not/exist', { readdir: treeReader({}) }), false);
+});
+
+test('the scan stops at the configured depth', () => {
+  const read = treeReader({
+    '/root/deep': [dirent('a', true)],
+    '/root/deep/a': [dirent('b', true)],
+    '/root/deep/a/b': [dirent('buried.js')],
+  });
+  assert.equal(hasSource('/root/deep', { readdir: read, depth: 2 }), false, 'depth 2 does not reach it');
+  assert.equal(hasSource('/root/deep', { readdir: read, depth: 3 }), true);
 });
