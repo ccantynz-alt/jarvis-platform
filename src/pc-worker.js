@@ -23,6 +23,7 @@ import { spawn } from 'child_process';
 import { existsSync, readFileSync, statSync, readdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
+import { pathToFileURL } from 'url';
 
 function loadEnvFile(p) {
   if (!existsSync(p)) return {};
@@ -194,11 +195,115 @@ async function runJob(job) {
   currentJobId = null;
 }
 
+// ── Off-box watchdog (2026-07-30) ────────────────────────────────────────────
+//
+// This process already talks to the gateway every 10 seconds, from OUTSIDE the
+// fleet, on hardware Craig owns. That makes it the lowest-latency box-death
+// detector available — and it is needed, because the GitHub Actions watchdog
+// asks for every 5 minutes and measurably gets about once an hour
+// (docs/ALERTS.md). Its weakness is the opposite one: it only works while this
+// PC is awake. The two are complementary, not redundant.
+//
+// The hard part is not detection, it is not crying wolf. A failed claim usually
+// means Craig's wifi dropped or tailscale restarted — NOT that the box died. So
+// three signals are needed before anything is said, which is the same shape as
+// self-heal's DNS check: distinguish "their fault", "our fault" and "cannot
+// tell" instead of collapsing them.
+const WATCHDOG_AFTER_MIN = Number(cfg.WATCHDOG_AFTER_MIN) || 5;
+const PUBLIC_HEALTH_URL  = cfg.PUBLIC_HEALTH_URL || 'http://66.42.121.161:9212/health';
+const INTERNET_PROBE_URL = cfg.INTERNET_PROBE_URL || 'https://1.1.1.1/';
+const NTFY_TOPIC         = cfg.NTFY_TOPIC || '';
+const NTFY_SERVER        = (cfg.NTFY_SERVER || 'https://ntfy.sh').replace(/\/+$/, '');
+
+/**
+ * What is actually broken? Pure, so the decision is testable without a network.
+ *   'box-down'   — the internet is fine and the box's PUBLIC port is dead too.
+ *                  High confidence, and the only case worth waking him for.
+ *   'tailnet'    — the public port answers but the gateway does not: tailscale,
+ *                  the gateway service, or its token. The box is alive.
+ *   'local'      — we cannot reach the internet either. Craig's wifi. Say nothing.
+ *   'ok'         — nothing wrong.
+ */
+export function classifyOutage({ gatewayOk, publicOk, internetOk }) {
+  if (gatewayOk) return 'ok';
+  if (!internetOk) return 'local';
+  return publicOk ? 'tailnet' : 'box-down';
+}
+
+const reachable = async (url, ms = 8000) => {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(ms), redirect: 'manual' });
+    return r.status > 0;             // any HTTP answer proves something is listening
+  } catch { return false; }
+};
+
+let outageSince = null;
+let alerted = null;                  // which kind we last alerted about
+
+async function alertLocally(title, body) {
+  log(`WATCHDOG: ${title} — ${body}`);
+  // Best-effort desktop notification. msg.exe is present on Windows Pro and
+  // needs no module; it is allowed to fail silently on Home.
+  try {
+    spawn('msg', ['*', `/TIME:600`, `Jarvis: ${title}. ${body}`], { stdio: 'ignore', shell: false })
+      .on('error', () => {});
+  } catch { /* not available — the push and the log still carry it */ }
+  // The push is what reaches him when he is away from this screen. It goes
+  // DIRECT from the PC, so it works precisely when the box cannot send it.
+  if (!NTFY_TOPIC) { log('WATCHDOG: no NTFY_TOPIC in config/pc-worker.env — desktop + log only'); return; }
+  try {
+    await fetch(`${NTFY_SERVER}/${encodeURIComponent(NTFY_TOPIC)}`, {
+      method: 'POST',
+      headers: { Title: title, Priority: '5', Tags: 'rotating_light' },
+      body: `${body}\n\n— jarvis pc-worker on ${os.hostname()}`,
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (e) { log(`WATCHDOG: push failed: ${e.message}`); }
+}
+
+async function watchdog(gatewayOk) {
+  if (gatewayOk) {
+    if (alerted) {
+      const downMin = Math.round((Date.now() - outageSince) / 60_000);
+      await alertLocally('fleet box is answering again', `Recovered after about ${downMin} minute(s).`);
+    }
+    outageSince = null; alerted = null;
+    return;
+  }
+  if (!outageSince) outageSince = Date.now();
+  const downMin = (Date.now() - outageSince) / 60_000;
+  if (downMin < WATCHDOG_AFTER_MIN) return;      // ride out a wifi blip or a restart
+
+  const [publicOk, internetOk] = await Promise.all([
+    reachable(PUBLIC_HEALTH_URL), reachable(INTERNET_PROBE_URL),
+  ]);
+  const kind = classifyOutage({ gatewayOk, publicOk, internetOk });
+  if (kind === 'local') { log('WATCHDOG: no internet from this PC either — staying quiet, this end is the problem'); return; }
+  if (kind === alerted) return;                  // already said it
+
+  alerted = kind;
+  if (kind === 'box-down') {
+    await alertLocally('THE FLEET BOX IS NOT ANSWERING',
+      `No response from the gateway for ${Math.round(downMin)} min, and its public liveness port is dead too, ` +
+      `while this PC's internet is fine. Jarvis cannot report this itself — that is why this check exists.`);
+  } else {
+    await alertLocally('Jarvis gateway unreachable (box is alive)',
+      `The gateway has not answered for ${Math.round(downMin)} min, but the box's public port does — so this is ` +
+      `tailscale, the gateway service, or its token, not a dead box.`);
+  }
+}
+
 async function pollOnce() {
   if (killed()) return; // local kill switch — stay quiet, don't even heartbeat
   let job;
-  try { job = await api('claim', { worker_id: WORKER_ID }); }
-  catch (e) { log(`claim failed: ${e.message}`); return; }
+  try {
+    job = await api('claim', { worker_id: WORKER_ID });
+  } catch (e) {
+    log(`claim failed: ${e.message}`);
+    await watchdog(false).catch(() => {});   // watchdog must never break the worker
+    return;
+  }
+  await watchdog(true).catch(() => {});
   if (job) await runJob(job);
 }
 
@@ -221,9 +326,21 @@ async function loop() {
   setTimeout(loop, backoffMs);
 }
 
-log(`starting — worker_id=${WORKER_ID} gateway=${GATEWAY_URL} workspace=${WORKSPACE_ROOT}`);
-startHeartbeat();
-loop();
+// Only run the worker when this file IS the program (2026-07-30). Until now the
+// loop started at module scope, so merely IMPORTING this file — a test, a tool,
+// anything — spun up a second fully-functional worker on Craig's PC, sharing the
+// real WORKER_ID and the real token, competing for jobs and able to run `claude`
+// on his machine. Found by writing the first unit test for this file: the test
+// run didn't finish because the test process had become a worker.
+//
+// pathToFileURL, not `file://${argv[1]}`: the pattern used elsewhere in this repo
+// is Linux-only and never matches on Windows (drive letter, backslashes), which
+// is the one platform this particular file runs on.
+if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+  log(`starting — worker_id=${WORKER_ID} gateway=${GATEWAY_URL} workspace=${WORKSPACE_ROOT}`);
+  startHeartbeat();
+  loop();
 
-process.on('SIGINT', () => { stopHeartbeat(); process.exit(0); });
-process.on('SIGTERM', () => { stopHeartbeat(); process.exit(0); });
+  process.on('SIGINT', () => { stopHeartbeat(); process.exit(0); });
+  process.on('SIGTERM', () => { stopHeartbeat(); process.exit(0); });
+}
