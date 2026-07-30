@@ -4,6 +4,7 @@ import { join } from 'path';
 import express from 'express';
 import Database from 'better-sqlite3';
 import { notify } from './lib/notify.js';
+import { resolveAuditStatus } from './lib/health-status.js';
 
 mkdirSync('/opt/jarvis/reports', { recursive: true });
 
@@ -198,6 +199,11 @@ function getExistingNotes(platform) {
   return row?.notes ?? null;
 }
 
+function getExistingStatus(platform) {
+  const row = db.prepare('SELECT status FROM platform_state WHERE platform = ?').get(platform);
+  return row?.status ?? null;
+}
+
 // Is there already a job in flight for this platform? Don't pile a second
 // auto-dispatch on top of one still running from a prior audit.
 async function hasJobInFlight(platform) {
@@ -255,12 +261,22 @@ async function takeScreenshots(platform, urls) {
 async function probeUrls(urls = []) {
   const out = [];
   for (const url of urls) {
-    try {
-      const r = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
-      out.push({ url, status: r.status, ok: r.ok });
-    } catch (e) {
-      out.push({ url, status: 0, ok: false, error: e.message });
+    // TWO attempts before calling a URL down. One dropped request is not an
+    // outage, and a false "critical" here auto-dispatches a repair agent — the
+    // 2026-07-24 complaint was literally "we are getting false reports of
+    // websites being down". self-heal re-probes live for the same reason.
+    let last = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const r = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
+        last = { url, status: r.status, ok: r.ok };
+      } catch (e) {
+        last = { url, status: 0, ok: false, error: e.message };
+      }
+      if (last.ok) break;
+      if (attempt === 0) await new Promise(r => setTimeout(r, 3000));
     }
+    out.push(last);
   }
   return out;
 }
@@ -270,6 +286,30 @@ async function probeUrls(urls = []) {
 function writeAuditState(platform, report) {
   const priorConsecutive = getConsecutiveCritical(platform);
   const newConsecutive = report.status === 'critical' ? priorConsecutive + 1 : 0;
+
+  // NEVER let a build/test verdict overwrite a live-uptime failure (2026-07-30,
+  // the dangerous half of the "platform_state has two writers" problem in the
+  // 2026-07-26 audit backlog).
+  //
+  // status means two different things depending on who wrote it last:
+  // fleet-check.sh writes 'error' when the public URL stops answering, and this
+  // function writes 'healthy' when a build and its tests pass. An audit landing
+  // on a site that is DOWN would write 'healthy' over that 'error' — and
+  // self-heal only ever acts on status === 'error', so the repair that outage
+  // exists to trigger would silently never happen.
+  //
+  // A passing build is not evidence the site is up. Only a real HTTP probe is,
+  // which is why report.http (not the screenshots — Chromium photographs a 500
+  // page quite happily) is the one thing allowed to clear an 'error'. The rule
+  // lives in lib/health-status.js so it can be unit-tested: it decides whether an
+  // outage gets repaired, and this file opens SQLite at import.
+  const resolved = resolveAuditStatus({
+    existingStatus: getExistingStatus(platform),
+    reportStatus: report.status,
+    http: report.http,
+  });
+  const status = resolved.status;
+  if (resolved.preserved) console.log(`[audit] ${platform}: keeping status=error — ${resolved.reason}`);
   // Preserve `notes` (2026-07-24 — same INSERT OR REPLACE column-loss bug
   // found in memory-server.js's /memory/platform/update, mirrored here:
   // this write never included `notes`, so every audit run silently wiped
@@ -281,7 +321,7 @@ function writeAuditState(platform, report) {
     (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, notes, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
-    platform, report.status, JSON.stringify(report.errors), new Date().toISOString(),
+    platform, status, JSON.stringify(report.errors), new Date().toISOString(),
     report.screenshots.find(s => s.ok)?.filepath || null, report.health_score, newConsecutive, existingNotes, new Date().toISOString()
   );
   return newConsecutive;
@@ -441,8 +481,19 @@ async function runAudit(platform) {
     report.errors.push(...checkErrors.map(e => `CHECK: ${e}`));
   }
 
-  // Step 4: Screenshots
-  console.log(`[audit] ${platform}: capturing screenshots...`);
+  // Step 4: Screenshots + a real HTTP probe
+  console.log(`[audit] ${platform}: probing + capturing screenshots...`);
+  // The probe is here for TWO reasons, and the second is the important one:
+  //   1. it is the honest answer to "is the site up" (a screenshot of a 500 page
+  //      is a successful screenshot);
+  //   2. writeAuditState() refuses to clear a fleet-check 'error' without it. A
+  //      full audit with no probe therefore CANNOT lift an outage flag, which
+  //      would leave a recovered platform stuck in 'error' until the next
+  //      fleet-check tick. Probing here keeps both directions honest.
+  report.http = config.urls?.length ? await probeUrls(config.urls) : null;
+  const httpFailed = (report.http || []).filter(c => !c.ok);
+  report.errors.push(...httpFailed.map(c => `HTTP: ${c.url} — ${c.status ? `status ${c.status}` : c.error || 'unreachable'}`));
+
   report.screenshots = await takeScreenshots(platform, config.urls);
 
   // Step 5: Score
@@ -452,6 +503,7 @@ async function runAudit(platform) {
     100
     - (errorCount * 8)
     - (screenshotsFailed * 5)
+    - (httpFailed.length * 40)          // a URL that will not answer outranks a build error
     - (report.build.ok ? 0 : 20)
     - (report.tests && !report.tests.ok ? 10 : 0)
   );
