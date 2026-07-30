@@ -501,6 +501,20 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   Before this the gateway — **THE interface** — held conversation in a
   per-WebSocket array, so a page reload, a device swap, or a service restart
   silently wiped it. If Jarvis ever "forgets" again, check that key first.
+  **Saves MERGE, they do not overwrite (2026-07-30).** Until then `saveTranscript`
+  wrote the whole local array as the new value, from a cache `loadTranscript`
+  never refreshes — and the deck and the gateway are separate PROCESSES with
+  separate caches, both of which save. A long conversation on the deck plus one
+  sentence to the gateway meant the gateway wrote its stale array over the top
+  and the deck's turns were gone. Now a save re-reads the store and appends only
+  what that process added since its last CONFIRMED write (`newSince`/`mergeTail`),
+  splices the result into the shared array in place (runAgent holds that
+  reference), and writes NOTHING if the store is unreachable. Note `newSince`
+  cannot diff by length: runAgent trims the array to 24 in place, so at the cap
+  two new turns leave the length unchanged — that bug shipped and was caught by a
+  live deck-then-gateway run, not by the tests. Known limit: two saves inside the
+  same few hundred ms can still lose the later one; the KV has no version to
+  compare against, and a CAS there would close it.
   The dispatch confirmation gate is deliberately NOT shared: a preview shown
   on one surface must not be confirmable from another.
 - **Alerts reach his DEVICES now, not just open tabs (2026-07-30).** Every
