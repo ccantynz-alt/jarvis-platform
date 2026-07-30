@@ -334,14 +334,36 @@ async function runCloud(row) {
   const callbackUrl = process.env.JARVIS_CALLBACK_URL
     || `http://${OWN_IP}:${PORT}/dispatch/callback`;
 
+  // A PER-JOB callback credential, not the master token (2026-07-30, found by
+  // the code-health spine on the auth-session lens).
+  //
+  // This used to embed JARVIS_CLOUD_TOKEN verbatim in the prompt — the same
+  // bearer that authenticates the API call AND the callback. A prompt is not a
+  // secret: it is stored, logged and retained by a third-party provider, and it
+  // sits in the agent's own transcript. Anyone who read one held the credential
+  // that lets you POST /dispatch/callback for ANY job id and declare it
+  // completed with arbitrary output — which flips platform health and injects
+  // text into Craig's notifications.
+  //
+  // Now each job gets its own random token, stored in memory KV under
+  // cloud-callback-token:<jobId>. Worst case a leaked prompt lets someone lie
+  // about ONE job that was already theirs to run, instead of every job forever.
+  const callbackToken = randomUUID();
+  try {
+    await dbPost('/memory/kv', { key: `cloud-callback-token:${row.id}`, value: callbackToken });
+  } catch (e) {
+    return failJobRow(row, `cloud dispatch: could not store the per-job callback token — ${e.message}`);
+  }
+
   const finalStep = [
     ``,
     ``,
     `FINAL STEP (required): after all work is complete, report back to Jarvis by`,
     `sending an HTTP POST to ${callbackUrl}`,
-    `with header "X-Jarvis-Token: ${token}" and a JSON body:`,
+    `with header "X-Jarvis-Token: ${callbackToken}" and a JSON body:`,
     `{"jobId":"${row.id}","ok":true,"summary":"<one-paragraph summary of what you did>"}`,
     `Set "ok" to false if the task could not be completed.`,
+    `This token is for this job only.`,
   ].join('\n');
 
   const content = row.prompt + finalStep;
@@ -867,17 +889,27 @@ app.get('/status/:jobId', async (req, res) => {
 
 // POST /dispatch/callback  { jobId, ok, summary }
 // Cloud CCR agents POST here when they finish. Authenticated by the shared
-// X-Jarvis-Token header (must equal JARVIS_CLOUD_TOKEN). Harmless when unused:
-// if JARVIS_CLOUD_TOKEN is not set, every request is rejected with 401.
+// X-Jarvis-Token header, which must equal the PER-JOB token minted for that job
+// id at dispatch (memory KV `cloud-callback-token:<jobId>`). Harmless when
+// unused: with no such key, every request is rejected with 401.
 app.post('/dispatch/callback', async (req, res) => {
-  const expected = process.env.JARVIS_CLOUD_TOKEN;
   const provided = req.header('X-Jarvis-Token');
-  if (!expected || !provided || provided !== expected) {
+  const { jobId, ok, summary } = req.body || {};
+  if (!provided) return res.status(401).json({ error: 'unauthorized' });
+  if (!jobId) return res.status(400).json({ error: 'jobId is required' });
+
+  // Per-job token (2026-07-30). The master JARVIS_CLOUD_TOKEN is no longer
+  // accepted here: it used to be embedded in the prompt sent to a third-party
+  // provider, so accepting it meant a leaked prompt could falsify ANY job. A
+  // callback now proves it holds the credential issued for THAT job.
+  let expected = null;
+  try {
+    expected = (await dbGet(`/memory/kv/cloud-callback-token:${jobId}`))?.value || null;
+  } catch { /* absent or unreachable — treated as unauthorised below */ }
+  if (!expected || provided !== expected) {
+    console.warn(`[orchestrator] cloud callback REFUSED for ${String(jobId).slice(0, 8)} — bad or missing per-job token`);
     return res.status(401).json({ error: 'unauthorized' });
   }
-
-  const { jobId, ok, summary } = req.body || {};
-  if (!jobId) return res.status(400).json({ error: 'jobId is required' });
 
   let row;
   try {
