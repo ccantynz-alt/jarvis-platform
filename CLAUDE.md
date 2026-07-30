@@ -722,11 +722,29 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    checkout on this box to build or push a fix from): marcoreid, davenroe
    (Vercel-hosted). `noAutoFix` also set for universal-ai-operator (no git
    remote to push a fix to) and screenshot-to-code (third-party fork —
-   auto-committing "fixes" risks diverging from upstream). New
-   PLATFORM_CONFIG/URL_ONLY_CONFIG build/test commands were inferred from
-   `config/platforms.json`'s tech_stack, not independently verified against
-   each repo's actual scripts — a wrong command just shows as a build
-   failure on the first run, not a silent false-pass.
+   auto-committing "fixes" risks diverging from upstream).
+   **CORRECTED 2026-07-30 — the sentence that used to end this entry said a
+   wrong command "just shows as a build failure on the first run, not a
+   silent false-pass". That is exactly what did NOT happen.** A wrong
+   *path* produced a silent false-pass for weeks: `ZOOBICON_PATH` and
+   `ALECRAE_PATH` pointed into `/var/www`, which does not exist on this
+   box, so `spawnSync` got a dead cwd, the `ENOENT` text matched none of
+   `extractErrors()`'s patterns, the arithmetic landed on a tidy
+   `100-20-10 = 70` → `warning`, and `notifyAuditResult()` only speaks for
+   `critical`. Craig's flagship and AlecRae were "audited" daily and the
+   number was invented. Guard now lives in **`src/lib/checkout.js`**: a
+   path that is missing, is not a directory, or holds no build manifest
+   gives `status:'unconfigured'` with `health_score: null` — never a number —
+   and a spoken warn-level notify. **Current coverage after that fix:**
+   zoobicon moved to URL-only (no checkout on this box — `/root/zoobicon`
+   holds only a `.claude` folder); alecrae is `bun run typecheck` ONLY, with
+   `testCmd: null`, because it is a LIVE co-tenant whose working tree is
+   `/opt/alecrae` (`turbo run build` would regenerate Next.js output under
+   the running :4200 server, and the repo is bun, not npm). jarvis-audit's
+   `MemoryMax` went 1536M → **2560M** because that first genuine typecheck
+   OOM-killed the service; measured, cold run exits 137 under 1536M and 0
+   under 2G. Don't "fix" a platform's audit by correcting its command alone
+   — check the path exists and that running it is safe on a shared box.
 
 Cleared 2026-07-06: dashboard auth, cupsd exposure, keyword-only intents,
 no DB backups. Cleared 2026-07-12: Slack notification firehose (NotifyCenter:
