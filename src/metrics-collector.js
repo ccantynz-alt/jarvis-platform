@@ -214,7 +214,10 @@ const downAlerted = new Set();
 // the happy path.
 function unitState(name) {
   const out = safeExec(`systemctl show jarvis-${name} -p ActiveState -p SubState 2>/dev/null`, '');
-  const get = (k) => (out.match(new RegExp(`^${k}=(.*)$`, 'm')) || [, ''])[1].trim();
+  const get = (k) => {
+    const m = out.match(new RegExp(`^${k}=(.*)$`, 'm'));
+    return m ? m[1].trim() : '';
+  };
   return { active: get('ActiveState'), sub: get('SubState') };
 }
 
