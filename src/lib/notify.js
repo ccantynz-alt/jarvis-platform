@@ -16,10 +16,17 @@
  *   4. jarvis-slack (:9203) — ONLY while NOTIFY_SLACK_LEGACY=1 (secrets.env).
  *      Flip to 0 to start Slack retirement; delete this branch when the bridge
  *      is removed.
+ *   5. lib/push.js — device push (ntfy), warn/alert by default. Added
+ *      2026-07-30: EVERY step above needs something of Craig's to be open or
+ *      polling. Steps 2 and 3 reach connected tabs; step 1 waits to be read.
+ *      Close the laptop and walk out — the exact moment an alert matters — and
+ *      nothing reached him at all. This is the step that survives that.
  *
  * All failures are logged and swallowed — notification plumbing must never
  * take down a caller (matches the old slackSend behavior).
  */
+
+import { pushAlert } from './push.js';
 
 const MEMORY  = 'http://127.0.0.1:9200';
 const GATEWAY = 'http://127.0.0.1:9208';
@@ -70,5 +77,8 @@ export async function notify({ source = 'jarvis', level = 'info', title, body, s
     await post(`${SLACK}/slack/send`, { text: body }, 'slack-legacy');
   }
 
-  return { ok: !!memRes };
+  // Off-device push last, so a slow relay can never delay the in-house paths.
+  const pushed = await pushAlert({ level, title, body, source });
+
+  return { ok: !!memRes, pushed: pushed.sent, pushReason: pushed.reason };
 }
