@@ -85,10 +85,17 @@ kept the off-box watchdog open for a month.
   Sent at info level — ntfy priority 2, no sound, no vibration — so proving it
   woke nobody.
 - **It has been publishing for real.** Polling the topic cache (`GET
-  /<topic>/json?poll=1&since=72h`, which sends nothing) shows **9 messages**: five
+  /<topic>/json?poll=1&since=72h`, which sends nothing) showed **9 messages**: five
   gatetest DNS alerts between 03:18 and 04:48, one critical Gluecron defect, the
   Gluecron AI-approval finding, the universal-ai-operator data-loss alert, and the
   silent test above. All at the right priority.
+- **`since=72h` is optimistic — ntfy.sh keeps roughly TWELVE HOURS.** Measured the
+  same evening: a poll at 15:20 returned 9 messages, and the identical poll at
+  16:26 returned 6, the four oldest having aged out. The oldest survivor was 11h38m
+  old. So this command is a good "is the channel alive" check and a poor history —
+  if it looks empty, that may only mean nothing has fired since breakfast. The
+  durable record is the memory inbox (`/memory/notifications`), which keeps
+  everything.
 - **The five identical gatetest alerts in 90 minutes were a real defect**, fixed
   the same day — self-heal now says that once per day rather than every tick. None
   since 04:48, which is the proof the fix works.
