@@ -547,6 +547,20 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   Gate-handled turns are also written to the shared transcript via
   `recordTurn()`. Tests: `test/dispatch-gate.test.js` — add a case there before
   widening the vocabulary, a false "yes" launches a production agent.
+  **The same day's overcorrection, and the rule that came out of it:** widening
+  the gate from a phrase list to a vocabulary made it too LOOSE — action verbs
+  counted as standalone affirmations and first-person pronouns sat in FILLER, so
+  it answered *yes* to "i need to run", "let me go", "i can do that", "you can
+  send it". Any of those would have launched a staged full-permission agent from
+  a sentence not addressed to it (found by the code-health spine, on code six
+  hours old). **A confirmation is an IMPERATIVE**, so: `YES_STRONG`
+  (yes/ok/please/proceed/granted…) stands alone; `YES_VERB`
+  (do/go/launch/send/run…) needs a `YES_OBJECT` ("do it", "go ahead") or must be
+  the entire reply ("go"); and `i/me/my/we/us/you/can/could/would/will/need` are
+  deliberately NOT filler, so a sentence about the speaker is not "compact
+  vocabulary" and falls through to the brain as a fresh command. When touching
+  this, run both directions — the false-affirm list AND the 21 real
+  confirmations.
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
