@@ -38,6 +38,10 @@ on:
         description: 'Send a test push instead of only checking (proves delivery)'
         type: boolean
         default: false
+      drill:
+        description: 'Probe a deliberately dead address, to prove the FAILURE path fires'
+        type: boolean
+        default: false
 
 # A stuck run must never block the next one, and two watchdogs shouting at once
 # is worse than one.
@@ -59,9 +63,22 @@ jobs:
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           HEALTH_URL: http://66.42.121.161:9212/health
           TEST_ALERT: ${{ inputs.test_alert }}
+          DRILL: ${{ inputs.drill }}
         run: |
           set -u
           SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+
+          # A watchdog whose alarm path has never fired is not a watchdog. The
+          # drill points the probe at a closed port so the ENTIRE failure path
+          # runs — push attempt, ::error::, non-zero exit, GitHub's own email —
+          # without anyone having to break the box. Everything it emits says
+          # DRILL, so a real alarm is never confused with a rehearsal.
+          PREFIX=""
+          if [ "${DRILL}" = "true" ]; then
+            HEALTH_URL="http://127.0.0.1:9/health"
+            PREFIX="[DRILL] "
+            echo "DRILL: probing a deliberately dead address; this run is EXPECTED to fail"
+          fi
 
           # Channel 2 (this job failing → GitHub emails Craig) needs no secret,
           # so a missing topic degrades the watchdog instead of disabling it.
@@ -91,7 +108,7 @@ jobs:
           }
 
           if [ "${TEST_ALERT}" = "true" ]; then
-            push 4 test_tube "Watchdog test" "Off-box watchdog delivery test from GitHub Actions run ${GITHUB_RUN_ID}. The box was not checked."
+            push 4 test_tube "${PREFIX}Watchdog test" "Off-box watchdog delivery test from GitHub Actions run ${GITHUB_RUN_ID}. The box was not checked."
             if [ -z "${NTFY_TOPIC}" ]; then
               echo "::error::asked for a test alert with no NTFY_TOPIC set — nothing was delivered"
               exit 1
@@ -114,7 +131,7 @@ jobs:
 
           # Every attempt failed. Alert on both channels: the push, and this
           # job's own failure (which GitHub emails him about independently).
-          push 5 rotating_light "Jarvis box is not answering" \
-            "The Vultr box (66.42.121.161) failed 3 liveness probes over ~40s from an off-box runner. Last HTTP code: ${CODE}. Jarvis cannot report this itself — that is why this job exists."
-          echo "::error::Jarvis box failed 3 off-box liveness probes (last code ${CODE})"
+          push 5 rotating_light "${PREFIX}Jarvis box is not answering" \
+            "${PREFIX}${HEALTH_URL} failed 3 liveness probes over ~40s from an off-box runner. Last HTTP code: ${CODE}. Jarvis cannot report this itself — that is why this job exists."
+          echo "::error::${PREFIX}failed 3 off-box liveness probes of ${HEALTH_URL} (last code ${CODE})"
           exit 1
