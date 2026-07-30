@@ -894,8 +894,17 @@ app.post('/slack/image-alert', async (req, res) => {
 
 // POST /slack/digest — force-flush the digest (used by cron or manually)
 app.post('/slack/digest', async (_req, res) => {
-  const flushed = await notifyCenter.flushDigest({ force: true });
-  res.json({ ok: true, flushed: !!flushed });
+  // Express 4 does not catch a rejected async handler: it becomes an unhandled
+  // rejection and the caller waits forever for a response that never comes.
+  // flushDigest now propagates a Slack-level rejection (it has to, so the queue
+  // survives), which makes that reachable for the first time.
+  try {
+    const flushed = await notifyCenter.flushDigest({ force: true });
+    res.json({ ok: true, flushed: !!flushed });
+  } catch (e) {
+    console.error('[notify] forced digest flush failed:', e.message);
+    res.status(502).json({ ok: false, error: e.message, queued: notifyCenter.digestQueue.length });
+  }
 });
 
 // GET /slack/notify-status — NotifyCenter state for dashboards/debugging

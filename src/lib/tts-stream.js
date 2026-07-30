@@ -14,8 +14,15 @@ import WebSocket from 'ws';
 import { VOICE_ID, MODEL_ID, ttsEnabled, budgetSpent, budgetAdd } from './tts.js';
 import { guardrail } from './guardrail.js';
 
-const EL_URL = `wss://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream-input` +
-  `?model_id=${MODEL_ID}&output_format=mp3_44100_64&auto_mode=true`;
+// Built per call rather than at import so a test can point it at a local ws
+// server. The hang this file now guards against is unreachable from a unit test
+// otherwise — which is precisely why it went unnoticed: nothing could exercise a
+// slow ElevenLabs without being able to stand one up.
+function elUrl() {
+  const base = process.env.ELEVENLABS_WS_BASE || 'wss://api.elevenlabs.io';
+  return `${base}/v1/text-to-speech/${VOICE_ID}/stream-input` +
+    `?model_id=${MODEL_ID}&output_format=mp3_44100_64&auto_mode=true`;
+}
 
 /**
  * openTtsStream({ onAudio, onDone, onError }) →
@@ -32,16 +39,51 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
   const BUDGET = guardrail('TTS_DAILY_CHAR_BUDGET', 40000, { source: 'tts-stream' });
   if (alreadySpent >= BUDGET) return null;
 
-  let ws;
-  try { ws = new WebSocket(EL_URL, { headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY } }); }
-  catch (e) { onError?.(e); return null; }
+  // Two deadlines, because "slow" and "dead" used to be indistinguishable and
+  // only "dead" was handled (2026-07-30, found by the code-health spine's
+  // integrations lens). Neither an unanswered TLS upgrade nor an opened socket
+  // that never renders emits 'open', 'error' or 'close', so onError never fired,
+  // the caller's `audio_ctl fallback` never went out, and the turn simply had no
+  // voice — the client shows the text and waits for audio that never comes.
+  //
+  // Both are deliberately SHORTER than the caller's grace period (deck-server
+  // waits ~6s for real audio before declaring the turn unvoiced), so a failure
+  // resolves in time for the fallback to reach the client BEFORE the final chat
+  // message — after it, the client's flag is set too late to voice anything.
+  // Normal figures on this box: handshake well under 500ms, first flash-v2.5
+  // chunk 300-500ms after text, so these are ~8x headroom, not tight.
+  const OPEN_MS  = guardrail('TTS_HANDSHAKE_MS',   4000, { source: 'tts-stream' });
+  const AUDIO_MS = guardrail('TTS_FIRST_AUDIO_MS', 4000, { source: 'tts-stream' });
 
-  const session = { charsSent: 0, dead: false };
+  let ws;
+  try {
+    ws = new WebSocket(elUrl(), {
+      headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY },
+      handshakeTimeout: OPEN_MS,   // ws maps this onto the request timeout → emits 'error'
+    });
+  } catch (e) { onError?.(e); return null; }
+
+  const session = { charsSent: 0, dead: false, audioAny: false };
   let opened = false;
   let endRequested = false; // end() may legitimately arrive before 'open' on short replies
   const pending = []; // text queued before the socket opens
 
+  // Armed when real text is actually written to the socket, cleared by the first
+  // audio chunk. Not armed at construction: that would race the handshake and
+  // punish a slow-but-working open.
+  let audioTimer = null;
+  const armAudioDeadline = () => {
+    if (audioTimer || session.audioAny || session.dead) return;
+    audioTimer = setTimeout(
+      () => fail(new Error(`no audio from ElevenLabs within ${AUDIO_MS}ms of sending text`)),
+      AUDIO_MS,
+    );
+    audioTimer.unref?.();
+  };
+  const clearAudioDeadline = () => { if (audioTimer) { clearTimeout(audioTimer); audioTimer = null; } };
+
   const fail = (e) => {
+    clearAudioDeadline();
     if (session.dead) return;
     session.dead = true;
     try { ws.close(); } catch {}
@@ -52,7 +94,9 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
     opened = true;
     // First message carries voice settings; auth already went via header.
     ws.send(JSON.stringify({ text: ' ', voice_settings: { stability: 0.5, similarity_boost: 0.8, style: 0.25 } }));
-    for (const t of pending.splice(0)) ws.send(JSON.stringify({ text: t }));
+    const queued = pending.splice(0);
+    for (const t of queued) ws.send(JSON.stringify({ text: t }));
+    if (queued.length) armAudioDeadline();
     if (endRequested) ws.send(JSON.stringify({ text: '' })); // end() beat the handshake — flush now
   });
 
@@ -60,7 +104,11 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
     if (session.dead) return;
     try {
       const m = JSON.parse(raw.toString());
-      if (m.audio) onAudio?.(Buffer.from(m.audio, 'base64'));
+      if (m.audio) {
+        session.audioAny = true;
+        clearAudioDeadline();
+        onAudio?.(Buffer.from(m.audio, 'base64'));
+      }
       if (m.isFinal) { session.dead = true; try { ws.close(); } catch {} onDone?.(); }
       if (m.error) fail(new Error(m.message || m.error));
     } catch (e) { fail(e); }
@@ -68,6 +116,7 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
 
   ws.on('error', fail);
   ws.on('close', () => {
+    clearAudioDeadline();
     // Budget: settle once per session, however it ended.
     if (session.charsSent > 0) budgetAdd(day, session.charsSent, alreadySpent).catch(() => {});
     if (!session.dead) { session.dead = true; onDone?.(); }
@@ -75,6 +124,10 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
 
   return {
     get charsSent() { return session.charsSent; },
+    // Real audio came back — as opposed to "we handed text over", which is what
+    // the caller's own spokenAny flag means. The difference is the whole finding:
+    // a turn can hand over every sentence and still be silent.
+    get audioAny() { return session.audioAny; },
     sendText(t) {
       const text = String(t || '');
       if (session.dead || !text.trim()) return;
@@ -82,8 +135,9 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
       session.charsSent += text.length;
       // ElevenLabs wants a trailing space between fragments.
       const payload = text.endsWith(' ') ? text : text + ' ';
-      if (opened) { try { ws.send(JSON.stringify({ text: payload })); } catch (e) { fail(e); } }
-      else pending.push(payload);
+      if (opened) {
+        try { ws.send(JSON.stringify({ text: payload })); armAudioDeadline(); } catch (e) { fail(e); }
+      } else pending.push(payload);
     },
     end() { // no more text — let EL flush the tail, then it sends isFinal
       if (session.dead) return;
@@ -95,6 +149,7 @@ export async function openTtsStream({ onAudio, onDone, onError }) {
       else endRequested = true;
     },
     abort() { // interruption: kill it NOW, no tail flush
+      clearAudioDeadline();
       if (session.dead) return;
       session.dead = true;
       try { ws.close(); } catch {}

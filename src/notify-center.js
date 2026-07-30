@@ -139,6 +139,34 @@ export class NotifyCenter {
     return this.immediateTimes.length < this.maxImmediatePerHour;
   }
 
+  // ── The transport contract ──────────────────────────────────────────────────
+
+  /**
+   * Send one message, treating "resolved" as delivered and "threw" as not.
+   *
+   * Everything in this class that protects a notification from being lost —
+   * flushDigest keeping its queue, postNow folding a failure into the digest —
+   * is built on that contract, and until 2026-07-30 the ONE transport that
+   * matters in production didn't honour it. `sendSlack()` (slack-bridge.js) has
+   * no throw path: a network error is caught and returned as
+   * `{ok:false, error}`, and a Slack-level failure is worse, because Slack's Web
+   * API answers **HTTP 200** with `{"ok":false,"error":"ratelimited"}` — so
+   * `fetch` succeeds, `r.json()` succeeds, and a rejected message came back
+   * looking exactly like a delivered one. Every guarantee here held only for the
+   * throwing test doubles.
+   *
+   * Rather than make sendSlack throw (it has a dozen solicited-reply callers
+   * that read `.ok`), the mismatch is resolved at this boundary: a resolved
+   * value that explicitly reports failure is turned into one.
+   */
+  async deliver(text) {
+    const result = await this.send(text);
+    if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
+      throw new Error(`transport reported failure: ${result.error || 'unknown'}`);
+    }
+    return result;
+  }
+
   // ── Core entry point ────────────────────────────────────────────────────────
 
   /**
@@ -162,7 +190,7 @@ export class NotifyCenter {
         this.enqueue(k, text, level);
         return { action: 'queued', reason: 'muted-all' };
       }
-      return this.postNow(k, text);
+      return this.postNow(k, text, 'critical');
     }
 
     if (level === 'warning') {
@@ -171,15 +199,22 @@ export class NotifyCenter {
       if (!this.underRateLimit()) {
         this.enqueue(k, text, level);
         if (!this.rateLimitNoticeSent) {
-          this.rateLimitNoticeSent = true;
-          await this.send(
-            `🔕 Notification rate limit hit (${this.maxImmediatePerHour}/hr) — ` +
-            `further non-critical messages are batching into the digest. Say \`digest\` to see them now.`,
-          );
+          // Flag it as sent only once it actually went, or a failed notice would
+          // never be retried and Craig would see the digest fill up with no
+          // explanation of why things stopped arriving immediately.
+          try {
+            await this.deliver(
+              `🔕 Notification rate limit hit (${this.maxImmediatePerHour}/hr) — ` +
+              `further non-critical messages are batching into the digest. Say \`digest\` to see them now.`,
+            );
+            this.rateLimitNoticeSent = true;
+          } catch (e) {
+            console.warn(`[notify] rate-limit notice not delivered (${e.message}) — will retry on the next one`);
+          }
         }
         return { action: 'queued', reason: 'rate-limit' };
       }
-      return this.postNow(k, text);
+      return this.postNow(k, text, 'warning');
     }
 
     // info
@@ -187,11 +222,38 @@ export class NotifyCenter {
     return { action: 'queued', reason: 'info-digest' };
   }
 
-  async postNow(key, text) {
-    this.lastSentByKey.set(key, this.now());
-    this.immediateTimes.push(this.now());
+  /**
+   * Post immediately. Returns {action:'sent'} only if it really went out.
+   *
+   * The dedupe key and the hourly slot are claimed BEFORE the await on purpose,
+   * so two concurrent identical alerts can't both post — and rolled back if the
+   * send turns out to have failed, which is the part that was missing
+   * (2026-07-30, found by the code-health spine's integrations lens). A critical
+   * alert that Slack refused used to be reported to its caller as `sent`, never
+   * queued anywhere, AND leave its dedupe key stamped — so for the next 30
+   * minutes the same alert folded quietly into a digest instead of being posted.
+   * The louder the incident, the more thoroughly it was suppressed.
+   *
+   * Note the level is needed here (not just for the digest icon): a failure has
+   * to be enqueued under its real level so the digest sorts it correctly.
+   */
+  async postNow(key, text, level = 'critical') {
+    const prevSent = this.lastSentByKey.get(key);
+    const stamp = this.now();
+    this.lastSentByKey.set(key, stamp);
+    this.immediateTimes.push(stamp);
     if (this.underRateLimit()) this.rateLimitNoticeSent = false;
-    await this.send(text);
+    try {
+      await this.deliver(text);
+    } catch (e) {
+      if (prevSent === undefined) this.lastSentByKey.delete(key);
+      else this.lastSentByKey.set(key, prevSent);
+      const i = this.immediateTimes.lastIndexOf(stamp);
+      if (i !== -1) this.immediateTimes.splice(i, 1);
+      this.enqueue(key, text, level); // saves state
+      console.warn(`[notify] immediate ${level} post failed (${e.message}) — folded into the digest for retry`);
+      return { action: 'queued', reason: 'send-failed' };
+    }
     return { action: 'sent' };
   }
 
@@ -244,7 +306,13 @@ export class NotifyCenter {
     if (items.length > MAX_LINES) lines.push(`_...and ${items.length - MAX_LINES} more_`);
 
     const msg = `🗞 *Jarvis digest — ${items.length} update(s)*\n${lines.join('\n')}`;
-    await this.send(msg);   // throws → queue untouched, retried next flush
+    // deliver(), not send() — a Slack-level rejection arrives as a resolved
+    // {ok:false}, which this line used to accept as delivery. Throws → the queue
+    // below is never drained, and the retry is on the next flush INTERVAL rather
+    // than the next 60s tick (lastDigestFlush was already stamped above): during
+    // a Slack outage a retry every minute would be pure log noise, and nothing
+    // is at risk in the meantime because the queue is on disk.
+    await this.deliver(msg);
 
     // Delivered. Drop exactly the items that went out, by identity rather than
     // by count: anything queued WHILE the send was in flight must survive.

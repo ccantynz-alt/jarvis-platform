@@ -179,3 +179,85 @@ test('anything queued while the send is in flight survives the flush', async () 
   assert.equal(center.digestQueue.length, 1, 'the late arrival is still queued for the next digest');
   assert.match(center.digestQueue[0].text, /arrived late/);
 });
+
+// ── The real transport reports failure by RESOLVING (2026-07-30) ─────────────
+// Every "not lost" guarantee above was written against a test double that
+// throws. The production transport, sendSlack(), never throws: a network error
+// comes back as {ok:false,error}, and Slack's Web API answers HTTP 200 with
+// {"ok":false,"error":"ratelimited"} — so a rejected message was indistinguish-
+// able from a delivered one, and the guarantees held only in this file.
+
+test('a digest is kept when the transport RESOLVES with a Slack-level failure', async () => {
+  let fail = true;
+  const sent = [];
+  const center = new NotifyCenter({
+    // The exact shape sendSlack() returns — no throw anywhere.
+    send: async (text) => {
+      if (fail) return { ok: false, error: 'ratelimited' };
+      sent.push(text);
+      return { ok: true };
+    },
+    now: () => NOON_NZ,
+    statePath: null,
+    digestIntervalMs: 30 * 60 * 1000,
+  });
+
+  await center.notify({ level: 'info', text: 'audit finished on zoobicon' });
+  await assert.rejects(() => center.flushDigest({ force: true }), /ratelimited/);
+  assert.equal(center.digestQueue.length, 1, 'a resolved {ok:false} must not count as delivered');
+
+  fail = false;
+  await center.flushDigest({ force: true });
+  assert.equal(center.digestQueue.length, 0);
+  assert.match(sent[0], /zoobicon/);
+});
+
+test('a critical alert the transport refuses is queued, not reported sent', async () => {
+  let fail = true;
+  const sent = [];
+  const center = new NotifyCenter({
+    send: async (text) => {
+      if (fail) return { ok: false, error: 'invalid_auth' };
+      sent.push(text);
+      return { ok: true };
+    },
+    now: () => NOON_NZ,
+    statePath: null,
+    dedupeCooldownMs: 30 * 60 * 1000,
+    maxImmediatePerHour: 15,
+  });
+
+  const first = await center.notify({ level: 'critical', text: 'vapron is down', key: 'vapron-down' });
+  assert.equal(first.action, 'queued', 'a refused critical must not claim to have been sent');
+  assert.equal(first.reason, 'send-failed');
+  assert.equal(sent.length, 0);
+  assert.equal(center.digestQueue.length, 1, 'and it is kept rather than dropped on the floor');
+
+  // The dedupe key and the hourly slot must NOT have been spent on a message
+  // nobody saw — otherwise the same alert stays suppressed for the next 30 min,
+  // which is exactly what used to happen.
+  assert.equal(center.lastSentByKey.has('vapron-down'), false, 'dedupe key rolled back');
+  assert.equal(center.immediateTimes.length, 0, 'hourly rate-limit slot rolled back');
+
+  fail = false;
+  const second = await center.notify({ level: 'critical', text: 'vapron is down', key: 'vapron-down' });
+  assert.equal(second.action, 'sent', 'so the retry posts immediately instead of folding into a digest');
+  assert.match(sent[0], /vapron is down/);
+});
+
+test('a successful immediate post still spends its dedupe key and hourly slot', async () => {
+  const center = new NotifyCenter({
+    send: async () => ({ ok: true }),
+    now: () => NOON_NZ,
+    statePath: null,
+    dedupeCooldownMs: 30 * 60 * 1000,
+  });
+
+  const first = await center.notify({ level: 'critical', text: 'disk 91% full', key: 'disk' });
+  assert.equal(first.action, 'sent');
+  assert.equal(center.immediateTimes.length, 1);
+
+  const repeat = await center.notify({ level: 'critical', text: 'disk 91% full', key: 'disk' });
+  assert.equal(repeat.action, 'queued');
+  assert.equal(repeat.reason, 'dedupe-cooldown', 'the rollback must not have broken normal dedupe');
+});

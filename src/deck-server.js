@@ -44,6 +44,12 @@ import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from '
 
 const PORT      = 9210;
 const SCHEDULER = 'http://127.0.0.1:9209';
+// How long a v2 turn waits for ElevenLabs to produce its first audio before
+// declaring itself unvoiced and telling the client to speak the text instead.
+// Must stay LONGER than lib/tts-stream.js's own handshake/first-audio deadlines
+// (4s each) so a failure resolves this wait early, rather than the wait timing
+// out first and the stream's `fallback` arriving after the final chat message.
+const VOICE_GRACE_MS = 6000;
 
 // ── Auth (gateway-server.js pattern — fail closed) ───────────────────────────
 
@@ -748,7 +754,10 @@ wss.on('connection', (ws, req) => {
         // say costs one WS handshake and removes the whole race.
         let session = null;
         if (msg.v2) {
-          session = { discard: false, tts: null, opening: null, buf: '', queue: [], spokenAny: false, failed: false };
+          session = { discard: false, tts: null, opening: null, buf: '', queue: [], spokenAny: false, failed: false, audioAny: false };
+          // Resolved by the first real audio chunk OR by a stream failure — the
+          // two outcomes that let this turn stop wondering whether it has a voice.
+          session.settle = new Promise((r) => { session.markSettled = r; });
           voiceSession = session; // claim the turn NOW so an interrupt during the open still lands
         }
         const openStream = () => {
@@ -756,13 +765,18 @@ wss.on('connection', (ws, req) => {
           if (session.tts) return Promise.resolve(session.tts);
           if (session.opening) return session.opening;
           session.opening = openTtsStream({
-            onAudio: (chunk) => { if (!session.discard && ws.readyState === 1) ws.send(chunk); },
-            onDone: () => { if (!session.discard) send({ type: 'audio_ctl', ev: 'end' }); },
+            onAudio: (chunk) => {
+              session.audioAny = true;
+              session.markSettled();
+              if (!session.discard && ws.readyState === 1) ws.send(chunk);
+            },
+            onDone: () => { session.markSettled(); if (!session.discard) send({ type: 'audio_ctl', ev: 'end' }); },
             onError: (e) => {
               console.error('[deck] v2 tts stream failed:', e.message);
               if (!session.discard) send({ type: 'audio_ctl', ev: 'fallback' }); // client re-voices via v1
               session.tts = null;
               session.failed = true;
+              session.markSettled();
             },
           }).catch(() => null).then((tts) => {
             if (!tts) { session.failed = true; return null; }   // TTS off or over budget
@@ -806,21 +820,36 @@ wss.on('connection', (ws, req) => {
             else if (!session.spokenAny && !session.queue.length && full.text) session.queue.push(full.text.slice(0, 1200));
             if (session.queue.length) { await openStream(); drainSpeech(); }
             session.tts?.end();
-            // Nothing was voiced server-side (TTS disabled, over budget, or the
-            // stream never opened). A v2 client does NOT speak the streamed text
-            // itself, so without this it just sits there in silence — the
-            // failure mode where Jarvis loses his voice the moment the daily
-            // ElevenLabs budget runs out, and never says why.
-            if (!session.spokenAny) {
-              console.warn('[deck] v2 turn voiced nothing server-side — telling the client to speak it');
+            // Handing text to ElevenLabs is not the same as being heard
+            // (2026-07-30). spokenAny only means the sentences went into the
+            // stream; if ElevenLabs accepted the socket and then rendered
+            // nothing, this turn is silent and every check below used to pass.
+            // Wait for real audio — normally already true, since the first chunk
+            // arrives ~300-500ms after the first sentence while the reply is
+            // still streaming — and settle early on failure. The stream's own
+            // deadlines are shorter than this grace, so onError has fired and
+            // sent `fallback` before the final chat message goes out; after it,
+            // the client's flag is set too late to voice anything.
+            if (session.spokenAny && !session.audioAny) {
+              await Promise.race([session.settle, new Promise((r) => setTimeout(r, VOICE_GRACE_MS))]);
+            }
+            // Nothing was voiced server-side (TTS disabled, over budget, the
+            // stream never opened, or it opened and stayed mute). A v2 client
+            // does NOT speak the streamed text itself, so without this it just
+            // sits there in silence — the failure mode where Jarvis loses his
+            // voice the moment the daily ElevenLabs budget runs out, and never
+            // says why.
+            if (!session.audioAny) {
+              console.warn('[deck] v2 turn produced no audio — telling the client to speak it');
               send({ type: 'audio_ctl', ev: 'fallback' });
             }
           }
           const back = noteBrainHealthy();
           if (back) send({ type: 'notify', level: 'info', title: back, speech: back });
-          // Suppress client re-speak ONLY when the server actually spoke. v1
-          // clients never set msg.v2, so they always get their speech text.
-          return send({ type: 'chat', text: full.text || 'Done, sir.', speech: session?.spokenAny ? null : full.speech });
+          // Suppress client re-speak ONLY when the server actually spoke — which
+          // means audio came back, not that text was handed over. v1 clients
+          // never set msg.v2, so they always get their speech text.
+          return send({ type: 'chat', text: full.text || 'Done, sir.', speech: session?.audioAny ? null : full.speech });
         } catch (e) {
           if (session) { session.tts?.abort(); session.discard = true; if (voiceSession === session) voiceSession = null; }
           // Both brain providers unusable (no credits, outage) — undo this
