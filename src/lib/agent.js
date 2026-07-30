@@ -226,7 +226,10 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
     }
     try {
       const out = provider === 'claude'
-        ? await runClaudeBrain(transcript, onChunk, gate, deadline)
+        // userText is passed EXPLICITLY — brain-claude must not re-derive it from
+        // the transcript tail, which two overlapping commands scramble. See the
+        // comment at that read for the full sequence.
+        ? await runClaudeBrain(transcript, onChunk, gate, deadline, userText)
         : await runBrainLoop(provider, apiKey, transcript, onChunk, gate, deadline);
       if (provider !== brainProvider) { // failed over — make the working one sticky
         brainProvider = provider;

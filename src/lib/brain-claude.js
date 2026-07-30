@@ -293,10 +293,28 @@ function runTurn(s, text, onChunk, fresh = false) {
  * user's message (last entry); returns { text, speech, dispatched } and
  * appends the assistant reply. Throws on failure so agent.js can fail over.
  */
-export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null, deadline = Infinity) {
+export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null, deadline = Infinity, passedText = null) {
   const run = async () => {
-    const userMsg = transcript[transcript.length - 1];
-    const userText = typeof userMsg?.content === 'string' ? userMsg.content : '';
+    // The caller's OWN text, passed in explicitly (2026-07-30, found by the
+    // code-health spine on the concurrency lens).
+    //
+    // This used to read transcript[transcript.length - 1] — but that read happens
+    // inside run(), which is queued on `chain`, while runAgent() pushes the user
+    // message immediately. Two overlapping commands therefore did this:
+    //   A arrives, pushes "A", queues turn A
+    //   B arrives, pushes "B", queues turn B
+    //   turn A runs -> reads last == "B" and answers B
+    //   turn A pushes its assistant reply
+    //   turn B runs -> reads last == that ASSISTANT reply, and answers Jarvis
+    // The second half is literally "Jarvis replies to his own previous message",
+    // which is the symptom Craig spent a morning chasing on the voice path — a
+    // completely separate cause from the microphone echo, reachable by any two
+    // commands close together (the deck kills the previous VOICE session on a new
+    // command but does not await the previous brain turn).
+    const userText = typeof passedText === 'string' && passedText
+      ? passedText
+      : (typeof transcript[transcript.length - 1]?.content === 'string'
+        ? transcript[transcript.length - 1].content : '');
     // The persistent session's systemPrompt is fixed at session start (can
     // live for hours), so live status can't ride on it without going stale —
     // it's freshened here instead, per turn, the same way recap works below.
