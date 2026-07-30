@@ -258,11 +258,23 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     if (!target) { log(`every eligible platform is inside its ${SWEEP_COOLDOWN_H}h cooldown`); return { skipped: 'cooldown' }; }
   }
 
-  const { platform, lens, lensIndex } = target;
+  const { platform, lensIndex } = target;
+  let { lens } = target;
   const cwd = registry[platform].path;
   const checkout = checkoutInfo(cwd);
+
+  // The recent-changes lens is entirely `git log -20 --stat`, so on a directory
+  // with no version control it spends a full review agent discovering there is no
+  // history. /root/universal-ai-operator is exactly that — no .git at all
+  // (2026-07-30) — so skip to the next lens rather than waste the sweep.
+  if (lens.key === 'recent-changes' && !checkout.sha) {
+    const next = lensFor(lensIndex + 1);
+    log(`${platform} is not a git checkout — the ${lens.key} lens has nothing to read, using ${next.key} instead`);
+    lens = next;
+  }
+
   log(`sweep start: ${platform} [${lens.key}] in ${cwd} (mode=${MODE})` +
-    (checkout.sha ? ` at ${checkout.sha}, HEAD is ${checkout.ageDays}d old` : ''));
+    (checkout.sha ? ` at ${checkout.sha}, HEAD is ${checkout.ageDays}d old` : ' — NOT a git checkout, no commit recorded'));
 
   // A stale claude binary takes the whole fleet down quietly — the same gate the
   // orchestrator uses before it spends a job.
