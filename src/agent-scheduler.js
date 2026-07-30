@@ -108,7 +108,7 @@ async function scheduleTick(now) {
       console.error(`[agents] dispatch ${role.name} failed:`, e.message);
       notify({
         source: 'agent-scheduler',
-        level: 'error',
+        level: 'warn',   // contract is info|warn|alert — see normalizeLevel in lib/notify.js
         title: `❌ Failed to dispatch ${role.display_name}`,
         body: e.message,
       }).catch(() => {});

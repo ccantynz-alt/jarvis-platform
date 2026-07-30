@@ -49,10 +49,41 @@ async function post(url, payload, label) {
   }
 }
 
+// Level synonyms, normalised at the ONE entry point.
+//
+// Found by the code-health spine's first-ever sweep (2026-07-30, and the defect
+// was 40 minutes old): orchestrator.js and agent-scheduler.js both raise
+// `level: 'error'`, which is not in this function's contract. Every consumer
+// then guessed differently — and lib/push.js, being the newest, treated an
+// unrecognised level as 'info', which is below its default threshold. So "job
+// failed" and "could not dispatch an agent" were the exact notifications that
+// silently never reached his phone. A contract that is only written in a comment
+// is a contract that drifts; this enforces it in one place, out loud.
+const LEVEL_SYNONYMS = {
+  error: 'alert', critical: 'alert', fatal: 'alert', emergency: 'alert', alert: 'alert',
+  warning: 'warn', warn: 'warn',
+  info: 'info', notice: 'info', debug: 'info',
+};
+const warnedLevels = new Set();
+
+export function normalizeLevel(level) {
+  const key = String(level ?? '').trim().toLowerCase();
+  const mapped = LEVEL_SYNONYMS[key];
+  if (mapped) return mapped;
+  // Unknown levels resolve UP, not down: a caller that invented a level was
+  // trying to say something, and swallowing it is the failure mode above.
+  if (!warnedLevels.has(key)) {
+    warnedLevels.add(key);
+    console.warn(`[notify] unknown level ${JSON.stringify(level)} — treating it as 'warn' (contract: info|warn|alert)`);
+  }
+  return 'warn';
+}
+
 /**
  * notify({ source, level, title, body, speech })
  *   source — which subsystem raised it (e.g. 'orchestrator-cron', 'fleet-check')
- *   level  — 'info' | 'warn' | 'alert'
+ *   level  — 'info' | 'warn' | 'alert' (synonyms like 'error'/'critical' are
+ *            normalised; see LEVEL_SYNONYMS above for why that matters)
  *   title  — short headline (required)
  *   body   — full text (defaults to title)
  *   speech — short spoken form for TTS (defaults to title)
@@ -61,6 +92,7 @@ export async function notify({ source = 'jarvis', level = 'info', title, body, s
   if (!title) return { ok: false, error: 'title required' };
   body = body ?? title;
   speech = speech ?? title;
+  level = normalizeLevel(level);
 
   const memRes = await post(`${MEMORY}/memory/notifications`,
     { source, level, title, body, speech }, 'memory');

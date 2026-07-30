@@ -229,7 +229,10 @@ async function finishJob(row, result) {
   if (!success) {
     notify({
       source: 'orchestrator',
-      level: 'error',
+      // 'warn', not 'error' (which is not in notify()'s contract) and not
+      // 'alert': jobs fail routinely, and reserving max priority for real
+      // emergencies is what keeps the device channel worth listening to.
+      level: 'warn',
       title: `❌ Job failed on ${row.platform} (exit ${result.code}${result.timedOut ? ', timeout' : ''})`,
       body: `Job ${row.id.slice(0, 8)}: ${(error || result.stdout || 'no output').slice(0, 500)}`,
     }).catch((e) => console.error('[orchestrator] failure notify failed:', e.message));

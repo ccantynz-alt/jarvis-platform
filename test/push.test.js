@@ -189,3 +189,29 @@ test('an HTTP refusal is reported with its status', async () => {
     assert.equal(r.status, 403);
   } finally { f.restore(); }
 });
+
+// ── Level contract ───────────────────────────────────────────────────────────
+// Found by the code-health spine's first sweep: orchestrator.js and
+// agent-scheduler.js raise level:'error', which is not in notify()'s contract.
+// The old coercion sent it to 'info' — below the default threshold — so "job
+// failed" was precisely the alert that never reached a device.
+
+test('an off-contract level resolves UP to warn, not down into silence', async () => {
+  process.env.NTFY_TOPIC = 't';
+  const f = capture();
+  try {
+    const r = await quiet(() => pushAlert({ level: 'error', title: 'job failed on vapron' }));
+    assert.equal(r.sent, true, "'error' must not vanish below the min level");
+    assert.equal(f.calls[0].headers.Priority, '4');
+  } finally { f.restore(); }
+});
+
+test('notify normalises the synonyms callers actually use', async () => {
+  const { normalizeLevel } = await import('../src/lib/notify.js');
+  assert.equal(normalizeLevel('error'), 'alert');
+  assert.equal(normalizeLevel('critical'), 'alert');
+  assert.equal(normalizeLevel('warning'), 'warn');
+  assert.equal(normalizeLevel('INFO'), 'info');
+  assert.equal(await quiet(() => normalizeLevel('spicy')), 'warn', 'an invented level is heard, not dropped');
+  assert.equal(await quiet(() => normalizeLevel(undefined)), 'warn');
+});

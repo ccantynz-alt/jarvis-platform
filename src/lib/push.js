@@ -79,7 +79,11 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
   }
   if (!title) return { sent: false, reason: 'no-title' };
 
-  const lvl = LEVEL_ORDER[level] ? level : 'info';
+  // notify() normalises levels before it gets here, but pushAlert() is also
+  // called directly. An unrecognised level resolves UP to 'warn', never down to
+  // 'info': below-threshold silence is how "job failed" alerts disappeared
+  // (see LEVEL_SYNONYMS in notify.js — found by the code-health spine).
+  const lvl = LEVEL_ORDER[level] ? level : 'warn';
   const min = LEVEL_ORDER[c.minLevel] ? c.minLevel : 'warn';
   if (LEVEL_ORDER[lvl] < LEVEL_ORDER[min]) return { sent: false, reason: 'below-min-level' };
 
