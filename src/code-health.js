@@ -127,7 +127,32 @@ export function eligiblePlatforms(registry, { ownIp = OWN_IP, skip = SKIP, exist
  * two apart weeks later. Read-only: `git log`, never `git fetch`.
  */
 function checkoutInfo(cwd) {
-  const git = (args) => execFileSync('git', args, { cwd, encoding: 'utf8', timeout: 10_000 }).trim();
+  // `-c safe.directory` and an explicit HOME, because this silently failed on the
+  // one platform where the sha matters most (2026-07-30).
+  //
+  // /opt/alecrae is owned by alecrae:alecrae and this service runs as root, so git
+  // refuses it with "detected dubious ownership" unless an exception is
+  // configured. Root's ~/.gitconfig HAS that exception — which is why it works by
+  // hand and why this looked fine — but jarvis-code-health.service sets no `User=`
+  // and no `Environment=HOME`, so systemd gives the process no HOME at all and git
+  // never reads that file. spawn-agent.js sets HOME=/root explicitly for the claude
+  // spawns, which is why the review agents worked while this one call did not.
+  //
+  // The cost was not cosmetic. checkoutInfo() failed, the sweep logged "NOT a git
+  // checkout, no commit recorded", and the findings were filed with a NULL
+  // commit_sha — against a tree 28 commits behind origin/main. Two of the three
+  // confirmed highs from that sweep are already fixed upstream (93d6ac2 "account
+  // deletion honors a real 30-day soft-delete window" and 1d7f56b "close
+  // cross-tenant passkey deletion"), so an adversarial verifier was spent proving
+  // that fixed code is broken, and Craig would have been sent to fix it twice.
+  // Recording the sha is the safeguard against exactly that; it has to actually run.
+  //
+  // Passing the setting on the command line rather than writing anyone's gitconfig
+  // keeps this read-only and independent of ambient state — it works whatever HOME
+  // is and whoever owns the checkout.
+  const git = (args) => execFileSync('git', ['-c', `safe.directory=${cwd}`, ...args], {
+    cwd, encoding: 'utf8', timeout: 10_000, env: { ...process.env, HOME: process.env.HOME || '/root' },
+  }).trim();
   try {
     const sha = git(['rev-parse', '--short', 'HEAD']);
     const iso = git(['log', '-1', '--format=%cI']);
