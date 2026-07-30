@@ -215,12 +215,29 @@ export async function runOnce() {
     }
 
     log(`LIVE dispatching repair for ${name} (HTTP ${code}, down ${downMin}m, attempt ${s.attemptsToday + 1})`);
-    await notify({ source: 'self-heal', level: 'warn', title: `🔧 Auto-repairing ${name}`, body: `${url || name} was down (HTTP ${code}, ${downMin}m). Dispatched a repair agent; I'll report the result.`, speech: `${name} went down. I'm repairing it now.` });
+    // The attempt is counted BEFORE the outcome is known (2026-07-30, found by
+    // the code-health spine). It used to advance lastAttempt/attemptsToday only
+    // on a SUCCESSFUL dispatch — so if /dispatch kept erroring (orchestrator
+    // down, registry mismatch, queue rejection) the cooldown and the daily cap
+    // never engaged, and this ran again on the very next 5-minute tick, forever.
+    // The notify() moved below for the same reason: at one warn-level push per
+    // tick that is 288 phone alerts a day about a repair that never started.
+    s.lastAttempt = now();
+    s.attemptsToday += 1;
     try {
       const res = await dispatchRepair(name, url, code, downMin);
-      if (res.error) { log(`${name}: dispatch error: ${res.error}`); }
-      else { log(`${name}: repair job ${res.jobId} dispatched`); s.lastAttempt = now(); s.attemptsToday += 1; concurrent += 1; }
-    } catch (e) { log(`${name}: dispatch threw: ${e.message}`); }
+      if (res.error) {
+        log(`${name}: dispatch error: ${res.error}`);
+        await notify({ source: 'self-heal', level: 'warn', title: `Could not dispatch a repair for ${name}`, body: `${url || name} is down (HTTP ${code}, ${downMin}m) and the orchestrator refused the repair job: ${res.error}. Attempt ${s.attemptsToday}/${MAX_ATTEMPTS_PER_DAY} today; next try after the ${COOLDOWN_MIN}m cooldown.`, speech: `Sir, ${name} is down and I could not start the repair.` });
+      } else {
+        log(`${name}: repair job ${res.jobId} dispatched`);
+        concurrent += 1;
+        await notify({ source: 'self-heal', level: 'warn', title: `🔧 Auto-repairing ${name}`, body: `${url || name} was down (HTTP ${code}, ${downMin}m). Dispatched a repair agent; I'll report the result.`, speech: `${name} went down. I'm repairing it now.` });
+      }
+    } catch (e) {
+      log(`${name}: dispatch threw: ${e.message}`);
+      await notify({ source: 'self-heal', level: 'warn', title: `Could not reach the orchestrator to repair ${name}`, body: `${url || name} is down (HTTP ${code}, ${downMin}m) and the dispatch call itself failed: ${e.message}.`, speech: `Sir, ${name} is down and I could not reach the orchestrator.` });
+    }
     saveState(name, s);
   }
 }
