@@ -28,9 +28,18 @@ name: off-box watchdog
 
 on:
   schedule:
-    # Every 5 minutes. GitHub delays scheduled runs under load — treat the real
-    # detection window as 5-20 minutes, which is still infinitely better than
-    # the nothing that came before.
+    # Asks for every 5 minutes. DOES NOT GET IT — measured, 2026-07-30: over the
+    # first four hours this fired at 00:49, 01:28, 02:24, 03:37, 04:41. Four runs
+    # in four hours, not forty-eight. GitHub throttles and skips scheduled
+    # workflows heavily under load, and a `*/5` cron on a public repo is a
+    # request, not a guarantee.
+    #
+    # So the honest detection window is ROUGHLY AN HOUR, not the 5-20 minutes
+    # first documented here. That is still far better than the nothing that came
+    # before, and the ask is left at */5 because a slot is taken when one is
+    # available — but nothing should be designed on the assumption of 5 minutes,
+    # and docs/ALERTS.md now says so. The low-latency half of this job belongs on
+    # hardware we control (Craig's PC worker, or box 158 once it has a key).
     - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:

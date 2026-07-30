@@ -554,7 +554,10 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    cloud-routine approach below was abandoned: three attempts, two
    contradictory "fixes", and hard evidence it had never delivered a single
    alert. It now lives in **`.github/workflows/offbox-watchdog.yml`** — a
-   GitHub Actions runner, every 5 minutes, three spaced probes of the public
+   GitHub Actions runner asking for every 5 minutes but **measured at roughly
+   ONCE AN HOUR** (2026-07-30: it fired 4 times in its first 4 hours — GitHub
+   throttles scheduled workflows hard, so treat the detection window as ~1h and
+   never design against 5 min), three spaced probes of the public
    `:9212/health`, raising TWO independent alarms on total failure: a
    max-priority ntfy push (`NTFY_TOPIC` repo secret) **and** the job failing,
    which makes GitHub email Craig from its own infrastructure with no secret

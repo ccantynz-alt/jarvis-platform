@@ -111,9 +111,20 @@ Prove delivery any time, without waiting for an outage:
 gh workflow run offbox-watchdog.yml -f test_alert=true
 ```
 
-Known limits: GitHub delays scheduled runs under load, so the real detection
-window is 5–20 minutes; and a scheduled workflow is disabled after 60 days of
-repository inactivity (not a risk while this repo is worked on daily).
+**Known limit, measured rather than assumed — the cadence is about an HOUR, not
+five minutes.** The cron asks for `*/5`; over its first four hours it actually
+fired at 00:49, 01:28, 02:24, 03:37 and 04:41 UTC. Four runs in four hours.
+GitHub throttles and skips scheduled workflows heavily, and on a public repo a
+`*/5` cron is a request, not a guarantee. So:
+
+- treat the detection window for "the box is gone" as **~1 hour**;
+- do not build anything on a 5-minute assumption;
+- the low-latency half of this belongs on hardware we control — Craig's PC worker
+  (seconds, whenever his PC is awake) or box 158 (always on, once it has an SSH
+  key). Both are listed below.
+
+A scheduled workflow is also disabled after 60 days of repository inactivity —
+not a risk while this repo is worked on daily.
 
 ### 3. Still-missing pieces (do these next, in this order)
 
