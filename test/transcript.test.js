@@ -184,3 +184,111 @@ test('a rejected write is surfaced, not swallowed', async () => {
   assert.equal(errors.length, 1);
   assert.match(errors[0], /could not persist conversation/);
 });
+
+// ── Cross-surface merge (2026-07-30) ────────────────────────────────────────
+// Found by the code-health spine and, independently, by the 2026-07-26 audit.
+// saveTranscript wrote the whole local array as the new value, from a cache
+// loadTranscript never refreshes — and the deck (:9210) and gateway (:9208) are
+// separate processes with separate caches, both of which save. A long
+// conversation on the deck plus one sentence to the gateway meant the gateway
+// wrote its stale array over the top and the deck's turns were gone. "One
+// conversation, all surfaces" was the feature; using two surfaces broke it.
+
+import { mergeTail } from '../src/lib/transcript.js';
+
+const msg = (role, content) => ({ role, content });
+
+test('a turn from another surface is not destroyed — THE bug', async () => {
+  const store = { 'jarvis-conversation': JSON.stringify([msg('user', 'A')]) };
+  const calls = stubMemory({ store });
+
+  const t = await loadTranscript();          // this process caches [A]
+  t.push(msg('user', 'B'));                  // our new turn
+
+  // Meanwhile the OTHER surface records two turns and saves them.
+  store['jarvis-conversation'] = JSON.stringify([msg('user', 'A'), msg('user', 'C'), msg('assistant', 'D')]);
+
+  saveTranscript();
+  await new Promise(r => setTimeout(r, 600));
+
+  const written = JSON.parse(calls.writes.at(-1).value).map(m => m.content);
+  assert.deepEqual(written, ['A', 'C', 'D', 'B'], 'the other surface survives and our turn is appended');
+});
+
+test('the merge lands in the SHARED array, not a replacement', async () => {
+  const store = { 'jarvis-conversation': JSON.stringify([msg('user', 'A')]) };
+  stubMemory({ store });
+  const t = await loadTranscript();
+  t.push(msg('user', 'B'));
+  store['jarvis-conversation'] = JSON.stringify([msg('user', 'A'), msg('user', 'C')]);
+
+  saveTranscript();
+  await new Promise(r => setTimeout(r, 600));
+
+  // runAgent and both servers hold this exact reference; reassigning would
+  // silently orphan them mid-conversation.
+  assert.equal(await loadTranscript(), t, 'same array object');
+  assert.deepEqual(t.map(m => m.content), ['A', 'C', 'B']);
+});
+
+test('an unreadable store holds the turn instead of overwriting', async () => {
+  const store = { 'jarvis-conversation': JSON.stringify([msg('user', 'A')]) };
+  const calls = stubMemory({ store });
+  const t = await loadTranscript();
+  t.push(msg('user', 'B'));
+
+  const realError = console.error;
+  const errors = [];
+  console.error = (m) => errors.push(String(m));
+  global.fetch = async (url, opts) => {
+    if (opts?.method === 'POST') { calls.writes.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+    throw new Error('memory unreachable');
+  };
+  try {
+    saveTranscript();
+    await new Promise(r => setTimeout(r, 600));
+  } finally { console.error = realError; }
+
+  assert.equal(calls.writes.length, 0, 'nothing is written when we cannot see what is there');
+  assert.match(errors.join(' '), /not overwriting/);
+  assert.equal(t.length, 2, 'and the turn is still in memory for the next save');
+});
+
+test('a failed write does not advance the baseline, so the turn is retried', async () => {
+  const store = { 'jarvis-conversation': JSON.stringify([msg('user', 'A')]) };
+  const calls = stubMemory({ store, failWrites: true });
+  const t = await loadTranscript();
+  t.push(msg('user', 'B'));
+
+  const realError = console.error;
+  console.error = () => {};
+  try {
+    saveTranscript();
+    await new Promise(r => setTimeout(r, 600));
+    calls.writes.length = 0;
+    global.fetch = async (url, opts) => {   // store recovers
+      if (opts?.method === 'POST') { const b = JSON.parse(opts.body); calls.writes.push(b); store[b.key] = b.value; return { ok: true, json: async () => ({}) }; }
+      const key = String(url).split('/memory/kv/')[1];
+      return key in store ? { ok: true, json: async () => ({ key, value: store[key] }) } : { ok: false, status: 404 };
+    };
+    saveTranscript();
+    await new Promise(r => setTimeout(r, 600));
+  } finally { console.error = realError; }
+
+  assert.deepEqual(JSON.parse(calls.writes.at(-1).value).map(m => m.content), ['A', 'B'],
+    'B is still sent after the first attempt failed');
+});
+
+test('mergeTail skips a turn already at the stored tail', () => {
+  const stored = [msg('user', 'A'), msg('assistant', 'B')];
+  assert.deepEqual(mergeTail(stored, [msg('assistant', 'B')]).map(m => m.content), ['A', 'B'],
+    'a partially applied save must not duplicate');
+});
+
+test('mergeTail keeps the conversation bounded', () => {
+  const stored = Array.from({ length: 24 }, (_, i) => msg('user', `old${i}`));
+  const merged = mergeTail(stored, [msg('user', 'new')]);
+  assert.equal(merged.length, 24);
+  assert.equal(merged.at(-1).content, 'new');
+  assert.equal(merged[0].content, 'old1', 'the oldest turn is the one dropped');
+});

@@ -41,6 +41,11 @@ let transcript = null;     // the one shared array
 let loading = null;        // in-flight load, so concurrent turns don't double-fetch
 let saveTimer = null;
 let lastSaveFailedAt = 0;
+// What we believe the STORE holds. Everything in `transcript` beyond this is
+// ours-since-the-last-successful-save, and is the only thing a save may add.
+// Without it a save cannot tell "my new turn" from "the other surface's turn",
+// which is what made the write destructive — see saveTranscript.
+let baseline = [];
 // Did we ever successfully READ the store? Until we have, we do not know what
 // the conversation is, and must not overwrite it. See loadTranscript.
 let loaded = false;
@@ -78,6 +83,7 @@ export async function loadTranscript() {
     for (let attempt = 0; attempt < LOAD_ATTEMPTS; attempt++) {
       try {
         transcript = (await readKey(KEY)) || (await readKey(LEGACY_KEY)) || [];
+        baseline = transcript.slice();
         loaded = true;
         return transcript;
       } catch (e) {
@@ -135,6 +141,23 @@ recovery.unref?.();
  * `.catch(() => {})` meant memory-server being down looked exactly like
  * everything working — right up until the next restart lost the day.
  */
+const sameMsg = (a, b) => !!a && !!b && a.role === b.role && a.content === b.content;
+
+/**
+ * Fold our new turns onto whatever the store now holds.
+ *
+ * Skips a turn that already sits at the tail of the stored array, so a partially
+ * applied save can't duplicate it. Exported for tests.
+ */
+export function mergeTail(stored, ourNew, max = MAX_MESSAGES) {
+  const out = stored.slice();
+  for (const m of ourNew) {
+    if (sameMsg(out[out.length - 1], m)) continue;
+    out.push(m);
+  }
+  return out.slice(-max);
+}
+
 export function saveTranscript() {
   if (!transcript || saveTimer) return;
   // Never let a scratch conversation overwrite the stored one — see the boot
@@ -144,13 +167,50 @@ export function saveTranscript() {
   saveTimer = setTimeout(async () => {
     saveTimer = null;
     if (!transcript) return;
-    const snapshot = JSON.stringify(transcript.slice(-MAX_MESSAGES));
+
+    // RE-READ, THEN MERGE (2026-07-30, found by the code-health spine and
+    // independently by the 2026-07-26 audit). This used to write
+    // `transcript.slice(-MAX)` as the complete new value — a whole-array
+    // overwrite from a cache that loadTranscript() never refreshes. The deck
+    // (:9210) and the gateway (:9208) are separate processes with separate
+    // caches, and both save. So: Craig has a long conversation on the deck, then
+    // says one sentence to the gateway, and the gateway writes ITS stale array
+    // plus that sentence over the top — the whole deck conversation is gone.
+    // "One conversation, all surfaces" was the headline feature, and using two
+    // surfaces was what broke it.
+    //
+    // Only what WE added since the last successful save may be appended. If the
+    // local array is shorter than the baseline (the brain-failure rollback path
+    // splices it), we add nothing rather than trying to be clever.
+    const ourNew = transcript.length > baseline.length ? transcript.slice(baseline.length) : [];
+
+    let stored;
+    try {
+      stored = await readKey(KEY);
+    } catch (e) {
+      // The store is unreachable. Do NOT fall back to writing our copy — that is
+      // precisely the destructive behaviour being removed here. The turn is safe
+      // in memory and the next save will carry it, with the baseline unmoved.
+      if (Date.now() - lastSaveFailedAt > 60_000) {
+        lastSaveFailedAt = Date.now();
+        console.error(`[transcript] could not read before saving (${e.message}) — holding this turn, not overwriting`);
+      }
+      return;
+    }
+
+    const merged = mergeTail(stored || [], ourNew);
+    // Adopt the merge into the SHARED array in place: runAgent and both servers
+    // hold a reference to it, so reassigning would silently orphan them.
+    transcript.splice(0, transcript.length, ...merged);
+
+    const snapshot = JSON.stringify(merged);
     try {
       const r = await fetch(`${MEMORY}/memory/kv`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: KEY, value: snapshot }),
       });
       if (!r.ok) throw new Error(`memory KV returned ${r.status}`);
+      baseline = merged.slice();   // only a CONFIRMED write moves the baseline
     } catch (e) {
       // Once a minute at most — a wedged memory-server must not become a
       // log flood on every utterance.
@@ -201,5 +261,6 @@ export function _reset() {
   loading = null;
   loaded = false;
   lastSaveFailedAt = 0;
+  baseline = [];
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
 }
