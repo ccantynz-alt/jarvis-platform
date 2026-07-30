@@ -179,3 +179,66 @@ test('every lens has a usable brief', () => {
     assert.ok(l.brief.length > 40, `${l.key} needs a brief specific enough to steer a review`);
   }
 });
+
+// ── Verdict extraction (2026-07-30) ─────────────────────────────────────────
+// The verifier is the only thing separating a finding from a rumour, and it was
+// being silently lost: `/\{[\s\S]*\}/` is greedy from the FIRST brace to the
+// LAST, so any prose containing a brace, a markdown fence, or a second object
+// made the whole match unparseable — and an unparseable verdict is downgraded to
+// "unproven". The 2026-07-30 jarvis input-trust sweep lost THREE of four that way.
+
+import { extractJsonObject, boolish } from '../src/lib/findings.js';
+
+test('a bare verdict object parses', () => {
+  const o = extractJsonObject('{"real": true, "why": "line 40 throws"}', ['real']);
+  assert.equal(o.real, true);
+});
+
+test('prose on both sides no longer breaks it — THE regression', () => {
+  const out = 'I checked the guard {see line 12} and concluded:\n{"real": false, "why": "a caller validates first"}\nHope that helps {end}';
+  const o = extractJsonObject(out, ['real']);
+  assert.equal(o.real, false, 'the old greedy regex spanned brace-to-brace and threw');
+});
+
+test('a fenced block parses', () => {
+  const o = extractJsonObject('```json\n{"real": true, "why": "confirmed"}\n```', ['real']);
+  assert.equal(o.real, true);
+});
+
+test('an echoed template followed by the real answer takes the ANSWER', () => {
+  const out = '{"real": true|false, "why": "..."}\n\nMy verdict:\n{"real": false, "why": "guarded upstream"}';
+  const o = extractJsonObject(out, ['real']);
+  assert.equal(o.real, false, 'the last complete object wins — a model echoes the template first');
+});
+
+test('requiredKeys reject an unrelated object', () => {
+  assert.equal(extractJsonObject('{"summary": "no verdict here"}', ['real']), null);
+});
+
+test('a brace inside a string does not break the balance count', () => {
+  const o = extractJsonObject('{"real": true, "why": "the template literal `${x}` is the bug"}', ['real']);
+  assert.equal(o.real, true);
+});
+
+test('nested objects are handled', () => {
+  const o = extractJsonObject('{"real": true, "meta": {"file": "a.js", "n": 1}, "why": "x"}', ['real']);
+  assert.equal(o.meta.file, 'a.js');
+});
+
+test('nothing parseable returns null rather than throwing', () => {
+  for (const bad of ['', 'I could not complete the check.', '{ not json ', null, undefined]) {
+    assert.equal(extractJsonObject(bad, ['real']), null, JSON.stringify(bad));
+  }
+});
+
+test('boolish accepts what models actually emit, and nothing else', () => {
+  assert.equal(boolish(true), true);
+  assert.equal(boolish('true'), true);
+  assert.equal(boolish('yes'), true);
+  assert.equal(boolish(false), false);
+  assert.equal(boolish('false'), false);
+  assert.equal(boolish('no'), false);
+  for (const v of [undefined, null, 'maybe', 1, 0, '']) {
+    assert.equal(boolish(v), null, `${JSON.stringify(v)} must be "not proven", never a decision`);
+  }
+});

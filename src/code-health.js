@@ -42,6 +42,7 @@ import { guardrail } from './lib/guardrail.js';
 import { spawnClaude, ensureClaudeVerified } from './lib/spawn-agent.js';
 import {
   normalizeFinding, parseFindings, needsVerification, pickTarget, severityRank, lensFor, LENSES,
+  extractJsonObject, boolish,
 } from './lib/findings.js';
 
 const MEMORY = 'http://127.0.0.1:9200';
@@ -340,18 +341,18 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     if (res.created && needsVerification(f) && verifications < MAX_VERIFICATIONS) {
       verifications++;
       const v = await spawnClaude({ prompt: verifyPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
-      let verdict = null;
-      try {
-        const m = v.stdout.match(/\{[\s\S]*\}/);
-        if (m) verdict = JSON.parse(m[0]);
-      } catch { /* unparseable verdict is treated as "unproven" below */ }
+      // extractJsonObject, not a greedy brace regex. See its comment in
+      // lib/findings.js: the regex it replaces lost THREE of four verdicts on the
+      // 2026-07-30 jarvis sweep, and a lost verdict silently becomes "unproven".
+      const verdict = extractJsonObject(v.stdout, ['real']);
+      const real = verdict ? boolish(verdict.real) : null;
 
-      if (verdict && verdict.real === true) {
+      if (real === true) {
         entry.status = 'confirmed';
         await patchFinding(res.id, { status: 'confirmed', verdict: String(verdict.why || '').slice(0, 800), severity: verdict.severity });
         if (verdict.severity) entry.severity = verdict.severity;
         log(`CONFIRMED [${entry.severity}] ${f.title}`);
-      } else if (verdict && verdict.real === false) {
+      } else if (real === false) {
         entry.status = 'dismissed';
         await patchFinding(res.id, { status: 'dismissed', verdict: String(verdict.why || '').slice(0, 800) });
         log(`refuted — dismissed: ${f.title} (${String(verdict.why || '').slice(0, 120)})`);
@@ -416,16 +417,13 @@ async function recheckOldFindings(platform, cwd) {
   for (const f of staleFirst) {
     const v = await spawnClaude({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
     if (v.limitHeld) { log('recheck: usage-limited, stopping re-checks for this sweep'); break; }
-    let verdict = null;
-    try {
-      const m = v.stdout.match(/\{[\s\S]*\}/);
-      if (m) verdict = JSON.parse(m[0]);
-    } catch { /* unparseable → treated as "still present" below */ }
+    const verdict = extractJsonObject(v.stdout, ['still_present']);
+    const stillPresent = verdict ? boolish(verdict.still_present) : null;
 
     // Only an explicit false closes a finding. No verdict, an unparseable
     // verdict, or a dead agent all mean "we still believe it" — burying a real
     // defect is the more expensive mistake.
-    if (verdict && verdict.still_present === false) {
+    if (stillPresent === false) {
       const why = String(verdict.why || '').slice(0, 600);
       await patchFinding(f.id, { status: 'fixed', checked: true, verdict: `RE-CHECKED and gone: ${why}` });
       closed.push({ ...f, why });

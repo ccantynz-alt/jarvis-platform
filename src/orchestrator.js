@@ -8,7 +8,7 @@ import { notify } from './lib/notify.js';
 import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { usageHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
-import { guardrail } from './lib/guardrail.js';
+import { guardrail, clampLimit } from './lib/guardrail.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -974,7 +974,7 @@ app.get('/platforms', (req, res) => {
 
 // GET /events  — recent event log for dashboard consumption
 app.get('/events', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const limit = clampLimit(req.query.limit, 50, 200);
   res.json(eventLog.slice(-limit));
 });
 

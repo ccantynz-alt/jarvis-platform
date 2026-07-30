@@ -477,14 +477,38 @@ function normReply(raw) {
   return t.replace(/[^a-z0-9' ]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// A word that on its own means "yes, do the thing".
-const YES_CORE = new Set([
-  'yes', 'yeah', 'yep', 'yup', 'ya', 'yah', 'yes-please', 'aye', 'ok', 'okay', 'okey', 'kay',
-  'sure', 'please', 'pls', 'do', 'go', 'proceed', 'confirm', 'confirmed', 'affirmative',
+// Words that on their own mean "yes, do the thing". Interjections and explicit
+// approvals — none of them can be the verb of a sentence about the speaker.
+const YES_STRONG = new Set([
+  'yes', 'yeah', 'yep', 'yup', 'ya', 'yah', 'aye', 'ok', 'okay', 'okey', 'kay',
+  'sure', 'please', 'pls', 'proceed', 'confirm', 'confirmed', 'affirmative',
   'granted', 'approve', 'approved', 'authorised', 'authorized', 'absolutely', 'definitely',
-  'certainly', 'indeed', 'correct', 'roger', 'agreed', 'agree', 'launch', 'dispatch', 'deploy',
-  'send', 'ship', 'run', 'fire', 'crack', 'continue', 'permission', 'greenlight',
+  'certainly', 'indeed', 'correct', 'roger', 'agreed', 'agree', 'permission', 'greenlight',
 ]);
+
+// Action verbs. These are NOT affirmations on their own inside a sentence — they
+// need an object ("do it", "go ahead", "launch it") or must be the entire reply
+// ("go").
+//
+// This split is the 2026-07-30 fix for an overcorrection made the same morning.
+// The gate had been too NARROW (a bare "please" never fired), and widening it to
+// a vocabulary made it too LOOSE: with these verbs counted as standalone
+// affirmations and first-person pronouns treated as filler, the gate answered YES
+// to "i need to run", "let me go", "i can do that", "you can send it" and "we
+// need to go" — every one of which would have launched a staged full-permission
+// agent from ordinary speech. Found by the code-health spine, on my own code,
+// hours after I wrote it.
+//
+// The discriminator is grammatical: a confirmation is an IMPERATIVE. A sentence
+// about what the speaker needs, can, or will do is not one — which is why the
+// first-person pronouns and the modals came out of FILLER below.
+const YES_VERB = new Set([
+  'do', 'go', 'launch', 'dispatch', 'deploy', 'send', 'ship', 'run', 'fire', 'crack', 'continue', 'hit',
+]);
+
+// Particles that turn a verb into an imperative confirmation. Every member is
+// also in FILLER, so compactness still passes.
+const YES_OBJECT = new Set(['it', 'that', 'this', 'them', 'one', 'ahead', 'on', 'away', 'up', 'along']);
 
 // Any of these vetoes a launch, whatever else is in the sentence — fail safe.
 const NO_CORE = new Set([
@@ -495,13 +519,19 @@ const NO_CORE = new Set([
 
 // Words that carry no instruction of their own. A reply made only of these plus
 // a core word is an acknowledgement, not a new command.
+// Deliberately NOT here: the first-person pronouns (i, i'm, me, my, we, us), the
+// second person (you), and the modals (can, could, would, will, need). Those are
+// the words that turn an imperative into a STATEMENT — "i need to run", "you can
+// send it" — and treating them as filler is what let ordinary speech launch a
+// production agent. Their absence makes such a reply non-compact, so it falls
+// through to the brain as a fresh command, which is the correct outcome.
 const FILLER = new Set([
-  'it', 'that', 'this', 'then', 'now', 'sir', 'thanks', 'thank', 'you', 'cheers', 'mate', 'man',
+  'it', 'that', 'this', 'them', 'then', 'now', 'sir', 'thanks', 'thank', 'cheers', 'mate', 'man',
   'ahead', 'on', 'off', 'out', 'all', 'right', 'righto', 'fine', 'good', 'great', 'perfect',
-  'lovely', 'nice', 'cool', 'well', 'and', 'the', 'a', 'an', 'to', 'i', "i'm", 'im', 'we', 'us',
-  'my', 'me', 'for', 'of', 'by', 'with', 'up', 'one', 'two', 'moment', 'minute', 'sec', 'second',
-  'time', 'course', 'means', 'if', 'would', 'could', 'will', 'can', 'need', 'about', 'worry',
-  'bother', 'mind', 'yet', 'just', 'still', 'so', 'lets', "let's", 'let', 'give', 'happy', 'away',
+  'lovely', 'nice', 'cool', 'well', 'and', 'the', 'a', 'an', 'to', 'for', 'of', 'by', 'with',
+  'up', 'along', 'one', 'two', 'moment', 'minute', 'sec', 'second', 'time', 'course', 'means',
+  'if', 'about', 'worry', 'bother', 'mind', 'yet', 'just', 'still', 'so', 'lets', "let's", 'let',
+  'give', 'happy', 'away',
 ]);
 
 const DEFER_RE = /\b(wait|hold|hang|later|not yet|give me|minute|moment|sec|second)\b/;
@@ -520,10 +550,18 @@ export function classifyGateReply(raw) {
   const toks = t.split(' ');
   // A long sentence is a new instruction, never a bare acknowledgement.
   if (toks.length > 8) return 'none';
-  if (!toks.every(w => YES_CORE.has(w) || NO_CORE.has(w) || FILLER.has(w))) return 'none';
+  const known = (w) => YES_STRONG.has(w) || YES_VERB.has(w) || NO_CORE.has(w) || FILLER.has(w);
+  if (!toks.every(known)) return 'none';
   if (toks.length <= 6 && DEFER_RE.test(t)) return 'defer';
   if (toks.some(w => NO_CORE.has(w))) return 'no';
-  return toks.some(w => YES_CORE.has(w)) ? 'yes' : 'none';
+
+  // An explicit approval stands alone. An action verb needs an object ("do it",
+  // "go ahead") or must BE the whole reply ("go") — inside a longer sentence it
+  // is describing something, not authorising it.
+  if (toks.some(w => YES_STRONG.has(w))) return 'yes';
+  const verb = toks.some(w => YES_VERB.has(w));
+  if (verb && (toks.length === 1 || toks.some(w => YES_OBJECT.has(w)))) return 'yes';
+  return 'none';
 }
 
 const sameTask = (a, b) =>

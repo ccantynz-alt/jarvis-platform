@@ -66,3 +66,41 @@ test('the result is ALWAYS finite — nothing downstream can compare against NaN
     assert.equal(Number.isFinite(quiet(() => guardrail(NAME, 7)).value), true, JSON.stringify(v));
   }
 });
+
+// ── clampLimit: a negative LIMIT is no limit at all (2026-07-30) ─────────────
+// `Math.min(parseInt(raw, 10) || 50, 500)` clamps the top and not the bottom, so
+// ?limit=-1 yields -1 — and SQLite documents a negative LIMIT as "no upper bound
+// on the number of rows returned". One query param and a paged endpoint dumps the
+// whole table. Five endpoints had it (memory-server ×4, orchestrator ×1).
+
+import { clampLimit } from '../src/lib/guardrail.js';
+
+test('a negative limit falls back instead of becoming unbounded', () => {
+  assert.equal(clampLimit('-1', 50, 500), 50, 'SQLite reads LIMIT -1 as no limit');
+  assert.equal(clampLimit('-99999', 50, 500), 50);
+  assert.equal(clampLimit(-5, 50, 500), 50);
+});
+
+test('zero is not a useful page size either', () => {
+  assert.equal(clampLimit('0', 50, 500), 50);
+});
+
+test('a sane limit is honoured and the ceiling still applies', () => {
+  assert.equal(clampLimit('10', 50, 500), 10);
+  assert.equal(clampLimit('9999', 50, 500), 500);
+  assert.equal(clampLimit('500', 50, 500), 500);
+});
+
+test('junk and absence fall back', () => {
+  for (const raw of [undefined, null, '', 'abc', 'NaN', {}, []]) {
+    assert.equal(clampLimit(raw, 50, 500), 50, JSON.stringify(raw));
+  }
+});
+
+test('a numeric-prefixed string is read as its number, like parseInt', () => {
+  assert.equal(clampLimit('25 rows', 50, 500), 25);
+  // parseInt(_, 10) stops at the 'e', so this is 1 — a harmless page size, not
+  // the infinity the notation suggests. Worth pinning so nobody "fixes" it into
+  // Number(), which WOULD yield Infinity here.
+  assert.equal(clampLimit('1e999', 50, 500), 1);
+});

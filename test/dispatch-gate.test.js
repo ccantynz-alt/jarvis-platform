@@ -188,3 +188,44 @@ test('gateNote is silent with no gate and no pending', () => {
   assert.equal(gateNote(null), '');
   assert.equal(gateNote(newGate()), '');
 });
+
+// ── The overcorrection, found the same day (2026-07-30) ──────────────────────
+// Widening the vocabulary this morning fixed "please" never firing and created
+// the opposite hole: action verbs counted as standalone affirmations, and
+// first-person pronouns and modals were treated as filler. So with a job staged
+// in an earlier turn, the gate said YES to ordinary speech —
+//
+//   "i need to run"     "let me go"        "i can do that"
+//   "you can send it"   "we need to go"    "i will run that"
+//
+// — every one of which would have launched a full-permission production agent.
+// Found by the code-health spine, on code I had written hours earlier.
+//
+// The discriminator is grammatical: a confirmation is an IMPERATIVE. A sentence
+// about what the speaker needs, can or will do is not one.
+
+test('a sentence about the speaker is never a confirmation', () => {
+  for (const s of [
+    'i need to run', 'let me go', 'i can do that', 'you can send it', 'we need to go',
+    'i will run that', 'i have to go', 'can you run that', 'i should go', 'we can ship it',
+  ]) {
+    assert.notEqual(classifyGateReply(s), 'yes', `"${s}" must not launch a production agent`);
+  }
+});
+
+test('an action verb needs an object, or must be the whole reply', () => {
+  // With an object, or alone: an imperative.
+  for (const s of ['do it', 'go ahead', 'launch it', 'send it', 'ship it', 'run it', 'fire away', 'crack on', 'go']) {
+    assert.equal(classifyGateReply(s), 'yes', `"${s}" is a confirmation`);
+  }
+  // Buried in a longer clause with no object: describing, not authorising.
+  for (const s of ['just about to run', 'time to go now']) {
+    assert.notEqual(classifyGateReply(s), 'yes', `"${s}" is not a confirmation`);
+  }
+});
+
+test('explicit approvals still stand alone', () => {
+  for (const s of ['yes', 'please', 'ok', 'sure', 'proceed', 'confirmed', 'approved', 'permission granted', 'absolutely']) {
+    assert.equal(classifyGateReply(s), 'yes', s);
+  }
+});

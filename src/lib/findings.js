@@ -158,6 +158,63 @@ export function parseFindings(text) {
   return { findings: [], error: 'no JSON array found in agent output' };
 }
 
+/**
+ * Pull the LAST complete JSON object containing `requiredKeys` out of an agent's
+ * stdout.
+ *
+ * The naive `/\{[\s\S]*\}/` this replaces was greedy from the FIRST brace to the
+ * LAST one, so any prose containing a brace, a markdown fence, or a second
+ * object made the whole match unparseable — and an unparseable verdict is
+ * silently downgraded to "unproven". Measured cost before this existed: the
+ * 2026-07-30 jarvis input-trust sweep lost THREE of four verdicts that way, and
+ * the verifier is the only thing separating a finding from a rumour.
+ *
+ * Walks the text collecting brace-balanced spans (string-aware, so a brace inside
+ * a quoted string doesn't break the count), then parses candidates from the END
+ * backwards — a model that echoes the template before answering puts its real
+ * answer last. `requiredKeys` is what makes "last" safe: only an object that
+ * actually carries the verdict field qualifies.
+ */
+export function extractJsonObject(text, requiredKeys = []) {
+  const s = String(text || '');
+  const spans = [];
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] !== '{') continue;
+    let depth = 0, quote = null, esc = false;
+    for (let j = i; j < s.length; j++) {
+      const c = s[j];
+      if (quote) {
+        if (esc) esc = false;
+        else if (c === '\\') esc = true;
+        else if (c === quote) quote = null;
+        continue;
+      }
+      if (c === '"' || c === "'") { quote = c; continue; }
+      if (c === '{') depth++;
+      else if (c === '}' && --depth === 0) { spans.push(s.slice(i, j + 1)); i = j; break; }
+    }
+  }
+  for (let k = spans.length - 1; k >= 0; k--) {
+    try {
+      const o = JSON.parse(spans[k]);
+      if (o && typeof o === 'object' && !Array.isArray(o) && requiredKeys.every(key => key in o)) return o;
+    } catch { /* not this one */ }
+  }
+  return null;
+}
+
+/**
+ * A verdict field, read strictly but not pedantically. Models sometimes emit
+ * "true" rather than true; that is clearly an answer and should not be thrown
+ * away. Anything else — missing, null, "maybe" — is null, and the callers treat
+ * null as "not proven", never as a decision.
+ */
+export function boolish(v) {
+  if (v === true || v === 'true' || v === 'yes') return true;
+  if (v === false || v === 'false' || v === 'no') return false;
+  return null;
+}
+
 /** Worst-first, so a briefing leads with what matters. */
 export const severityRank = (s) => {
   const i = SEVERITIES.indexOf(s);

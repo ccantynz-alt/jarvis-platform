@@ -28,6 +28,28 @@
  * @param {boolean} [opts.allowZero]  accept 0 (e.g. "disabled"); default false
  * @returns {number} always finite
  */
+/**
+ * A row limit from an untrusted query param.
+ *
+ * Same family as guardrail() — a numeric bound that must not fail open — but the
+ * input is a request rather than the environment, and the failure is sharper:
+ * `Math.min(parseInt(raw, 10) || 50, 500)` clamps the TOP and not the bottom, so
+ * `?limit=-1` yields -1, and **SQLite documents a negative LIMIT as "no upper
+ * bound on the number of rows returned"**. One query param and a paged endpoint
+ * dumps the whole table. That pattern was live on five endpoints across
+ * memory-server and the orchestrator until 2026-07-30 (found by the code-health
+ * spine, input-trust lens).
+ *
+ * @param {*} raw          req.query.limit, or anything
+ * @param {number} dflt    used when absent or unparseable
+ * @param {number} max     hard ceiling
+ */
+export function clampLimit(raw, dflt = 50, max = 500) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 1) return dflt;
+  return Math.min(n, max);
+}
+
 export function guardrail(name, fallback, { source = 'guardrail', allowZero = false } = {}) {
   const raw = process.env[name];
   // Take the leading token: "6 # per day" → "6". Whitespace or a # ends it.

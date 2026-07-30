@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import express from 'express';
 import { writeFileSync, mkdirSync } from 'fs';
+import { clampLimit } from './lib/guardrail.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
@@ -374,7 +375,7 @@ app.post('/memory/notifications', (req, res) => {
 
 // GET /memory/notifications?unread=1&limit=50
 app.get('/memory/notifications', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  const limit = clampLimit(req.query.limit, 50, 200);
   const rows = req.query.unread
     ? db.prepare('SELECT * FROM notifications WHERE read_at IS NULL ORDER BY id DESC LIMIT ?').all(limit)
     : db.prepare('SELECT * FROM notifications ORDER BY id DESC LIMIT ?').all(limit);
@@ -467,7 +468,7 @@ app.get('/memory/jobs/counts', (req, res) => {
 
 // GET /memory/jobs?status=&agent=&platform=&limit=
 app.get('/memory/jobs', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const limit = clampLimit(req.query.limit, 50, 500);
   const where = [];
   const vals = [];
   for (const f of ['status', 'agent', 'platform', 'executor']) {
@@ -531,7 +532,7 @@ app.post('/memory/agent-report', (req, res) => {
 
 // GET /memory/agent-reports?agent=&status=&since=&unrouted=1&limit=
 app.get('/memory/agent-reports', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const limit = clampLimit(req.query.limit, 50, 500);
   const where = [];
   const vals = [];
   if (req.query.agent)  { where.push('agent = ?');  vals.push(req.query.agent); }
@@ -618,7 +619,7 @@ app.post('/memory/findings', (req, res) => {
 
 // GET /memory/findings?platform=&status=&severity=&kind=&limit=
 app.get('/memory/findings', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const limit = clampLimit(req.query.limit, 50, 500);
   const where = [];
   const vals = [];
   for (const col of ['platform', 'status', 'severity', 'kind']) {
