@@ -553,6 +553,37 @@ app.post('/memory/agent-reports/:id/routed', (req, res) => {
   res.json({ ok: true, marked: r.changes });
 });
 
+/**
+ * POST /memory/kv/incr — { key, by } → { value }
+ *
+ * An ATOMIC counter, because a read-modify-write across the network is not one
+ * (2026-07-30, found by the code-health spine's concurrency lens on the
+ * ElevenLabs budget). lib/tts.js read the day's spend, made a multi-second TTS
+ * call, then POSTed `snapshot + chars` — so three clients fetching /tts for the
+ * same alert all read 1000 and all wrote 1000+N, recording ONE utterance instead
+ * of three. A spend cap that under-counts is not a cap.
+ *
+ * Safe here and nowhere else: this process is single-threaded and better-sqlite3
+ * is synchronous, so the read and the write inside this handler cannot interleave
+ * with another request. Any caller doing the same arithmetic in its own process
+ * has the race by construction.
+ */
+app.post('/memory/kv/incr', (req, res) => {
+  const { key, by } = req.body || {};
+  if (!key) return res.status(400).json({ error: 'key required' });
+  const delta = Number(by);
+  if (!Number.isFinite(delta)) return res.status(400).json({ error: 'by must be a finite number' });
+
+  const row = db.prepare('SELECT value FROM agent_context WHERE key = ?').get(key);
+  const current = parseInt(row?.value, 10) || 0;
+  const next = current + delta;
+  db.prepare(`
+    INSERT INTO agent_context (key, value, updated_at) VALUES (?, ?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+  `).run(key, String(next), new Date().toISOString());
+  res.json({ key, value: next, previous: current });
+});
+
 // ── code_findings API (the code-health spine, src/code-health.js) ───────────
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low'];

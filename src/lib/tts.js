@@ -38,12 +38,27 @@ export function ttsEnabled() {
 // ── Daily character budget (durable in memory KV, survives restarts) ────────
 // Exported 2026-07-25 so lib/tts-stream.js (Voice v2) draws on the SAME
 // daily budget — streamed chars and fetched chars spend from one pool.
+/**
+ * The day's spend so far. Fails OPEN (0) when memory is unreachable, which is
+ * deliberate for a VOICE assistant — going mute because a counter is unavailable
+ * is worse than overspending for a few minutes — but it is now LOUD about it,
+ * once a minute at most. Silence was the part worth fixing: an unreachable
+ * memory-server looked exactly like "nothing spent today".
+ */
+let budgetReadFailedAt = 0;
 export async function budgetSpent(day) {
   try {
     const r = await fetch(`${MEMORY}/memory/kv/tts-budget-${day}`);
+    if (!r.ok && r.status !== 404) throw new Error(`memory KV returned ${r.status}`);
     const j = await r.json();
     return parseInt(j?.value, 10) || 0;
-  } catch { return 0; }
+  } catch (e) {
+    if (Date.now() - budgetReadFailedAt > 60_000) {
+      budgetReadFailedAt = Date.now();
+      console.warn(`[tts] cannot read today's character budget (${e.message}) — treating as 0, so the daily cap is NOT enforced until memory returns`);
+    }
+    return 0;
+  }
 }
 // Once per day, not per utterance — a budget that is already spent would
 // otherwise fire on every single reply.
@@ -61,11 +76,26 @@ function announceBudget(day, spent) {
   }).catch(() => {});
 }
 
-export async function budgetAdd(day, chars, prev) {
+/**
+ * Add to the day's spend ATOMICALLY.
+ *
+ * The `prev` argument is gone on purpose (2026-07-30, found by the code-health
+ * spine). This used to POST the absolute value `prev + chars`, where `prev` was a
+ * snapshot taken BEFORE a multi-second ElevenLabs call — so concurrent speech
+ * lost updates: three clients fetching /tts for the same alert all read 1000 and
+ * all wrote 1000+N, recording one utterance instead of three. A spend cap that
+ * under-counts is not a cap.
+ *
+ * memory-server's /memory/kv/incr does the read and the write inside its own
+ * single-threaded process, where they cannot interleave. The signature keeps a
+ * trailing optional arg so an old three-argument call still works — it is simply
+ * ignored, rather than silently reintroducing the absolute write.
+ */
+export async function budgetAdd(day, chars, _ignoredPrev) {
   try {
-    await fetch(`${MEMORY}/memory/kv`, {
+    await fetch(`${MEMORY}/memory/kv/incr`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: `tts-budget-${day}`, value: String(prev + chars) }),
+      body: JSON.stringify({ key: `tts-budget-${day}`, by: chars }),
     });
   } catch { /* budget tracking is best-effort */ }
 }
