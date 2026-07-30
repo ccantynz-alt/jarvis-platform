@@ -242,3 +242,34 @@ test('boolish accepts what models actually emit, and nothing else', () => {
     assert.equal(boolish(v), null, `${JSON.stringify(v)} must be "not proven", never a decision`);
   }
 });
+
+// ── fingerprint() is called positionally, and misuse must not be silent ───────
+// 2026-07-31: a hand-written filing script called this with a single object
+// instead of its three positional arguments. platform stringified to
+// "[object Object]", filePath and title were undefined, and every finding filed
+// that way hashed to the SAME value — so two unrelated findings collided and a
+// row that was correctly `fixed` was flipped to `regressed`. memory-server now
+// computes the fingerprint itself rather than trusting the caller, which is the
+// real fix; these pin the behaviour that made the collision possible.
+
+test('an object passed where three arguments are expected collapses to one value', () => {
+  // Not a recommendation — a demonstration of why the server must not trust a
+  // caller-supplied fingerprint. Two entirely different findings, same hash.
+  const a = fingerprint({ platform: 'jarvis', file_path: 'src/pc-worker.js', title: 'one thing' });
+  const b = fingerprint({ platform: 'jarvis', file_path: 'src/metrics-collector.js', title: 'a completely different thing' });
+  assert.equal(a, b, 'this is the collision that actually happened');
+});
+
+test('called correctly, different files and titles give different fingerprints', () => {
+  const a = fingerprint('jarvis', 'src/pc-worker.js', 'one thing that is broken here');
+  const b = fingerprint('jarvis', 'src/metrics-collector.js', 'a completely different broken thing');
+  const c = fingerprint('jarvis', 'src/pc-worker.js', 'one thing that is broken here');
+  assert.notEqual(a, b);
+  assert.equal(a, c, 'and the same content is stable, which is what dedupe relies on');
+});
+
+test('platform is part of the identity, so two platforms can carry the same defect', () => {
+  const j = fingerprint('jarvis', 'src/app.js', 'swallowed error hides a failed write');
+  const v = fingerprint('voxlen', 'src/app.js', 'swallowed error hides a failed write');
+  assert.notEqual(j, v);
+});

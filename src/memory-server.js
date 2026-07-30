@@ -2,6 +2,9 @@ import Database from 'better-sqlite3';
 import express from 'express';
 import { writeFileSync, mkdirSync } from 'fs';
 import { clampLimit } from './lib/guardrail.js';
+// The one definition of a finding's identity, shared with code-health.js so the
+// producer and the store cannot disagree about what counts as the same defect.
+import { fingerprint } from './lib/findings.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
@@ -605,9 +608,32 @@ const FINDING_STATUSES = ['open', 'confirmed', 'dismissed', 'fixed', 'stale'];
  */
 app.post('/memory/findings', (req, res) => {
   const f = req.body || {};
-  if (!f.fingerprint || !f.platform || !f.title) {
-    return res.status(400).json({ error: 'fingerprint, platform and title required' });
+  if (!f.platform || !f.title) {
+    return res.status(400).json({ error: 'platform and title required' });
   }
+  // The SERVER computes the fingerprint (2026-07-31). It used to trust whatever
+  // the caller sent, and the fingerprint is the identity of a row — it decides
+  // whether a report is a new defect, a duplicate, or a REGRESSION of something
+  // already fixed. Trusting a caller's value put the most consequential field in
+  // this table outside the table's control.
+  //
+  // It bit immediately. `fingerprint()` takes three positional arguments
+  // (platform, filePath, title); a hand-written filing script of mine called it
+  // with a single object, so platform stringified to "[object Object]", the other
+  // two were undefined, and EVERY finding filed that way hashed to the same
+  // value. Two unrelated findings collided: the second was read as the first
+  // reappearing, and a row that was correctly `fixed` was flipped to `regressed`
+  // — which is the single most valuable signal this table carries, so corrupting
+  // it is worse than dropping the write. Nothing rejected the obviously-wrong
+  // `sha1("[object object]:(unknown):")` because nothing was checking.
+  //
+  // A caller may still send one; it is compared, not obeyed, and a mismatch is
+  // logged loudly rather than silently honoured.
+  const computed = fingerprint(f.platform, f.file_path, f.title);
+  if (f.fingerprint && f.fingerprint !== computed) {
+    console.warn(`[memory] findings: caller sent fingerprint ${f.fingerprint} but the content hashes to ${computed} — using the computed one (${f.platform} ${f.file_path || '?'})`);
+  }
+  f.fingerprint = computed;
   const severity = SEVERITIES.includes(f.severity) ? f.severity : 'medium';
   const now = new Date().toISOString();
   const existing = db.prepare('SELECT * FROM code_findings WHERE fingerprint = ?').get(f.fingerprint);
