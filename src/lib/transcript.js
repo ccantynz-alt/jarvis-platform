@@ -144,6 +144,39 @@ recovery.unref?.();
 const sameMsg = (a, b) => !!a && !!b && a.role === b.role && a.content === b.content;
 
 /**
+ * Which messages in `local` are ours-since-the-baseline?
+ *
+ * NOT a length comparison. runAgent bounds the array to 24 messages IN PLACE
+ * after pushing, so once the conversation reaches the cap — which it always does
+ * — appending two turns leaves the length unchanged. A length diff therefore sees
+ * "nothing new" forever and silently stops persisting every turn. That is exactly
+ * what happened when this merge first shipped: unit tests passed (short arrays,
+ * no trimming) and the live deck-then-gateway run showed both turns vanishing.
+ *
+ * The real relationship is `local === baseline.slice(k) + ourNew` for some k
+ * messages trimmed off the front, so find the smallest k whose remainder is a
+ * prefix of local. No match (the rollback path spliced the array) → nothing new,
+ * rather than a guess.
+ */
+export function newSince(local, base) {
+  if (!base.length) return local.slice();
+  // k stops BEFORE base.length on purpose: an empty tail matches anything, so
+  // allowing it would call the entire local array "new" whenever no real overlap
+  // exists — duplicating turns on the rollback path. No overlap means we cannot
+  // tell what is new, and the honest answer to that is "nothing".
+  for (let k = 0; k < base.length; k++) {
+    const tail = base.slice(k);
+    if (tail.length > local.length) continue;
+    let match = true;
+    for (let i = 0; i < tail.length; i++) {
+      if (!sameMsg(tail[i], local[i])) { match = false; break; }
+    }
+    if (match) return local.slice(tail.length);
+  }
+  return [];
+}
+
+/**
  * Fold our new turns onto whatever the store now holds.
  *
  * Skips a turn that already sits at the tail of the stored array, so a partially
@@ -182,7 +215,7 @@ export function saveTranscript() {
     // Only what WE added since the last successful save may be appended. If the
     // local array is shorter than the baseline (the brain-failure rollback path
     // splices it), we add nothing rather than trying to be clever.
-    const ourNew = transcript.length > baseline.length ? transcript.slice(baseline.length) : [];
+    const ourNew = newSince(transcript, baseline);
 
     let stored;
     try {

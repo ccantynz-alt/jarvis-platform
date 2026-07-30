@@ -292,3 +292,40 @@ test('mergeTail keeps the conversation bounded', () => {
   assert.equal(merged.at(-1).content, 'new');
   assert.equal(merged[0].content, 'old1', 'the oldest turn is the one dropped');
 });
+
+// ── The regression the live run caught (2026-07-30) ──────────────────────────
+// The first cut of the merge diffed by LENGTH. runAgent bounds the array to 24
+// in place after pushing, so at the cap — where a real conversation always is —
+// appending two turns leaves the length unchanged, "nothing new" is inferred, and
+// every turn stops being persisted. The unit tests passed (short arrays, no
+// trimming); the live deck-then-gateway run showed both markers vanishing.
+
+import { newSince } from '../src/lib/transcript.js';
+
+test('new turns are found even when the array was trimmed to the cap', () => {
+  const base = Array.from({ length: 24 }, (_, i) => msg('user', `m${i}`));
+  // What runAgent leaves behind: push two, then splice the two oldest away.
+  const local = [...base.slice(2), msg('user', 'fresh-q'), msg('assistant', 'fresh-a')];
+  assert.equal(local.length, base.length, 'the length is identical — this is the trap');
+  assert.deepEqual(newSince(local, base).map(m => m.content), ['fresh-q', 'fresh-a']);
+});
+
+test('plain growth is found too', () => {
+  const base = [msg('user', 'a')];
+  const local = [msg('user', 'a'), msg('assistant', 'b')];
+  assert.deepEqual(newSince(local, base).map(m => m.content), ['b']);
+});
+
+test('everything is new when the baseline is empty', () => {
+  assert.deepEqual(newSince([msg('user', 'a')], []).map(m => m.content), ['a']);
+});
+
+test('a spliced-away turn (brain rollback) adds nothing', () => {
+  const base = [msg('user', 'a'), msg('assistant', 'b')];
+  assert.deepEqual(newSince([msg('user', 'a')], base), []);
+});
+
+test('an unrelated array adds nothing rather than guessing', () => {
+  const base = [msg('user', 'a'), msg('assistant', 'b')];
+  assert.deepEqual(newSince([msg('user', 'totally'), msg('user', 'different')], base), []);
+});
