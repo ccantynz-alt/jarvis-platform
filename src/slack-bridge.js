@@ -620,6 +620,59 @@ async function handleUnclear(rawText, channel) {
  * Intent resolution + handlers come from lib/conversation.js; this wrapper
  * only maps {text} results (and interim onEvent messages) to Slack posts.
  */
+// ── Who is allowed to command Jarvis from Slack (2026-07-30) ────────────────
+//
+// Until now: NOBODY was checked. The two entry points below tested only
+// `bot_id` and `subtype`, so ANY member of the workspace — including via a DM to
+// the bot — could send one message and have it routed. And the Slack dispatch
+// path has no confirmation gate at all (unlike the deck and the gateway, which
+// require a yes in a LATER turn): handleDispatch POSTs straight to
+// /dispatch, which spawns a full-permission agent as root. One message. Also
+// reachable: `mute all`, which silences every alert Jarvis can raise.
+//
+// It was not exploitable before today only by accident — every message threw
+// ReferenceError on an undeclared `ms` before reaching the switch (see line ~644).
+// Fixing that this morning turned a dead path into a live one, which is exactly
+// the sort of thing worth saying out loud rather than quietly patching.
+//
+// FAIL CLOSED: with no allowlist configured, nothing is executed. Craig has not
+// sent a Slack command in 22 days, so the safe default costs nothing and the
+// unsafe default costs the fleet. Every rejection is logged, and the first time
+// each unknown sender appears it is announced — so he can read his own Slack user
+// id out of the inbox and allowlist himself.
+// The decision itself lives in lib/slack-auth.js so it can be tested — this file
+// starts a Bolt listener at module scope and cannot be imported by a test.
+const ALLOWED_SLACK_USERS = parseAllowlist(process.env.SLACK_ALLOWED_USERS);
+const announcedSenders = new Set();
+const checkSender = (userId) => senderAllowed(userId, ALLOWED_SLACK_USERS);
+
+/** Log, and announce an unfamiliar sender ONCE so the id is discoverable. */
+async function rejectSender(userId, reason, text) {
+  console.warn(`[slack] REFUSED command from ${userId || '(no user id)'} (${reason}): "${String(text).slice(0, 60)}"`);
+  const key = `${userId || 'unknown'}:${reason}`;
+  if (announcedSenders.has(key)) return;
+  announcedSenders.add(key);
+  const { notify } = await import('./lib/notify.js').catch(() => ({ notify: null }));
+  if (!notify) return;
+  await notify({
+    source: 'slack-bridge',
+    level: 'warn',
+    title: reason === 'no-allowlist'
+      ? 'Slack command refused — no SLACK_ALLOWED_USERS configured'
+      : `Slack command refused from an unrecognised user (${userId})`,
+    body: reason === 'no-allowlist'
+      ? `A Slack message tried to command Jarvis and was refused because SLACK_ALLOWED_USERS is not set in ` +
+        `config/secrets.env. That is the safe default: the Slack path dispatches full-permission agents with no ` +
+        `confirmation step. The sender's user id was ${userId || '(unknown)'} — add it to SLACK_ALLOWED_USERS if ` +
+        `that is you. Message began: "${String(text).slice(0, 80)}"`
+      : `Slack user ${userId} sent "${String(text).slice(0, 80)}" and was refused — they are not in ` +
+        `SLACK_ALLOWED_USERS. Add them if that is intended.`,
+    speech: reason === 'no-allowlist'
+      ? 'Sir, a Slack message tried to command me and I refused it — no allowed-users list is configured.'
+      : 'Sir, an unrecognised Slack user tried to command me. I refused it.',
+  }).catch(() => {});
+}
+
 async function handleCommand(rawText, channel) {
   const t0 = Date.now();
   let intent = detectIntent(rawText, platformNames());
@@ -678,6 +731,10 @@ if (SLACK_APP_TOKEN && SLACK_BOT_TOKEN) {
     const text = ((message.text) || '').trim();
     if (!text) return;
     console.log(`[bolt] #${message.channel} "${text.slice(0, 80)}"`);
+    // Identity BEFORE intent. The Slack path dispatches root agents with no
+    // confirmation turn, so this is the only thing standing in front of it.
+    const who = checkSender(message.user);
+    if (!who.ok) return void rejectSender(message.user, who.reason, text);
     // Fire-and-forget — Socket Mode acks first, then we do slow work
     handleCommand(text, message.channel).catch(e =>
       console.error('[bolt] handleCommand error:', e.message),
@@ -860,6 +917,11 @@ app.post('/slack/events', async (req, res) => {
   if (!event || event.bot_id || event.type !== 'message') return;
   const text = (event.text || '').trim();
   if (!text) return;
+
+  // Same gate as the Socket Mode path — this endpoint is mostly unused, but
+  // "mostly" is not a security property.
+  const who = checkSender(event.user);
+  if (!who.ok) return void rejectSender(event.user, who.reason, text);
 
   handleCommand(text, event.channel).catch(e =>
     console.error('[slack] HTTP event handler error:', e.message),
