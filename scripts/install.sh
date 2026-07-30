@@ -89,28 +89,79 @@ if [ ! -f "$JARVIS_DIR/config/secrets.env" ]; then
 fi
 chmod 600 $JARVIS_DIR/config/secrets.env
 
-# Write detected chromium bin to secrets
-if ! grep -q "^CHROMIUM_BIN=" $JARVIS_DIR/config/secrets.env; then
+# Write detected chromium bin to secrets.
+#
+# This used to be `if ! grep -q "^CHROMIUM_BIN="` then append — but the template
+# it copies a few lines above ALREADY contains `CHROMIUM_BIN=chromium-browser`,
+# so the guard always matched and the path this script worked to detect was never
+# recorded. Replace the line instead, and only leave a hand-edited value alone.
+if grep -q "^CHROMIUM_BIN=chromium-browser$" $JARVIS_DIR/config/secrets.env; then
+  sed -i "s|^CHROMIUM_BIN=chromium-browser$|CHROMIUM_BIN=$CHROMIUM_BIN|" $JARVIS_DIR/config/secrets.env
+  echo "Recorded detected CHROMIUM_BIN=$CHROMIUM_BIN"
+elif ! grep -q "^CHROMIUM_BIN=" $JARVIS_DIR/config/secrets.env; then
   echo "CHROMIUM_BIN=$CHROMIUM_BIN" >> $JARVIS_DIR/config/secrets.env
+  echo "Recorded detected CHROMIUM_BIN=$CHROMIUM_BIN"
+else
+  echo "Keeping existing CHROMIUM_BIN=$(grep -m1 '^CHROMIUM_BIN=' $JARVIS_DIR/config/secrets.env | cut -d= -f2)"
 fi
 
 # --- 8. Install systemd services ---
 echo ""
 echo "[7/9] Installing systemd services..."
-for service in jarvis-memory jarvis-screenshot jarvis-metrics jarvis-slack jarvis-audit; do
-  cp $JARVIS_DIR/systemd/${service}.service /etc/systemd/system/
-  echo "Installed: ${service}.service"
+
+# Install everything in systemd/, not a hardcoded list.
+#
+# This used to name five services — the five that existed when it was written —
+# and no timers at all, then print "installed and started ✓". A rebuild from this
+# script produced a box with no orchestrator, gateway, deck, agent scheduler,
+# dashboard, deploy-gate, browser, self-heal or code-health, and none of the five
+# timers (fleet-check, self-heal, code-health and both backups), while reporting
+# success. That is the worst possible moment for a false success: you run this
+# when the box is gone.
+units=0
+for unit in $JARVIS_DIR/systemd/jarvis-*.service $JARVIS_DIR/systemd/jarvis-*.timer; do
+  [ -f "$unit" ] || continue
+  cp "$unit" /etc/systemd/system/
+  echo "Installed: $(basename "$unit")"
+  units=$((units + 1))
+done
+
+# Drop-ins carry the real memory limits (see systemd/dropins/README.md) and are
+# what systemd actually enforces — installing units without them silently
+# reverts two weeks of tuning.
+dropins=0
+for d in $JARVIS_DIR/systemd/dropins/jarvis-*.service.d; do
+  [ -d "$d" ] || continue
+  cp -r "$d" /etc/systemd/system/
+  dropins=$((dropins + 1))
 done
 
 systemctl daemon-reload
 
-for service in jarvis-memory jarvis-screenshot jarvis-metrics jarvis-slack jarvis-audit; do
-  systemctl enable $service
-  systemctl restart $service
+# Timers get enabled and started; services get enabled and started; a unit that
+# fails to come up is named rather than passed over in silence.
+failed=""
+for unit in $JARVIS_DIR/systemd/jarvis-*.service $JARVIS_DIR/systemd/jarvis-*.timer; do
+  [ -f "$unit" ] || continue
+  name=$(basename "$unit")
+  case "$name" in
+    # oneshots are driven by their timers, never started directly here
+    jarvis-fleet-check.service|jarvis-self-heal.service|jarvis-code-health.service|jarvis-backup.service|jarvis-vapron-backup.service)
+      systemctl enable "$name" >/dev/null 2>&1
+      continue
+      ;;
+  esac
+  systemctl enable "$name" >/dev/null 2>&1
+  systemctl restart "$name" || failed="$failed $name"
   sleep 1
 done
 
-echo "Systemd services installed and started ✓"
+echo "Installed $units unit(s) and $dropins drop-in dir(s)."
+if [ -n "$failed" ]; then
+  echo "⚠️  FAILED to start:$failed — check journalctl -u <name> -n 50"
+else
+  echo "Systemd units installed and started ✓"
+fi
 
 # --- 9. Verify ---
 echo ""

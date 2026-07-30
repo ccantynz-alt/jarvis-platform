@@ -48,8 +48,14 @@ for the reasoning.
   curl -sf -m 10 http://66.42.121.161:9212/health | grep -q '"status":"ok"' \
     || curl -s -m 10 -X POST -H "Content-Type: text/plain" \
        -d "Jarvis box unreachable: :9212/health check failed at $(date -u +%FT%TZ)" \
-       https://ntfy.sh/jarvis-watchdog-894aba5ccdd6
+       https://ntfy.sh/$NTFY_TOPIC
   ```
+  Substitute the real topic when creating the routine — an ntfy topic is a
+  bearer capability (anyone holding it can read every alert Jarvis sends and
+  publish fake ones), and this repository is public. A real-looking topic string
+  was written out in full here on 2026-07-30 and redacted the same day; it was
+  never the live topic (checked against `secrets.env`), but do not repeat the
+  pattern. Read the live value with the command in docs/ALERTS.md.
   The prompt explicitly forbids the agent from reading files, using git, or
   making a second tool call. No git clone of this repo is needed for the
   routine to function (a `sources` entry is still attached for consistency

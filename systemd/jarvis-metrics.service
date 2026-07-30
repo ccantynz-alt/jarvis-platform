@@ -6,6 +6,15 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/jarvis
+# Without this, metrics-collector.js runs with none of secrets.env in its
+# environment (2026-07-30, found by the code-health spine's config/deploy lens —
+# it was the ONLY notify() caller of the eight whose unit had no EnvironmentFile).
+# notify()'s inbox, gateway and deck steps are loopback HTTP and worked fine, so
+# nothing looked broken; the DEVICE PUSH step reads NTFY_TOPIC from the process
+# environment and silently sent nothing. The two alerts that lose the most by
+# that are this service's own: the pre-OOM guard and the dead-service watcher —
+# exactly the alerts that matter when Craig has nothing open to look at.
+EnvironmentFile=/opt/jarvis/config/secrets.env
 ExecStart=/usr/bin/node src/metrics-collector.js
 Restart=always
 RestartSec=5
