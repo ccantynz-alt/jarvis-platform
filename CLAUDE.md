@@ -46,8 +46,10 @@ Notes:
 | jarvis-deck | src/deck-server.js | 9210 | loopback, exposed ONLY via `tailscale serve --https=8444` | **Command Deck v2.2** (2026-07-16, from Craig's Claude Design handoff) — public/command-deck.html: full-screen **CORE** 3D neural-core brain (default) + HUD/Hierarchy/Message Flow/Platforms tabs; PWA (deck.webmanifest + /icons/deck-*.png, source deck-icon.html); briefing panel (`{type:'briefing'}`); raw WS `/jarvis` = handoff contract v1.0 + `chat_chunk`/`notify`/`org`/`briefing`. All numbers real. Commands → the three-provider lib/agent.js brain with intent fallback; conversation in memory KV `deck-conversation`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs via src/lib/tts.js (cache + daily budget + `TTS_DISABLED`), speechSynthesis fallback. QA hooks `?demo-alert=1`/`?demo-briefing=1` (:9201 virtual-time captures can't see live WS pushes); `?view=hud\|org\|flow\|plat` deep-links a tab for screenshots (Hierarchy tab is `org`) — the org tier now renders real agent-org data, see jarvis-agents row. Evidence: docs/DECK-AUDIT-2026-07-16.md. Token = deck/gateway token or gateway cookie. |
 | jarvis-browser | src/browser-service.js | 9211 | loopback | SSRF-guarded web search, fetch, and Chromium render bridge for the brain |
 
-**Three periodic on-box scripts, NOT persistent daemons (documented 2026-07-24,
-found late — see Rule 0 note below):**
+**FIVE periodic timers, NOT persistent daemons (documented 2026-07-24, found
+late — see Rule 0 note below; corrected from "three" on 2026-07-30 when
+`systemctl list-timers "jarvis-*"` turned out to list two more than this file
+did). Trust that command, not this list:**
 - **`scripts/fleet-check.sh`** — `jarvis-fleet-check.timer`, every 10 min.
   Cheap HTTP status probe of every platform's public URL, writes
   `status`/`health_score` to `platform_state` via `/memory/platform/update`.
@@ -124,6 +126,28 @@ found late — see Rule 0 note below):**
   real finding there may already be fixed upstream. Spec:
   **docs/CODE-HEALTH.md**; pure logic + tests: `src/lib/findings.js`,
   `test/findings.test.js`.
+- **`scripts/backup-memory.sh`** — `jarvis-backup.timer`, daily 03:30 UTC.
+  SQLite memory-store backup (the "no DB backups" debt cleared 2026-07-06).
+- **`scripts/pull-vapron-backup.sh`** — `jarvis-vapron-backup.timer`, daily
+  04:17 UTC. Pulls and verifies an off-box copy of box 158's Vapron database
+  onto this box. **Rule 0 note (2026-07-30):** the script was committed but
+  BOTH its units existed only in `/etc/systemd/system` — enabled, active, and
+  running daily — for the third occurrence of exactly the gap already recorded
+  for `jarvis-browser.service` and `jarvis-self-heal.service`. Now in
+  `systemd/`. When you write a unit during an incident, copy it back the same
+  hour or nobody will know it exists.
+
+**The unit files in `systemd/` were not the deployed config either** (found
+2026-07-30 by the code-health spine's config/deploy lens). Eleven drop-in
+directories under `/etc/systemd/system/jarvis-*.service.d/` overrode
+`MemoryMax` on ten services, so reading a unit gave you a limit that had not
+applied since 17 July — the orchestrator's real ceiling was 3G, not the 2048M
+the unit claimed; the dashboard's was 256M, not 512M. The drop-ins are now in
+`systemd/dropins/` and the units carry matching numbers, but **a drop-in still
+wins**: verify with `systemctl show <svc> -p MemoryMax`, never by reading a
+unit. See `systemd/dropins/README.md`, which also documents three
+`codex-env.conf` drop-ins setting `CODEX_MODEL`/`CODEX_EFFORT` — variables that
+appear nowhere in this repo and are awaiting Craig's decision to delete.
 
 Health paths are namespaced for memory (`/memory/health`), screenshot
 (`/screenshot/health`), metrics (`/metrics/health`), deploy-gate

@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily off-box backup of the vapron database (pulled to box 161)
+
+[Timer]
+OnCalendar=*-*-* 04:17:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

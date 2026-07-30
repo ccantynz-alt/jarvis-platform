@@ -22,7 +22,10 @@ EnvironmentFile=/opt/jarvis/config/secrets.env
 # concurrency — if legitimate job runs start getting OOM-killed, raise
 # this rather than removing it (removing it defeats the whole point:
 # unbounded spawn concurrency taking down co-tenants, Rule 4).
-MemoryMax=2048M
+# Kept in step with systemd/dropins/jarvis-orchestrator.service.d/50-memory.conf (2026-07-30),
+# which is what systemd actually enforces on the box. Change both, or neither.
+MemoryMax=3G
+MemorySwapMax=256M
 CPUQuota=300%
 
 [Install]

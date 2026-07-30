@@ -15,7 +15,11 @@ Environment=NODE_ENV=production
 EnvironmentFile=/opt/jarvis/config/secrets.env
 
 # Rule 4 safety net (2026-07-20) — see jarvis-memory.service for rationale.
-MemoryMax=512M
+# Kept in step with systemd/dropins/jarvis-dashboard.service.d/50-memory.conf (2026-07-30),
+# which is what systemd actually enforces on the box. Change both, or neither.
+MemoryMax=256M
+MemoryHigh=200M
+MemorySwapMax=256M
 CPUQuota=100%
 
 [Install]

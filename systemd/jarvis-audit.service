@@ -17,7 +17,10 @@ EnvironmentFile=/opt/jarvis/config/secrets.env
 # Rule 4 safety net (2026-07-20) — audit runs build/test loops, give it a
 # bit more headroom than a pure API service. See jarvis-memory.service for
 # the general rationale.
-MemoryMax=1024M
+# Kept in step with systemd/dropins/jarvis-audit.service.d/50-memory.conf (2026-07-30),
+# which is what systemd actually enforces on the box. Change both, or neither.
+MemoryMax=1536M
+MemorySwapMax=256M
 CPUQuota=150%
 
 [Install]

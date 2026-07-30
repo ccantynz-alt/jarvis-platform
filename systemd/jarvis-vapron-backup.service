@@ -1,0 +1,9 @@
+[Unit]
+Description=Jarvis — pull + verify off-box backup of box 158 vapron DB
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/jarvis/scripts/pull-vapron-backup.sh
+TimeoutStartSec=600

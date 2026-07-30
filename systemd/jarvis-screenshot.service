@@ -18,7 +18,10 @@ EnvironmentFile=/opt/jarvis/config/secrets.env
 # capture; headless Chromium is memory-hungry, so this gets more headroom
 # than a pure API service. See jarvis-memory.service for the general
 # rationale.
+# Kept in step with systemd/dropins/jarvis-screenshot.service.d/50-memory.conf (2026-07-30),
+# which is what systemd actually enforces on the box. Change both, or neither.
 MemoryMax=1536M
+MemorySwapMax=256M
 CPUQuota=200%
 
 [Install]

@@ -18,7 +18,11 @@ Environment=NODE_ENV=production
 # runaway service can't OOM the box and starve AlecRae/Gluecron/GateTest.
 # Tune up via `systemctl status jarvis-memory` / journalctl if this ever
 # gets OOM-killed under legitimate load.
-MemoryMax=512M
+# Kept in step with systemd/dropins/jarvis-memory.service.d/50-memory.conf (2026-07-30),
+# which is what systemd actually enforces on the box. Change both, or neither.
+MemoryMax=384M
+MemoryHigh=320M
+MemorySwapMax=256M
 CPUQuota=100%
 
 [Install]
