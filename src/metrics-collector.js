@@ -239,7 +239,8 @@ function watchOwnServices(jarvis) {
     if (verdict === 'restarting') continue;
     downStreaks[name] = down ? (downStreaks[name] || 0) + 1 : 0;
 
-    const streakMet = policy.immediate || downStreaks[name] >= SERVICE_DOWN_CHECKS;
+    // Patience per verdict, not one global threshold — see VERDICT_POLICY.
+    const streakMet = downStreaks[name] >= (policy.minChecks ?? SERVICE_DOWN_CHECKS);
     if (down && policy.alert && streakMet && !downAlerted.has(name)) {
       downAlerted.add(name);
       const secs = Math.round(downStreaks[name] * GUARD_INTERVAL_MS / 1000);

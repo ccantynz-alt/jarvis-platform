@@ -56,11 +56,29 @@ export function serviceVerdict({ portDown, active = '', sub = '' }) {
   return 'notlistening';
 }
 
-/** How loudly each verdict deserves to be reported, and whether a streak is needed. */
+/**
+ * How loudly each verdict deserves to be reported, and how many consecutive failed
+ * probes it takes. `minChecks` rather than a boolean, because the right patience
+ * differs per verdict and the numbers are the whole point:
+ *
+ *   failed       1  — systemd has given up. Waiting to confirm wastes outage time.
+ *   notlistening 2  — ~60s. A live process that stopped serving; one missed probe
+ *                     on an otherwise-healthy unit is not enough to go on.
+ *   stopped      4  — ~2 minutes, and this number is the actual fix for the 09:03
+ *                     alert. That was NOT a `systemctl restart` (which completes in
+ *                     under a second and never gets sampled); the journal shows a
+ *                     stop at 09:02:32 and a separate start at 09:03:22, so systemd
+ *                     read `inactive/dead` for fifty seconds — verdict `stopped`,
+ *                     not `restarting`. Classifying it correctly was not enough on
+ *                     its own: `warn` is at PUSH_MIN_LEVEL, so his phone would still
+ *                     have buzzed. A deploy gap of under two minutes now passes in
+ *                     silence, while a service left stopped and forgotten still
+ *                     reports itself.
+ */
 export const VERDICT_POLICY = {
-  ok:           { alert: false },
-  restarting:   { alert: false },                      // no strike, no noise
-  failed:       { alert: true, level: 'alert', immediate: true },
-  stopped:      { alert: true, level: 'warn',  immediate: true },
-  notlistening: { alert: true, level: 'alert', immediate: false },  // needs the streak
+  ok:           { alert: false, minChecks: 0 },
+  restarting:   { alert: false, minChecks: 0 },   // no strike accumulated at all
+  failed:       { alert: true, level: 'alert', minChecks: 1 },
+  notlistening: { alert: true, level: 'alert', minChecks: 2 },
+  stopped:      { alert: true, level: 'warn',  minChecks: 4 },
 };

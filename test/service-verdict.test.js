@@ -28,7 +28,7 @@ test('a restart in progress is not a fault — the 09:03 case', () => {
 test('a failed unit alerts immediately, without waiting out a streak', () => {
   assert.equal(serviceVerdict({ portDown: true, active: 'failed', sub: 'failed' }), 'failed');
   assert.equal(VERDICT_POLICY.failed.alert, true);
-  assert.equal(VERDICT_POLICY.failed.immediate, true, 'systemd has already given up — waiting 60s proves nothing');
+  assert.equal(VERDICT_POLICY.failed.minChecks, 1, 'systemd has already given up — waiting 60s proves nothing');
   assert.equal(VERDICT_POLICY.failed.level, 'alert');
 });
 
@@ -42,7 +42,7 @@ test('running-but-not-serving is the dangerous case, and still needs the streak'
   // A live process that has stopped answering. Ambiguous enough that one missed
   // probe should not fire, which is exactly what the streak is for.
   assert.equal(serviceVerdict({ portDown: true, active: 'active', sub: 'running' }), 'notlistening');
-  assert.equal(VERDICT_POLICY.notlistening.immediate, false);
+  assert.equal(VERDICT_POLICY.notlistening.minChecks, 2, 'one missed probe is not enough to go on');
   assert.equal(VERDICT_POLICY.notlistening.level, 'alert');
 });
 
@@ -66,4 +66,28 @@ test('every verdict has a policy, so an unknown key can never be undefined', () 
   for (const v of ['ok', 'restarting', 'failed', 'stopped', 'notlistening']) {
     assert.ok(VERDICT_POLICY[v], `${v} needs a policy`);
   }
+});
+
+test('the 09:03 event: a stop-then-start gap must pass in silence', () => {
+  // Reconstructed from the journal: `Stopped` at 09:02:32, `Started` at 09:03:22.
+  // That is NOT `systemctl restart` — it completes in under a second and is never
+  // sampled — so systemd read inactive/dead for fifty seconds.
+  const v = serviceVerdict({ portDown: true, active: 'inactive', sub: 'dead' });
+  assert.equal(v, 'stopped');
+
+  // Classifying it right was not enough on its own: warn is AT the push threshold,
+  // so his phone would still have buzzed. The patience is what fixes it.
+  const checksIn50s = Math.floor(50 / 30) + 1;      // probes land on 30s boundaries
+  assert.ok(checksIn50s < VERDICT_POLICY.stopped.minChecks,
+    `a 50s gap spans ~${checksIn50s} checks and must stay under the ${VERDICT_POLICY.stopped.minChecks} required`);
+
+  // But a service left stopped and forgotten still reports itself.
+  const checksIn5min = Math.floor(300 / 30);
+  assert.ok(checksIn5min >= VERDICT_POLICY.stopped.minChecks, 'five minutes stopped must still be reported');
+});
+
+test('a failed unit is never made to wait, however patient the others are', () => {
+  assert.equal(VERDICT_POLICY.failed.minChecks, 1);
+  assert.ok(VERDICT_POLICY.failed.minChecks < VERDICT_POLICY.notlistening.minChecks);
+  assert.ok(VERDICT_POLICY.failed.minChecks < VERDICT_POLICY.stopped.minChecks);
 });
