@@ -139,7 +139,22 @@ const PLATFORM_CONFIG = {
   'screenshot-to-code': {
     path: process.env.SCREENSHOT_TO_CODE_PATH || '/opt/screenshot-to-code',
     urls: ['http://127.0.0.1:5173', 'http://127.0.0.1:7001'], // loopback-only per platforms.json, no public domain
-    buildCmd: 'docker compose build',
+    // buildCmd REMOVED 2026-07-30 — it was `docker compose build`, and it was
+    // costing about 5.3GB a night on a shared disk. Measured: the audit ran at
+    // 18:03 and `docker images` shows screenshot-to-code-backend:latest (2.84GB)
+    // and -frontend:latest (2.49GB) created "about an hour ago", plus the build
+    // cache that came with them. The box went 67% → 73% over the evening, and
+    // /var/lib is 64G of which Docker is nearly all.
+    //
+    // Rule 4 is the deciding argument: filling this disk takes down AlecRae,
+    // Gluecron and the Coolify stack along with Jarvis. Spending 5GB a night to
+    // confirm that a THIRD-PARTY FORK still builds — one flagged noAutoFix
+    // precisely because its findings are upstream's, and which the code-health
+    // spine already skips by default for the same reason — is not a trade worth
+    // making unasked.
+    //
+    // The URL + screenshot checks stay, so the platform is still watched. To
+    // restore the build, put the line back; nothing else changed.
     testCmd: null,
     checkCmd: null,
     noAutoFix: true
@@ -542,11 +557,18 @@ async function runAudit(platform) {
 
   const env = config.env || {};
 
-  // Step 1: Build
-  console.log(`[audit] ${platform}: running build...`);
-  report.build = runCmd(config.buildCmd, config.path, 180000, env);
-  const buildErrors = extractErrors(report.build.output);
-  report.errors.push(...buildErrors.map(e => `BUILD: ${e}`));
+  // Step 1: Build — guarded like the test step below (2026-07-30). This used to
+  // call runCmd(config.buildCmd, ...) unconditionally, so a platform configured
+  // without a build would have handed `undefined` to spawnSync with shell:true —
+  // running an empty command and scoring the result. Another invented number, in
+  // the same family as the /var/www findings; caught while removing
+  // screenshot-to-code's build rather than in production.
+  if (config.buildCmd) {
+    console.log(`[audit] ${platform}: running build...`);
+    report.build = runCmd(config.buildCmd, config.path, 180000, env);
+    const buildErrors = extractErrors(report.build.output);
+    report.errors.push(...buildErrors.map(e => `BUILD: ${e}`));
+  }
 
   // Step 2: Tests
   if (config.testCmd) {
@@ -587,7 +609,11 @@ async function runAudit(platform) {
     - (errorCount * 8)
     - (screenshotsFailed * 5)
     - (httpFailed.length * 40)          // a URL that will not answer outranks a build error
-    - (report.build.ok ? 0 : 20)
+    // `report.build && !ok` — a build that was never RUN must not be scored as a
+    // build that failed. Matches the tests line below, which already had this
+    // shape; without it, removing a platform's buildCmd would throw on null or
+    // silently dock 20 points for work nobody asked for.
+    - (report.build && !report.build.ok ? 20 : 0)
     - (report.tests && !report.tests.ok ? 10 : 0)
   );
   report.status = report.health_score > 80 ? 'healthy' : report.health_score > 50 ? 'warning' : 'critical';
