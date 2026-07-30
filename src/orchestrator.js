@@ -58,6 +58,9 @@ const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || 'claude-fable-5'
 const MAX_CONCURRENT_JOBS = guardrail('MAX_CONCURRENT_JOBS', 3, { source: 'orchestrator' });
 const SCHEDULER_TICK_MS = 4000;
 const CANARY_RETRY_MS = 30 * 60_000;
+// Grace past a job's OWN timeout before it is treated as a zombie. The worker is
+// already SIGKILLed by then; this margin only covers a slow final status write.
+const REAP_SLACK_MIN = guardrail('ORCH_REAP_SLACK_MIN', 10, { source: 'orchestrator' });
 // PC-worker lease: how long a claimed job is reserved before an unrenewed
 // lease is reaped back to queued (worker slept, lost network, or crashed).
 // The worker's heartbeat (POST /worker/heartbeat) renews it while a job runs.
@@ -421,6 +424,17 @@ async function schedulerTick() {
   if (tickInFlight) return;
   tickInFlight = true;
   try {
+    // REAPERS RUN FIRST (2026-07-30). They used to sit at the bottom of this
+    // function, below `if (!queued.length) return`, the slot check, and both
+    // gates — so a dead job was only ever noticed when there happened to be
+    // OTHER work queued, a free slot to run it in, and every gate open. An idle
+    // fleet is exactly when nothing else clears a zombie, and a zombie is
+    // expensive: self-heal and audit-runner both refuse to dispatch while a job
+    // for that platform looks in-flight, so one lost status write can stop a
+    // platform being repaired indefinitely, silently.
+    await reapExpiredPcLeases();
+    await reapOverdueRunningJobs();
+
     const queued = await dbGet('/memory/jobs?status=queued&limit=100');
     if (!queued.length) return;
 
@@ -479,7 +493,8 @@ async function schedulerTick() {
 
     // executor='pc' jobs are PULLED by the Windows worker via POST /worker/claim
     // (it may be asleep, offline, or mid-job) — the scheduler never starts them
-    // itself. reapExpiredPcLeases() below is their only path back to 'queued'.
+    // itself. reapExpiredPcLeases() (run at the TOP of this tick) is their only
+    // path back to 'queued'.
     const toStart = queued
       .filter(r => r.executor !== 'pc')
       .sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at))
@@ -495,11 +510,68 @@ async function schedulerTick() {
       executeJob({ ...row, attempts: row.attempts + 1 });  // async — not awaited
     }
 
-    await reapExpiredPcLeases();
   } catch (e) {
     console.error('[scheduler] tick error:', e.message);
   } finally {
     tickInFlight = false;
+  }
+}
+
+/**
+ * Reap a local/remote job that is still marked `running` long after its own
+ * worker must have died.
+ *
+ * The gap this closes (from the 2026-07-26 audit backlog): if jarvis-memory
+ * hiccups at the exact moment finishJob() writes the completion, the status
+ * update is lost and the row stays `running` FOREVER. recoverInterruptedJobs()
+ * doesn't help — it only runs at boot, and the orchestrator never restarted.
+ * Nothing else notices, and the consequences are quiet and serious:
+ *   - self-heal's anyJobInFlight() and audit-runner's hasJobInFlight() both see
+ *     a live job for that platform and refuse to dispatch, so the platform can
+ *     never be auto-repaired again;
+ *   - the concurrency slot is consumed permanently, shrinking MAX_CONCURRENT_JOBS
+ *     for the rest of the process's life.
+ *
+ * The rule is safe because spawnProcess GUARANTEES the worker is dead: it
+ * SIGTERMs at timeout_min and SIGKILLs 10s later. So once a job is past its own
+ * timeout plus a slack margin, either the status write was lost or the process
+ * vanished without settling. Either way there is nothing left to wait for.
+ *
+ * tryTransition(..., from: 'running') means a genuine late completion still wins
+ * the race — the reaper can never overwrite a real result.
+ */
+async function reapOverdueRunningJobs() {
+  let running;
+  try { running = await dbGet('/memory/jobs?status=running&limit=200'); }
+  catch { return; }
+  const now = Date.now();
+  for (const row of running) {
+    if (row.executor === 'pc') continue;        // reapExpiredPcLeases owns those
+    if (!row.started_at) continue;              // never actually started; boot recovery's problem
+    const limitMin = Number(row.timeout_min) > 0 ? Number(row.timeout_min) : 30;
+    const ranMin = Math.round((now - new Date(row.started_at).getTime()) / 60_000);
+    const overdueMin = ranMin - limitMin;
+    if (!Number.isFinite(overdueMin) || overdueMin < REAP_SLACK_MIN) continue;
+
+    const ok = await tryTransition(row.id, 'failed', 'reaped: overdue, no completion ever recorded', {
+      finished_at: new Date().toISOString(),
+      error: `Reaped after ${ranMin} min. The worker is killed at ${limitMin} min, so ${overdueMin} min past ` +
+        `that its process is certainly gone and no completion was ever written — most likely a lost status ` +
+        `update (memory-server hiccup) or a process that died without settling.`,
+    }, 'running');
+    if (!ok) continue;                          // a real completion landed first
+
+    logEvent('WARN', `Reaped zombie job ${row.id.slice(0, 8)} on ${row.platform} — ${overdueMin}m past its ${limitMin}m timeout`);
+    console.warn(`[orchestrator] reaped zombie job ${row.id} (${row.platform}) — ${overdueMin}m overdue`);
+    notify({
+      source: 'orchestrator',
+      level: 'warn',
+      title: `Reaped a stuck job on ${row.platform}`,
+      body: `Job ${row.id.slice(0, 8)} sat "running" ${overdueMin} min past its ${limitMin} min timeout with no ` +
+        `result recorded, so its worker is gone. While it looked live, self-heal and the audit runner would both ` +
+        `have refused to touch ${row.platform} — that block is now lifted. Task: ${(row.task || '').slice(0, 160)}`,
+      speech: `Sir, I cleared a stuck job on ${row.platform}. It had been holding that platform's repairs back.`,
+    }).catch(() => {});
   }
 }
 
