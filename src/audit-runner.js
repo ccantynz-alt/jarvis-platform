@@ -1,5 +1,5 @@
 import { spawnSync } from 'child_process';
-import { writeFileSync, readFileSync, mkdirSync } from 'fs';
+import { writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import express from 'express';
 import Database from 'better-sqlite3';

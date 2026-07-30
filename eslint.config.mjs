@@ -72,4 +72,14 @@ export default [
       'no-empty': 'off',
     },
   },
+  {
+    // page.evaluate() callbacks are serialised and executed inside Chromium, not
+    // in this process, so `document` and friends are correct there and no-undef
+    // is wrong about them. Scoped to the one file that drives a browser rather
+    // than declared globally, so a stray `document` anywhere else is still caught.
+    files: ['src/browser-service.js'],
+    languageOptions: {
+      globals: { document: 'readonly', window: 'readonly', navigator: 'readonly' },
+    },
+  },
 ];
