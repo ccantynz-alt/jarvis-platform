@@ -152,6 +152,22 @@ remote during the very first live sweep (a separate on-box
 entirely real for the code on this box and already fixed upstream. The sweep says
 how old the reviewed HEAD is, and warns in the notification past a week.
 
+**A single sweep is not coverage.** Measured on 2026-07-30: two sweeps of the
+SAME platform, the SAME lens and the SAME commit (bookaride, failure-paths,
+`adcc9987`) each returned 8 findings — and the sets only partly overlapped. The
+first surfaced a **critical** Stripe-webhook defect that the second did not
+mention at all. So:
+
+- never read a clean sweep as "this lens is clear"; read it as "this pass found
+  nothing", which is a weaker claim;
+- the accumulation of coverage comes from the rotation *coming back round* on the
+  same lens later, which is exactly what fingerprints make survivable — the
+  second visit re-reports what is still there and bumps `seen_count` instead of
+  filing a duplicate;
+- if you run a sweep by hand, run it **live**. A dry-run's findings are logged
+  and then thrown away, and a real defect can go with them. (That is how the
+  Stripe one was nearly lost — it had to be re-filed by hand.)
+
 And read three findings against the actual code. The failure mode that matters
 is not a missed bug — it is a **confident wrong one**, because that is what
 spends Craig's attention and an agent's time. If two of three findings are
