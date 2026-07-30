@@ -153,7 +153,11 @@ app.get('/health', (_req, res) => {
 // same trust model as gateway's version — called by lib/notify.js.
 app.post('/internal/notify', (req, res) => {
   if (!isLocalDirect(req) && !isAuthed(req)) return res.status(403).json({ error: 'forbidden' });
-  const { id, source = 'jarvis', level = 'info', title, body, speech } = req.body || {};
+  // `source` and `body` are accepted by the notify() contract but not rendered
+  // here: the HUD banner is title + level, and the full body is already durable
+  // in the memory inbox (lib/notify.js writes there first). Destructuring them
+  // and dropping them read as a bug, so they are simply not taken.
+  const { id, level = 'info', title, speech } = req.body || {};
   if (!title) return res.status(400).json({ error: 'title required' });
   const ts = new Date().toISOString();
   pushFeed(LEVEL_COLOR[level] || '#00e5ff', title, ts);

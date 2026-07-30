@@ -10,7 +10,8 @@
     "slack": "node src/slack-bridge.js",
     "audit": "node src/audit-runner.js",
     "health": "bash scripts/health-check.sh",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "lint": "eslint src test"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.215",
@@ -21,6 +22,10 @@
     "playwright-core": "^1.61.1",
     "ws": "^8.16.0",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5"
   },
   "engines": {
     "node": ">=20.0.0"

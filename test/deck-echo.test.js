@@ -14,7 +14,7 @@ import { readFileSync } from 'fs';
 const html = readFileSync(new URL('../public/command-deck.html', import.meta.url), 'utf8')
   .replace(/\r\n/g, '\n');
 
-const m = html.match(/const isEcho = \(\(\) => \{[\s\S]*?\n    \}\)\(\);/);
+const m = html.match(/const isEcho = \(\(\) => \{[\s\S]*?\n {4}\}\)\(\);/);
 assert.ok(m, 'could not find isEcho in command-deck.html — did the voice section move?');
 
 // Rebuild the closure it reads from: the live stream element and the

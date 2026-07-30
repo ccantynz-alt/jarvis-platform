@@ -164,6 +164,10 @@ test('an emoji in the title cannot take out the channel', async () => {
     // decorative character in a title would kill the alert instead of sending it.
     const r = await pushAlert({ level: 'alert', title: '🔴 vapron is down' });
     assert.equal(r.sent, true);
+    // The control characters are the point: an ntfy Title header must be
+    // latin-1, and this asserts nothing outside \x00-\xFF survived. An emoji here
+    // makes Node throw ERR_INVALID_CHAR, which is why asciiHeader() exists.
+    // eslint-disable-next-line no-control-regex
     assert.doesNotMatch(f.calls[0].headers.Title, /[^\x00-\xFF]/);
     assert.match(f.calls[0].headers.Title, /vapron is down/);
   } finally { f.restore(); }

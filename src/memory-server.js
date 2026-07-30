@@ -802,9 +802,6 @@ app.post('/memory/query', (req, res) => {
 
     // Fixes tried
     if (isFixes) {
-      const params = platform
-        ? { platform, since: sinceSql }
-        : { since: sinceSql };
       let rows;
       if (platform && sinceSql) {
         rows = db.prepare(`SELECT * FROM repair_log WHERE platform = ? AND attempted_at >= ? ORDER BY attempted_at DESC LIMIT 10`).all(platform, sinceSql);

@@ -24,7 +24,7 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { execSync, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { createHash, timingSafeEqual } from 'crypto';
 import { readdirSync, existsSync, statSync } from 'fs';
 import { readFileSync } from 'fs';
@@ -447,16 +447,13 @@ app.get('/api/platform-status', async (req, res) => {
     };
   });
 
-  // Per-platform open issues
-  try {
-    const r    = await fetch(`${MEMORY}/memory/query`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: 'which platform has the most issues' }),
-    });
-    const text = await r.text();
-    // answer is formatted text — embed as-is in response
-  } catch {}
-
+  // The per-platform `open_issues` field above is still null, and the request
+  // that used to sit here has been removed (2026-07-30). It POSTed to
+  // /memory/query on EVERY call to this endpoint and then threw the answer away
+  // unread — the reply is formatted prose for a human, not per-platform data, so
+  // there was never a way to use it. All it did was add a round trip and a
+  // dependency on :9200 to a dashboard refresh. Filling the field properly means
+  // querying repair_log per platform, which is a feature rather than a fix.
   res.json({ platforms, open_issues_total: openIssues, updated: new Date().toISOString() });
 });
 

@@ -33,7 +33,7 @@ const src = [
   extract(/const ECHO_RATIO\s+=\s+[\d.]+;/, 'ECHO_RATIO'),
   extract(/const ECHO_MIN_WORDS\s+=\s+\d+;/, 'ECHO_MIN_WORDS'),
   extract(/const echoWords = [^\n]+;/, 'echoWords'),
-  extract(/function isSelfEcho\(said\) \{[\s\S]*?\n  \}/, 'isSelfEcho'),
+  extract(/function isSelfEcho\(said\) \{[\s\S]*?\n {2}\}/, 'isSelfEcho'),
 ].join('\n');
 
 // Rebuild the closure the function relies on, with its state injectable.

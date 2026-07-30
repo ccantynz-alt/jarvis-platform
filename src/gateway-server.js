@@ -51,7 +51,11 @@ const MEMORY       = 'http://127.0.0.1:9200';
 
 const AUTH_TOKEN     = process.env.JARVIS_GATEWAY_TOKEN || '';
 const AUTH_COOKIE    = 'jarvis_gw_auth';
-const COOKIE_MAX_AGE = 30 * 24 * 60 * 60; // 30 days, in seconds
+// COOKIE_MAX_AGE (30 days) was removed 2026-07-30: nothing set a cookie here any
+// more. The 2026-07-17 consolidation turned this server's human UI into a 302 to
+// the Deck, which took the token-bootstrap route with it and left the constant
+// behind. AUTH_COOKIE itself is still read (below, and by the /ws upgrade check),
+// so a cookie minted before that change still authenticates.
 
 function tokenMatches(candidate) {
   if (!AUTH_TOKEN || !candidate) return false;
@@ -91,7 +95,6 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'jarvis-gateway', clients: wss?.clients?.size ?? 0 });
 });
 
-// Token bootstrap: /?token=... sets the cookie once per device, then redirects clean.
 // CONSOLIDATED (2026-07-17): the Command Deck is the one Jarvis. This old voice
 // UI now forwards there, so any old bookmark/home-screen icon lands on the Deck.
 // The internal endpoints below (/ws, /internal/notify, /health) are unchanged —

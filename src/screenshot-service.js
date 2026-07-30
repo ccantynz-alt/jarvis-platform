@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { execSync } from 'child_process';
-import { writeFileSync, readFileSync, mkdirSync, readdirSync, existsSync, copyFileSync } from 'fs';
+import { readFileSync, mkdirSync, readdirSync, existsSync, copyFileSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import express from 'express';
