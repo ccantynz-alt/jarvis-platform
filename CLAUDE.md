@@ -620,6 +620,28 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
 4. eSIM MVNO not in platforms.json (see WHAT JARVIS IS).
+6. **`platform_state.status` still has THREE writers meaning three different
+   things — the last one wins (2026-07-30).** fleet-check.sh writes uptime
+   ('healthy'/'error' from an HTTP probe, every 10 min), audit-runner writes
+   build/test quality ('healthy'/'warning'/'critical', daily, direct to SQLite),
+   and orchestrator's `logToMemory` writes a JOB outcome ('healthy'/'error' from
+   an exit code, per job). The dangerous direction is fixed — an audit can no
+   longer erase a real outage, see `lib/health-status.js` — and omitted columns
+   are now preserved rather than zeroed. What remains: fleet-check's 'healthy'
+   overwrites an audit's 'critical' build verdict within 10 minutes, so a broken
+   build reads healthy on the deck. Nothing dangerous happens (self-heal only
+   acts on 'error', and the audit notifies + auto-dispatches independently) but
+   the displayed status is wrong.
+   **The fix, deliberately NOT done unattended on 2026-07-30:** give each writer
+   its own column (`uptime_status`, `audit_status`) and make `status` a DERIVED
+   worst-of (error > critical > warning > healthy) computed on write, so every
+   existing reader keeps reading `status` unchanged. It needs a coordinated
+   change across memory-server.js (schema + derive), fleet-check.sh,
+   orchestrator.js and audit-runner.js — an optional `kind` on
+   `/memory/platform/update`, since the endpoint currently cannot tell which
+   writer is calling. It was left for a session with Craig awake because this is
+   the single most-read table on the box and the failure mode is *he sees the
+   wrong health*, which is his most frequent complaint already.
 5. ~~audit-runner's PLATFORM_CONFIG only covers 4 of the 12 registered
    platforms~~ **CLEARED 2026-07-22** — all 11 audit-eligible platforms now
    have a config (`jarvis` itself and the `pc`-executor `craig-pc` are
