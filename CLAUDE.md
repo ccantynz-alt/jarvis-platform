@@ -671,8 +671,27 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
 4. eSIM MVNO not in platforms.json (see WHAT JARVIS IS).
-7. **No linter, and it has already cost 22 days of silent breakage
-   (2026-07-30).** `src/slack-bridge.js:637` interpolated `${ms}` — an
+7. ~~**No linter, and it has already cost 22 days of silent breakage**~~
+   **CLEARED 2026-07-30.** `eslint.config.mjs` + `npm run lint`, and the
+   deferral reason below was answered rather than ignored: the violation
+   count was MEASURED first, with a throwaway install outside the repo. The
+   whole tree came to 13 problems, all trivial, all fixed in the same
+   commit — plus 2 more that only appeared when `npm run lint` ran for real
+   on the box, which is the argument for having the script. Proof the rule
+   earns its place: run against the actual pre-fix file (`git show
+   951dccf^:src/slack-bridge.js`) it reports `637:45 'ms' is not defined`
+   AND `624:9 't0' is assigned but never used` — the bug and its own
+   corroboration. `no-empty` is deliberately OFF (this codebase uses
+   `catch { /* why */ }` on purpose, ~30 times, each commented; enabling it
+   only teaches people to write disable directives). `lint` is NOT in
+   `npm test`, because the suite runs on dev checkouts that have no
+   `node_modules` — lint on the box. Three of the 13 were worth more than
+   the lint itself: a discarded `/memory/query` round trip on every
+   dashboard refresh, a `COOKIE_MAX_AGE` orphaned by the 2026-07-17 Deck
+   consolidation (with a comment still describing the vanished token
+   bootstrap), and `/internal/notify` destructuring `body` it never used.
+   Original entry, kept because the reasoning still applies to the next
+   rule anyone wants to add: `src/slack-bridge.js:637` interpolated `${ms}` — an
    identifier that never existed in that module — from 2026-07-08 (11d8af7, the
    lib/ extraction) until it was found by a code-health sweep. ESM is strict
    mode, so that line throws `ReferenceError`, and it sits AFTER intent
@@ -683,7 +702,8 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    commit time.** Adding one was NOT done unattended: the violation count across
    ~20 services is unknown and could be large, and a noisy first run invites
    blanket-disabling the rule, which is worse than not having it. Do it with
-   Craig, `no-undef` first and the style rules off.
+   Craig, `no-undef` first and the style rules off. (That is exactly what
+   shipped.)
    *(A heuristic test was attempted instead — flag an identifier interpolated in
    a template literal that appears exactly once in the file — and it FAILED to
    catch this very instance, because `(${ms}ms)` contains `ms` twice: the
