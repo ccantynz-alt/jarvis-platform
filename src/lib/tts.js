@@ -125,6 +125,18 @@ function pruneCache() {
  * 'unconfigured' | 'budget' | 'api_error'. The reason lets the client decide
  * between retrying (transient) and switching to its backup voice for the day.
  */
+// One paid synthesis per distinct string, however many callers ask at once
+// (2026-07-30, found by the code-health spine's money-paths lens). The
+// cache-hit decision is a single existsSync at entry and the file is only written
+// after the ElevenLabs round-trip returns — so every request that lands inside
+// that window missed the cache and paid for its own copy of the SAME sentence.
+// Both deck notification paths broadcast an alert in the same tick as an
+// un-awaited pre-warm, and each connected device then fetches /tts for the
+// identical text, so the overlap is the normal case, not the rare one. Same shape
+// as the double-Chromium launch fixed earlier today: memoise the WORK, not just
+// its result.
+const inFlight = new Map();   // cache key → Promise<{buf}|{reason}>
+
 export async function synthesize(rawText) {
   const text = String(rawText || '').trim().slice(0, 1200); // hard per-call cap
   if (!text || !ttsEnabled()) return { reason: 'unconfigured' };
@@ -137,6 +149,15 @@ export async function synthesize(rawText) {
       return { buf };
     } catch { /* fall through to synth */ }
   }
+
+  const pending = inFlight.get(cached);
+  if (pending) return pending;
+  const work = synthesizeUncached(text, cached).finally(() => inFlight.delete(cached));
+  inFlight.set(cached, work);
+  return work;
+}
+
+async function synthesizeUncached(text, cached) {
 
   const day = new Date().toISOString().slice(0, 10);
   const spent = await budgetSpent(day);

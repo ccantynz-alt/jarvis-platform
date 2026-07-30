@@ -229,7 +229,18 @@ export async function runOnce() {
   // guardrail — the same "guardrail exists in code but doesn't actually bound
   // behavior" class of bug as the 2026-07-17 incident, just a different
   // trigger. Now incremented after each successful dispatch below.
-  let concurrent = jobs.filter(j => j.status === 'running' && (j.task || '').includes(MARKER)).length;
+  // QUEUED counts too (2026-07-30, found by the code-health spine's money-paths
+  // lens). The 2026-07-26 fix made this mutable WITHIN a tick, but every tick
+  // re-seeded it from 'running' only — and a dispatched repair sits in 'queued'
+  // until the orchestrator has a free slot, which it often does not:
+  // MAX_CONCURRENT_JOBS defaults to 3 and is shared with the role agents and
+  // audit/deploy-gate auto-fixes. So with several platforms down and a busy
+  // queue, tick 1 dispatched A and B (both queued), tick 2 saw zero running,
+  // seeded 0, and dispatched more — straight past the cap, five minutes at a
+  // time. A repair that has been ordered but not started is still a repair in
+  // flight, and this cap exists to bound spend and churn, not just parallelism.
+  let concurrent = jobs.filter(j =>
+    (j.status === 'running' || j.status === 'queued') && (j.task || '').includes(MARKER)).length;
 
   for (const p of down) {
     const name = p.name;
