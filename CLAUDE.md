@@ -387,7 +387,9 @@ jarvis-platform/
 │   ├── browser-service.js     — guarded web search/fetch/render bridge
 │   ├── code-health.js         — deep read-only code review on a timer (docs/CODE-HEALTH.md)
 │   └── lib/
+│       ├── cookies.js         — ONE cookie parser that cannot throw (a raw upgrade handler dies if it does)
 │       ├── findings.js        — pure code-health logic: fingerprints, lenses, verification budget
+│       ├── slack-auth.js      — who may command Jarvis from Slack; FAILS CLOSED
 │       └── push.js            — device alerts via ntfy, the channel that works with no tab open
 ├── scripts/
 │   ├── install.sh             — one-command server setup
