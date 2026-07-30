@@ -713,10 +713,42 @@ app.post('/worker/result', async (req, res) => {
   // path uses this endpoint at all, and only the worker that actually holds
   // the current lease (worker_id set by /worker/claim) may report its result.
   if (row.executor !== 'pc') return res.status(403).json({ error: 'not a pc-executor job' });
-  if (row.status !== 'running') return res.status(409).json({ error: `job is not running (status=${row.status})` });
   if (row.worker_id && worker_id && row.worker_id !== worker_id) {
     return res.status(403).json({ error: 'worker_id does not hold this job\'s lease' });
   }
+
+  // A LATE result is accepted, not thrown away (2026-07-30, found by the
+  // code-health spine's money-paths lens).
+  //
+  // The lease is 2 minutes and the worker renews it on a 30s heartbeat whose
+  // failures are only logged — nothing tells the worker it lost the lease, and
+  // the local `claude --print` keeps running for up to timeout_min. So any
+  // network gap over ~2 minutes (laptop sleep, wifi roam, tailscale restart —
+  // all routine) had the reaper re-queue the job while the PC was still working
+  // on it. When that run finished and reported, the row was 'queued', this
+  // handler returned 409, and a COMPLETED job's output was discarded with one log
+  // line on the PC — and the worker's next poll re-claimed the same job and ran
+  // it again, billing Craig's subscription twice for one piece of work.
+  //
+  // Accepting the late result also removes the second run: the job is completed
+  // before the next poll can re-claim it.
+  //
+  // Security: the ownership guard above still applies and is now REQUIRED for
+  // this path — only the worker recorded as the lease holder may report, and the
+  // reaper deliberately leaves worker_id in place when it re-queues.
+  if (row.status === 'queued') {
+    if (!worker_id || row.worker_id !== worker_id) {
+      return res.status(409).json({ error: 'job was re-queued and you are not its recorded worker' });
+    }
+    // Guarded: if the scheduler or another claim moved it first, that run owns it.
+    const claimed = await tryTransition(row.id, 'running', 'late result from the original worker — reclaiming to finish', {}, 'queued');
+    if (!claimed) return res.status(409).json({ error: 'job was re-claimed while your result was in flight' });
+    logEvent('JOB', `Late PC result accepted for ${row.id.slice(0, 8)} (${worker_id}) — saved a duplicate paid run`);
+    console.log(`[orchestrator] accepted a late result for ${row.id} from ${worker_id} — the job had been re-queued after a lease expiry`);
+  } else if (row.status !== 'running') {
+    return res.status(409).json({ error: `job is not running (status=${row.status})` });
+  }
+
   await finishJob(row, { code, stdout, stderr, timedOut });
   res.json({ ok: true });
 });

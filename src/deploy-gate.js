@@ -291,14 +291,38 @@ function recordRun(sessionId, platform, url, status, criticalCount, summary) {
 // first, stopping at the first non-blocked run. Used to cap auto-fix
 // re-dispatch so a genuinely unfixable regression escalates instead of
 // looping forever.
+/**
+ * How many consecutive SCANS have come back blocked.
+ *
+ * Only a real verdict counts (2026-07-30, found by the code-health spine's
+ * money-paths lens). This used to break the streak on ANY non-blocked row — and
+ * the auto-fix agent's own Claude session is itself a session this poller
+ * evaluates, which usually ends with no file changes and therefore records
+ * `skipped-no-changes`. That row sat at the top and reset the count, so:
+ *
+ *   deploy blocked -> auto-fix dispatched -> the fix agent's own session records
+ *   skipped-no-changes -> streak back to 0 -> next blocked deploy dispatches
+ *   another fix agent -> forever
+ *
+ * AUTO_FIX_MAX_ATTEMPTS could never be reached, so the escalate-to-a-human path
+ * was unreachable and the dispatches were unbounded. That is the same shape as
+ * the 2026-07-17 incident (117 self-heal dispatches against a cap of 6): a
+ * guardrail present in the code that could not bind.
+ *
+ * Now: 'blocked' counts, 'passed' breaks the streak (the only actual evidence of
+ * recovery), and skipped/scan-failed rows are stepped over — a session nobody
+ * scanned says nothing about whether the platform is fixed. The window is wider
+ * than the cap because those stepped-over rows must not exhaust it.
+ */
 function consecutiveBlockedRuns(platform) {
   const rows = db.prepare(
-    `SELECT status FROM deploy_gate_runs WHERE platform = ? ORDER BY id DESC LIMIT ?`
-  ).all(platform, AUTO_FIX_MAX_ATTEMPTS + 1);
+    `SELECT status FROM deploy_gate_runs WHERE platform = ? ORDER BY id DESC LIMIT 40`
+  ).all(platform);
   let n = 0;
   for (const r of rows) {
-    if (r.status !== 'blocked') break;
-    n++;
+    if (r.status === 'blocked') { n++; continue; }
+    if (r.status === 'passed') break;   // a real pass — the platform recovered
+    // skipped-no-changes / skipped-no-url / scan-failed: no verdict, no reset.
   }
   return n;
 }
