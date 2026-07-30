@@ -247,6 +247,24 @@ async function takeScreenshots(platform, urls) {
   return results;
 }
 
+/**
+ * Real HTTP status for each URL — the check the url-only audit never had.
+ * Follows redirects (a 301 to www is not a fault) and treats a timeout or DNS
+ * failure as status 0 rather than throwing, so one bad URL cannot abort a sweep.
+ */
+async function probeUrls(urls = []) {
+  const out = [];
+  for (const url of urls) {
+    try {
+      const r = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
+      out.push({ url, status: r.status, ok: r.ok });
+    } catch (e) {
+      out.push({ url, status: 0, ok: false, error: e.message });
+    }
+  }
+  return out;
+}
+
 // Shared write + notify tail for both audit shapes below — same
 // platform_state row shape and self-repair notify pattern either way.
 function writeAuditState(platform, report) {
@@ -275,6 +293,15 @@ function writeAuditState(platform, report) {
 // Every notification now states the live-site status explicitly, taken from
 // the same screenshots the audit just captured.
 function liveSiteLine(report) {
+  // Prefer real HTTP status where we have it (url-only audits): "it rendered" is
+  // a weaker claim than "it answered 200", and a 500 page renders fine.
+  const http = report.http || [];
+  if (http.length) {
+    const up = http.filter(c => c.ok).length;
+    const detail = http.map(c => `${c.url} → ${c.status || c.error || 'unreachable'}`).join('; ');
+    return up === http.length ? `Live site is UP (${up}/${http.length} URLs answered 2xx).`
+      : `Live site is NOT fully answering (${up}/${http.length} 2xx): ${detail}`;
+  }
   const shots = report.screenshots || [];
   if (!shots.length) return 'Live site not probed by this audit.';
   const up = shots.filter(s => s.ok).length;
@@ -329,11 +356,29 @@ async function runUrlOnlyAudit(platform, config) {
   const auditId = Date.now();
   const report = { platform, audit_id: auditId, timestamp: new Date().toISOString(), build: null, tests: null, checks: null, screenshots: [], errors: [], health_score: 100 };
 
-  console.log(`[audit] ${platform}: url-only audit (no local checkout) — capturing screenshots...`);
+  console.log(`[audit] ${platform}: url-only audit (no local checkout) — probing + capturing screenshots...`);
+  // HTTP status FIRST (2026-07-30). This audit used to score purely on whether
+  // Chromium could take a picture — and Chromium screenshots a 500 error page
+  // perfectly happily, so a dead site scored 100/100 "healthy". Worse:
+  // writeAuditState() below writes that status and score into platform_state,
+  // the same row fleet-check.sh writes status='error' to and the same row
+  // self-heal.js reads — so a URL-only audit could ERASE a real outage signal
+  // and stop the repair that signal exists to trigger. CLAUDE.md described this
+  // audit as "screenshot + health check"; the health check was never written.
+  // Found by the code-health spine's first sweep.
+  report.http = await probeUrls(config.urls);
+  const httpFailed = report.http.filter(c => !c.ok);
+
   report.screenshots = await takeScreenshots(platform, config.urls);
   const screenshotsFailed = report.screenshots.filter(s => !s.ok);
-  report.errors = screenshotsFailed.map(s => `SCREENSHOT: ${s.url} — ${s.error || 'capture failed'}`);
-  report.health_score = Math.max(0, 100 - screenshotsFailed.length * 40);
+
+  report.errors = [
+    ...httpFailed.map(c => `HTTP: ${c.url} — ${c.status ? `status ${c.status}` : c.error || 'unreachable'}`),
+    ...screenshotsFailed.map(s => `SCREENSHOT: ${s.url} — ${s.error || 'capture failed'}`),
+  ];
+  // A non-2xx outranks a failed screenshot: one URL serving 5xx alone is enough
+  // to land on 'critical' rather than 'warning'.
+  report.health_score = Math.max(0, 100 - httpFailed.length * 50 - screenshotsFailed.length * 30);
   report.status = report.health_score > 80 ? 'healthy' : report.health_score > 50 ? 'warning' : 'critical';
 
   const newConsecutive = writeAuditState(platform, report);

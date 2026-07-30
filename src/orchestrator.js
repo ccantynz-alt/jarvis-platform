@@ -6,6 +6,7 @@ import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
 import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { usageHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail } from './lib/guardrail.js';
 
@@ -247,6 +248,21 @@ async function runLocalJob(row) {
     extraEnv: platformEnv(row.platform),
     timeoutMin: row.timeout_min,
   });
+  // Both subscription logins are exhausted. spawnClaude has already tried the
+  // other account and set limitHeld — the work was never attempted, so calling
+  // it FAILED is a lie that also loses the task. Put it back in the queue; the
+  // usage-limit gate in schedulerTick keeps it parked until the earliest reset
+  // instead of retrying it into the same wall. (Found by the code-health spine,
+  // 2026-07-30: claude-auth promised this behaviour out loud and nothing did it.)
+  if (result.limitHeld) {
+    const hold = usageHold();
+    console.warn(`[orchestrator] job ${row.id} held — all Claude accounts exhausted${hold.at ? ` until ${hold.at}` : ''}`);
+    logEvent('ERR', `Job ${row.id.slice(0, 8)} HELD — every Claude account is usage-limited`);
+    await jobTransition(row.id, 'queued', 'held: all Claude accounts usage-limited', {
+      started_at: null,
+    }).catch((e) => console.error('[orchestrator] re-queue after usage limit failed:', e.message));
+    return;
+  }
   await finishJob(row, result);
 }
 
@@ -382,6 +398,9 @@ async function runCloud(row) {
 // ── Scheduler ─────────────────────────────────────────────────────────────────
 
 let gateHeld = false;
+// When the usage-limit hold started, so "held" and "resumed" are each logged
+// once rather than every 30-second tick.
+let usageHeldSince = null;
 let lastCanaryAt = 0;
 let tickInFlight = false;
 
@@ -408,6 +427,26 @@ async function schedulerTick() {
     const running = await dbGet('/memory/jobs?status=running&limit=100');
     const slots = MAX_CONCURRENT_JOBS - running.length;
     if (slots <= 0) return;
+
+    // Usage-limit gate: while EVERY subscription login is inside its cooldown,
+    // starting a claude job just burns a spawn to hit the same wall — and, until
+    // 2026-07-30, marked the job failed for it. Jobs stay queued; this is the
+    // enforcement of what claude-auth already tells Craig out loud ("I'll hold
+    // Claude work until roughly <reset> and carry on with what I can").
+    const hold = usageHold();
+    if (hold.held) {
+      if (!usageHeldSince) {
+        usageHeldSince = Date.now();
+        logEvent('ERR', `Every Claude account is usage-limited — dispatch HELD until ${hold.at}`);
+        console.warn(`[orchestrator] dispatch held: all Claude accounts exhausted until ${hold.at}`);
+      }
+      return;
+    }
+    if (usageHeldSince) {
+      console.log(`[orchestrator] Claude accounts usable again after ${Math.round((Date.now() - usageHeldSince) / 60000)}m — resuming dispatch`);
+      logEvent('JOB', 'Claude usage limits reset — dispatch resumed');
+      usageHeldSince = null;
+    }
 
     // Canary gate: a changed claude CLI must pass a probe before ANY job
     // starts. While held, jobs stay queued (nothing is lost) and the gate

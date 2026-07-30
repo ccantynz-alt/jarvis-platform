@@ -70,6 +70,39 @@ function otherUsableProfile() {
 }
 
 /**
+ * Is EVERY subscription login inside its cooldown, and until when?
+ *
+ * reportExhausted() already promises Craig out loud that "Claude-runtime work is
+ * held until the earliest reset" — but nothing enforced it. The orchestrator
+ * called spawnClaude, ignored the `limitHeld` flag it sets, and marked the job
+ * FAILED; the next queued job then did the same thing straight away. Found by
+ * the code-health spine, 2026-07-30.
+ *
+ * `profiles` and `now` are injectable so the gate can be tested without a real
+ * ~/.claude on disk and without waiting out a cooldown.
+ *
+ * @returns {{held: boolean, until: number|null, at: string|null}}
+ *   `until` is the EARLIEST reset — the moment work can resume, not the latest.
+ */
+export function usageHold({ profiles: injected, now = Date.now(), state = exhausted } = {}) {
+  if (!injected) ensureRefreshLoop();
+  const profiles = injected || listProfiles();
+  if (!profiles.length) return { held: false, until: null, at: null };
+  // Named `table`, not `exhausted`: shadowing the module-level map inside a
+  // function whose own parameter default reads it is exactly the kind of subtle
+  // scoping puzzle this codebase does not need.
+  const table = state;
+  const resets = [];
+  for (const p of profiles) {
+    const until = table[p];
+    if (!until || until < now) return { held: false, until: null, at: null };  // one is usable
+    resets.push(until);
+  }
+  const until = Math.min(...resets);
+  return { held: true, until, at: new Date(until).toISOString() };
+}
+
+/**
  * Env for anything that talks to Claude on the subscription: sets
  * CLAUDE_CONFIG_DIR for non-default profiles and STRIPS the metered API key
  * (an inherited ANTHROPIC_API_KEY would override the subscription login and

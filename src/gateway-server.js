@@ -270,7 +270,14 @@ async function watchJob(jobId, platform) {
       const jobs = await fetch(`${ORCHESTRATOR}/jobs`).then(r => r.json());
       const job = (Array.isArray(jobs) ? jobs : []).find(j => j.id === jobId);
       if (!job) continue;
-      if (job.status !== 'running') {
+      // TERMINAL statuses only. This used to treat anything that wasn't
+      // 'running' as finished — including 'queued', which is where a job sits
+      // while the orchestrator is at its concurrency cap, while the canary or
+      // usage-limit gate holds dispatch, or (for a pc-executor job) until
+      // Craig's PC claims it. Craig was told "the job ended with status queued"
+      // seconds after asking for it, and watching then STOPPED, so he never
+      // heard about the real result. Found by the code-health spine, 2026-07-30.
+      if (['completed', 'failed', 'interrupted', 'canceled'].includes(job.status)) {
         const ok = job.status === 'completed';
         broadcast({ type: 'job_update', payload: job });
         notify({

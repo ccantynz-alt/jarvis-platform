@@ -65,3 +65,35 @@ test('unrelated failures stay other', () => {
   assert.equal(classifyFailure({ message: 'ECONNRESET socket hang up' }).kind, 'other');
   assert.equal(classifyFailure({}).kind, 'other');
 });
+
+// ── usageHold: the gate that keeps work instead of failing it ────────────────
+// claude-auth has always told Craig out loud that "Claude-runtime work is held
+// until the earliest reset". Nothing enforced it: the orchestrator ignored
+// spawnClaude's limitHeld flag and marked the job FAILED, then started the next
+// one into the same wall. Found by the code-health spine, 2026-07-30.
+
+import { usageHold } from '../src/lib/claude-auth.js';
+
+const T = 1_800_000_000_000;
+
+test('no profiles at all is not a hold — there is nothing to wait for', () => {
+  assert.equal(usageHold({ profiles: [], now: T, state: {} }).held, false);
+});
+
+test('one usable account means work continues', () => {
+  const state = { default: T + 60_000 };   // exhausted; the other is fine
+  assert.equal(usageHold({ profiles: ['default', 'second'], now: T, state }).held, false);
+});
+
+test('an expired cooldown counts as usable', () => {
+  const state = { default: T - 1, second: T - 1 };
+  assert.equal(usageHold({ profiles: ['default', 'second'], now: T, state }).held, false);
+});
+
+test('every account exhausted holds until the EARLIEST reset', () => {
+  const state = { default: T + 90 * 60_000, second: T + 20 * 60_000 };
+  const hold = usageHold({ profiles: ['default', 'second'], now: T, state });
+  assert.equal(hold.held, true);
+  assert.equal(hold.until, T + 20 * 60_000, 'work resumes when the FIRST account comes back, not the last');
+  assert.equal(hold.at, new Date(T + 20 * 60_000).toISOString());
+});
