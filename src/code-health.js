@@ -283,8 +283,12 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
 
   if (MODE === 'dry-run') {
     for (const f of normalized) log(`DRY-RUN would file [${f.severity}/${f.kind}] ${f.title} (${f.file_path}:${f.line || '?'})`);
-    state[platform] = { lastSweep: Date.now(), lensIndex: lensIndex + 1 };
-    saveState(state);
+    // A dry run must NOT consume the rotation slot (2026-07-30). It files
+    // nothing, so advancing lastSweep/lensIndex would mark this platform+lens
+    // as covered for the next 20 hours on the strength of a review whose results
+    // were thrown away — the live sweep would then move on to a different lens
+    // and this one would look done. Proving mode must not spend real coverage.
+    log('DRY-RUN — rotation state NOT advanced, so a live sweep still owes this platform+lens');
     try { rmSync(outFile, { force: true }); } catch {}
     return { platform, lens: lens.key, dryRun: true, findings: normalized };
   }

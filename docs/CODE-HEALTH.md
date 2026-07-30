@@ -116,7 +116,7 @@ day that changes, remove it from the list and it joins the rotation).
 
 ```bash
 cd /opt/jarvis && set -a && . config/secrets.env && set +a
-CODE_HEALTH_MODE=dry-run node src/code-health.js jarvis failure-paths   # forced target
+CODE_HEALTH_MODE=dry-run node src/code-health.js jarvis failure-paths   # forced target, files nothing, does NOT consume the rotation slot
 node src/code-health.js                                                 # normal rotation
 ```
 

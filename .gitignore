@@ -1,7 +1,12 @@
 node_modules/
 config/secrets.env
 *.pid
-logs/*.log
+# The whole directory, not just *.log (2026-07-30). `logs/*.log` left
+# logs/browser-audit.jsonl — a real file on the box — showing as untracked, and
+# every session in this repo commits with `git add -A`. Runtime logs carry fetched
+# URLs, agent output and job text; one careless add publishes them to a repo that
+# is PUBLIC. Ignore the directory and keep it that way.
+logs/
 /memory/
 /screenshots/
 /reports/
