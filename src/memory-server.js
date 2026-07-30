@@ -116,6 +116,36 @@ db.exec(`
     detail TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_job_transitions_job ON job_transitions(job_id);
+
+  -- Code-level defects found by the code-health spine (src/code-health.js).
+  -- Deliberately NOT agent_reports: a report is a moment ("here is what I did
+  -- today"), a finding is a THING WITH A LIFE — it is discovered, verified or
+  -- refuted, fixed, and can come back. fingerprint is what gives it that life:
+  -- the same defect found on ten consecutive sweeps is one row with seen_count
+  -- 10, not ten rows Craig has to re-read. Without it a deep-review loop
+  -- becomes its own firehose within a week.
+  CREATE TABLE IF NOT EXISTS code_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    platform TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'medium',
+    kind TEXT NOT NULL DEFAULT 'correctness',
+    title TEXT NOT NULL,
+    file_path TEXT,
+    line INTEGER,
+    evidence TEXT,
+    suggested_fix TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    verdict TEXT,
+    lens TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL,
+    seen_count INTEGER NOT NULL DEFAULT 1,
+    job_id TEXT,
+    fix_job_id TEXT,
+    resolved_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_code_findings_platform ON code_findings(platform, status, severity);
 `);
 
 // Additive migrations for columns added after a table first shipped.
@@ -482,6 +512,122 @@ app.post('/memory/agent-reports/:id/routed', (req, res) => {
   const r = db.prepare('UPDATE agent_reports SET routed_at = ? WHERE id = ? AND routed_at IS NULL')
     .run(new Date().toISOString(), req.params.id);
   res.json({ ok: true, marked: r.changes });
+});
+
+// ── code_findings API (the code-health spine, src/code-health.js) ───────────
+
+const SEVERITIES = ['critical', 'high', 'medium', 'low'];
+const FINDING_STATUSES = ['open', 'confirmed', 'dismissed', 'fixed', 'stale'];
+
+/**
+ * POST /memory/findings — upsert ONE finding by fingerprint.
+ *
+ * Re-finding a defect must not create a second row, and must not overwrite what
+ * we already learned about it. So:
+ *   - a known finding bumps last_seen/seen_count and can only ESCALATE severity,
+ *     never quietly downgrade it (one sweep calling it 'low' does not undo
+ *     another that proved it 'critical');
+ *   - a finding that was marked `fixed` and has come BACK is reopened as a
+ *     regression — that is the single most valuable signal this table holds, and
+ *     a plain INSERT OR IGNORE would have thrown it away;
+ *   - `dismissed` is sticky. A verifier refuted it once; re-reporting it every
+ *     sweep is exactly the noise that gets a channel muted.
+ */
+app.post('/memory/findings', (req, res) => {
+  const f = req.body || {};
+  if (!f.fingerprint || !f.platform || !f.title) {
+    return res.status(400).json({ error: 'fingerprint, platform and title required' });
+  }
+  const severity = SEVERITIES.includes(f.severity) ? f.severity : 'medium';
+  const now = new Date().toISOString();
+  const existing = db.prepare('SELECT * FROM code_findings WHERE fingerprint = ?').get(f.fingerprint);
+
+  if (!existing) {
+    const r = db.prepare(`
+      INSERT INTO code_findings
+        (fingerprint, platform, severity, kind, title, file_path, line, evidence,
+         suggested_fix, status, lens, first_seen, last_seen, seen_count, job_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+    `).run(f.fingerprint, f.platform, severity, f.kind || 'correctness', f.title,
+      f.file_path || null, Number.isFinite(f.line) ? f.line : null, f.evidence || null,
+      f.suggested_fix || null, FINDING_STATUSES.includes(f.status) ? f.status : 'open',
+      f.lens || null, now, now, f.job_id || null);
+    return res.json({ id: r.lastInsertRowid, created: true });
+  }
+
+  if (existing.status === 'dismissed') {
+    db.prepare('UPDATE code_findings SET last_seen = ?, seen_count = seen_count + 1 WHERE id = ?')
+      .run(now, existing.id);
+    return res.json({ id: existing.id, created: false, suppressed: 'dismissed' });
+  }
+
+  const regressed = existing.status === 'fixed';
+  const worse = SEVERITIES.indexOf(severity) < SEVERITIES.indexOf(existing.severity);
+  db.prepare(`
+    UPDATE code_findings SET
+      last_seen = ?, seen_count = seen_count + 1,
+      severity = ?, status = ?, resolved_at = ?,
+      evidence = COALESCE(?, evidence), suggested_fix = COALESCE(?, suggested_fix),
+      line = COALESCE(?, line), job_id = COALESCE(?, job_id)
+    WHERE id = ?
+  `).run(now, worse ? severity : existing.severity,
+    regressed ? 'open' : existing.status, regressed ? null : existing.resolved_at,
+    f.evidence || null, f.suggested_fix || null,
+    Number.isFinite(f.line) ? f.line : null, f.job_id || null, existing.id);
+
+  res.json({ id: existing.id, created: false, regressed, escalated: worse });
+});
+
+// GET /memory/findings?platform=&status=&severity=&kind=&limit=
+app.get('/memory/findings', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 500);
+  const where = [];
+  const vals = [];
+  for (const col of ['platform', 'status', 'severity', 'kind']) {
+    if (req.query[col]) { where.push(`${col} = ?`); vals.push(req.query[col]); }
+  }
+  if (req.query.open_only) where.push("status IN ('open','confirmed')");
+  const rows = db.prepare(`
+    SELECT * FROM code_findings ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+             last_seen DESC
+    LIMIT ?
+  `).all(...vals, limit);
+  res.json(rows);
+});
+
+// GET /memory/findings/summary — what the deck and the brain ask for
+app.get('/memory/findings/summary', (req, res) => {
+  const rows = db.prepare(`
+    SELECT platform, severity, status, COUNT(*) AS n
+    FROM code_findings GROUP BY platform, severity, status
+  `).all();
+  const openBySeverity = db.prepare(`
+    SELECT severity, COUNT(*) AS n FROM code_findings
+    WHERE status IN ('open','confirmed') GROUP BY severity
+  `).all();
+  res.json({ rows, openBySeverity });
+});
+
+// PATCH /memory/findings/:id — a verifier's verdict, or a fix landing
+app.patch('/memory/findings/:id', (req, res) => {
+  const { status, verdict, fix_job_id, severity } = req.body || {};
+  if (status && !FINDING_STATUSES.includes(status)) {
+    return res.status(400).json({ error: `status must be one of ${FINDING_STATUSES.join('|')}` });
+  }
+  const resolved = status === 'fixed' || status === 'dismissed' ? new Date().toISOString() : null;
+  const r = db.prepare(`
+    UPDATE code_findings SET
+      status = COALESCE(?, status),
+      verdict = COALESCE(?, verdict),
+      fix_job_id = COALESCE(?, fix_job_id),
+      severity = COALESCE(?, severity),
+      resolved_at = CASE WHEN ? IS NOT NULL THEN ? ELSE resolved_at END
+    WHERE id = ?
+  `).run(status || null, verdict || null, fix_job_id || null,
+    SEVERITIES.includes(severity) ? severity : null, resolved, resolved, req.params.id);
+  if (!r.changes) return res.status(404).json({ error: 'finding not found' });
+  res.json({ ok: true });
 });
 
 // ── agent_context key/value API (canary gate state, etc.) ──────────────────

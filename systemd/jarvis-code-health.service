@@ -1,0 +1,27 @@
+[Unit]
+Description=Jarvis code-health — deep read-only code review, one platform and one lens per sweep
+After=network-online.target jarvis-memory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jarvis
+# Order matters: code-health.env loads second so its values win any collision
+# with secrets.env (matches jarvis-self-heal.service).
+EnvironmentFile=/opt/jarvis/config/secrets.env
+EnvironmentFile=/opt/jarvis/config/code-health.env
+ExecStart=/usr/bin/node src/code-health.js
+# A sweep is one review agent (up to 25 min) plus up to 4 verifier agents
+# (8 min each). The hard ceiling is deliberately above that so a slow-but-working
+# sweep is never killed mid-verification, leaving findings half-filed.
+TimeoutStartSec=3900
+
+# Rule 4 safety net — this box also runs AlecRae, Gluecron, GateTest and Coolify.
+# A review agent reads a lot of files; 1G is room for that without ever being in
+# a position to squeeze a co-tenant. CPUQuota keeps it to one core's worth: this
+# is background work and must always yield to anything Craig is waiting on.
+MemoryMax=1G
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

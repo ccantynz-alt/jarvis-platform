@@ -1,0 +1,17 @@
+[Unit]
+Description=Run a Jarvis code-health sweep every 3 hours
+
+[Timer]
+# Not on boot: a restart storm must not turn into a review storm.
+OnBootSec=25min
+OnUnitActiveSec=3h
+# Each sweep takes one platform and one lens. With nine eligible platforms and
+# nine lenses, a 3h cadence works right through the fleet in about three days and
+# then comes back round on a different lens — which is what "regardless of how
+# deep they go" actually looks like in practice.
+AccuracySec=2min
+# Don't line every service's timer up on the hour.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
