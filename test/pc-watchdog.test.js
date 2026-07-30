@@ -36,3 +36,33 @@ test('a dead public port with no internet is still LOCAL, never box-down', () =>
   // announce a box death that never happened.
   assert.equal(classifyOutage({ gatewayOk: false, publicOk: false, internetOk: false }), 'local');
 });
+
+// ── Importing this module must never end the importing process (2026-07-30) ───
+// The missing-token check was at module scope with a process.exit(1) beside it,
+// so `import { classifyOutage } from '../src/pc-worker.js'` — the line at the top
+// of this very file — killed the test runner on any machine without a worker
+// token. It passed on Craig's PC, which has one in config/pc-worker.env, and
+// failed on the box, which is where deployments get verified. Same family as the
+// module-scope `loop()` call fixed earlier the same day: importing a program
+// should not run it.
+
+test('importing pc-worker.js with no token configured exits cleanly', async () => {
+  const { spawnSync } = await import('child_process');
+  const os = await import('os');
+  const { pathToFileURL } = await import('url');
+  const path = await import('path');
+
+  const url = pathToFileURL(path.resolve('src/pc-worker.js')).href;
+  const env = { ...process.env };
+  delete env.JARVIS_WORKER_TOKEN;
+
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `await import(${JSON.stringify(url)}); console.log('IMPORTED');`], {
+    // cwd away from the repo so config/pc-worker.env is not picked up either —
+    // the loader reads it relative to process.cwd().
+    cwd: os.tmpdir(), env, encoding: 'utf8', timeout: 30_000,
+  });
+
+  assert.equal(r.status, 0, `import should not exit non-zero (stderr: ${(r.stderr || '').trim()})`);
+  assert.match(r.stdout || '', /IMPORTED/, 'and the module body should finish evaluating');
+});

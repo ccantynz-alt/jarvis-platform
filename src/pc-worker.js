@@ -68,10 +68,14 @@ const HEARTBEAT_MS  = num('HEARTBEAT_MS', 30_000, { allowZero: false });
 const DEFAULT_TIMEOUT_MIN = num('TIMEOUT_MIN', 30, { allowZero: false });
 const KILL_FILE     = cfg.KILL_FILE || path.join(process.env.ProgramData || 'C:\\ProgramData', 'jarvis', 'KILL');
 
-if (!WORKER_TOKEN) {
-  console.error('[pc-worker] JARVIS_WORKER_TOKEN not set (config/pc-worker.env or env var) — refusing to start.');
-  process.exit(1);
-}
+// Checked at STARTUP, not at import (2026-07-30). This was a module-scope
+// process.exit(1), so importing this file killed the importing process — the same
+// defect as the loop starting at module scope, fixed earlier the same day and
+// missed here. It also hid itself well: this PC has a token in
+// config/pc-worker.env, so test/pc-watchdog.test.js passed locally and failed on
+// the box, which is the machine deployments are verified on.
+// Refusing to start is right for the program; killing a caller is not.
+const CONFIGURED = !!WORKER_TOKEN;
 
 function log(msg) { console.log(`[pc-worker] ${new Date().toISOString()} ${msg}`); }
 
@@ -373,6 +377,10 @@ async function loop() {
 // is Linux-only and never matches on Windows (drive letter, backslashes), which
 // is the one platform this particular file runs on.
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
+  if (!CONFIGURED) {
+    console.error('[pc-worker] JARVIS_WORKER_TOKEN not set (config/pc-worker.env or env var) — refusing to start.');
+    process.exit(1);
+  }
   log(`starting — worker_id=${WORKER_ID} gateway=${GATEWAY_URL} workspace=${WORKSPACE_ROOT}`);
   startHeartbeat();
   loop();
