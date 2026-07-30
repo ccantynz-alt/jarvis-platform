@@ -30,6 +30,7 @@
  */
 
 import express from 'express';
+import { parseCookies } from './lib/cookies.js';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual, randomBytes } from 'crypto';
@@ -73,15 +74,10 @@ function tokenMatches(candidate) {
   return timingSafeEqual(a, b);
 }
 
-function parseCookies(header) {
-  const out = {};
-  for (const part of String(header || '').split(';')) {
-    const idx = part.indexOf('=');
-    if (idx === -1) continue;
-    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
-  }
-  return out;
-}
+// parseCookies lives in lib/cookies.js and must never throw: the WebSocket
+// upgrade handler below is raw Node, so an exception there is an
+// uncaughtException that kills this process — before any token is compared.
+// `Cookie: a=%` was enough. See that file for the full account.
 
 function requestToken(req) {
   const header = String(req.headers.authorization || '');

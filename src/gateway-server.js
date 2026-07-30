@@ -34,6 +34,7 @@
  */
 
 import express from 'express';
+import { parseCookies } from './lib/cookies.js';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
@@ -59,15 +60,9 @@ function tokenMatches(candidate) {
   return timingSafeEqual(a, b);
 }
 
-function parseCookies(header) {
-  const out = {};
-  for (const part of String(header || '').split(';')) {
-    const idx = part.indexOf('=');
-    if (idx === -1) continue;
-    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
-  }
-  return out;
-}
+// parseCookies lives in lib/cookies.js and must never throw — see that file.
+// The upgrade handler here is raw Node, so a URIError from a malformed cookie
+// took the whole gateway down before the token was ever checked.
 
 function requestToken(req) {
   const header = String(req.headers.authorization || '');

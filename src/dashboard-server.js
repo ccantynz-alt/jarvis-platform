@@ -19,6 +19,7 @@
  */
 
 import express from 'express';
+import { parseCookies } from './lib/cookies.js';
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { fileURLToPath } from 'url';
@@ -54,15 +55,9 @@ function tokenMatches(candidate) {
   return timingSafeEqual(a, b);
 }
 
-function parseCookies(header) {
-  const out = {};
-  for (const part of String(header || '').split(';')) {
-    const idx = part.indexOf('=');
-    if (idx === -1) continue;
-    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
-  }
-  return out;
-}
+// parseCookies lives in lib/cookies.js and must never throw — see that file.
+// This service reaches it through ws's verifyClient, which has the same
+// raw-throw exposure as a bare upgrade handler.
 
 // Pull a token off a request: Bearer header first, then the auth cookie.
 function requestToken(req) {
