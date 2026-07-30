@@ -82,6 +82,16 @@ is that two genuinely different defects in the same file sharing their
 significant words will merge. Scoped to one file that is rare and cheap; the
 opposite mistake is a report per phrasing, every night.
 
+**The cost runs both ways, and the other direction showed up on day one.** Two
+agents can describe ONE defect with almost no shared vocabulary — "a single
+process-global object shared by every WebSocket connection" and "module-level,
+shared by every connected deck client" hash differently — so a finding that had
+been dismissed with written reasoning came straight back as new and spent another
+verifier turn. A sweep now NOTES when it files into a file that already carries a
+dismissed finding, and says so in the verdict. Deliberately a note and not
+suppression: merging on same-file proximity would hide a genuinely different
+defect behind an old dismissal, which is worse than an occasional duplicate.
+
 Three behaviours in `memory-server.js` matter as much as the key:
 
 - **`dismissed` is sticky.** A verifier refuted it; re-arguing it every sweep is

@@ -329,3 +329,48 @@ test('an unrelated array adds nothing rather than guessing', () => {
   const base = [msg('user', 'a'), msg('assistant', 'b')];
   assert.deepEqual(newSince([msg('user', 'totally'), msg('user', 'different')], base), []);
 });
+
+test('a turn that lands DURING the read is not erased — second-pass race', async () => {
+  // Found by the concurrency lens in this morning's own merge fix: `ourNew` was
+  // computed before `await readKey`, so a push that happened while the read was
+  // in flight was in neither the diff nor the stored array, and the splice
+  // erased it. The diff now sits after the await.
+  const store = { 'jarvis-conversation': JSON.stringify([msg('user', 'A')]) };
+  const calls = { writes: [] };
+  const real = global.fetch;
+  const t = await (async () => {
+    global.fetch = async (url, opts) => {
+      if (opts?.method === 'POST') {
+        calls.writes.push(JSON.parse(opts.body));
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const key = String(url).split('/memory/kv/')[1];
+      if (!(key in store)) return { ok: false, status: 404 };
+      return { ok: true, status: 200, json: async () => ({ key, value: store[key] }) };
+    };
+    return loadTranscript();
+  })();
+
+  t.push(msg('user', 'B'));
+
+  // Make the READ slow, and push a third turn while it is in flight.
+  global.fetch = async (url, opts) => {
+    if (opts?.method === 'POST') {
+      calls.writes.push(JSON.parse(opts.body));
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    t.push(msg('assistant', 'C-arrived-mid-read'));
+    await new Promise(r => setTimeout(r, 20));
+    const key = String(url).split('/memory/kv/')[1];
+    return { ok: true, status: 200, json: async () => ({ key, value: store[key] }) };
+  };
+
+  try {
+    saveTranscript();
+    await new Promise(r => setTimeout(r, 700));
+  } finally { global.fetch = real; }
+
+  const written = JSON.parse(calls.writes.at(-1).value).map(m => m.content);
+  assert.ok(written.includes('B'), 'the turn queued before the save survives');
+  assert.ok(written.includes('C-arrived-mid-read'), 'and so does the one that landed during the read');
+});

@@ -215,8 +215,6 @@ export function saveTranscript() {
     // Only what WE added since the last successful save may be appended. If the
     // local array is shorter than the baseline (the brain-failure rollback path
     // splices it), we add nothing rather than trying to be clever.
-    const ourNew = newSince(transcript, baseline);
-
     let stored;
     try {
       stored = await readKey(KEY);
@@ -231,6 +229,14 @@ export function saveTranscript() {
       return;
     }
 
+    // The diff is computed AFTER the read, not before (2026-07-30, second pass —
+    // found by the code-health spine's concurrency lens, in this morning's own
+    // merge fix). Computing it first left a window: a turn that pushed to
+    // `transcript` while readKey was in flight was in neither `ourNew` nor
+    // `stored`, and the splice below then erased it. Everything from here to the
+    // splice is synchronous, so with the diff on this side of the await there is
+    // no window left at all — JS will not interleave another push into it.
+    const ourNew = newSince(transcript, baseline);
     const merged = mergeTail(stored || [], ourNew);
     // Adopt the merge into the SHARED array in place: runAgent and both servers
     // hold a reference to it, so reassigning would silently orphan them.

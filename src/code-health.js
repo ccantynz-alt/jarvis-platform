@@ -347,6 +347,37 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
 
     const entry = { ...f, id: res.id, created: res.created, regressed: res.regressed, suppressed: res.suppressed };
 
+    // Is there already a DISMISSED finding in this same file? (2026-07-30)
+    //
+    // Fingerprints key on the SORTED SIGNIFICANT WORDS of the title, which
+    // deliberately makes them word-order-independent — but two agents can
+    // describe one defect with almost no shared vocabulary. Observed the same
+    // day: "a single process-global object shared by every WebSocket connection"
+    // and "module-level, shared by every connected deck client" are the same
+    // defect and hash differently, so a finding I had dismissed with reasoning
+    // came straight back as new, and spent another verifier turn.
+    //
+    // Deliberately only a NOTE, not suppression: silently merging on
+    // same-file-proximity would hide a genuinely different defect behind one
+    // dismissal, which is far worse than an occasional duplicate. This just makes
+    // the duplicate visible to whoever reads it next.
+    if (res.created && f.file_path) {
+      try {
+        const siblings = await fetch(`${MEMORY}/memory/findings?platform=${encodeURIComponent(platform)}&status=dismissed&limit=50`)
+          .then(r => r.json());
+        const sameFile = (Array.isArray(siblings) ? siblings : []).filter(s => s.file_path === f.file_path);
+        if (sameFile.length) {
+          const ids = sameFile.map(s => `#${s.id}`).join(', ');
+          log(`note: ${f.file_path} already has ${sameFile.length} DISMISSED finding(s) (${ids}) — this may be a reworded duplicate`);
+          await patchFinding(res.id, {
+            verdict: `Filed as new, but ${f.file_path} already carries dismissed finding(s) ${ids}. Fingerprints key on the ` +
+              `title's significant words, so a paraphrase of an already-dismissed defect files again — check those before ` +
+              `spending time on this one.`,
+          });
+        }
+      } catch { /* advisory only — never let this break a sweep */ }
+    }
+
     // Only NEW findings get verified. Re-verifying something already judged is
     // pure spend, and a sticky `dismissed` in memory-server means a refuted
     // finding never comes back round to be argued about again.
