@@ -623,6 +623,24 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    --dangerously-skip-permissions; migrate to the Claude Agent SDK with
    scoped permissions.
 4. eSIM MVNO not in platforms.json (see WHAT JARVIS IS).
+7. **No linter, and it has already cost 22 days of silent breakage
+   (2026-07-30).** `src/slack-bridge.js:637` interpolated `${ms}` — an
+   identifier that never existed in that module — from 2026-07-08 (11d8af7, the
+   lib/ extraction) until it was found by a code-health sweep. ESM is strict
+   mode, so that line throws `ReferenceError`, and it sits AFTER intent
+   resolution but BEFORE the switch: every Slack command would have died, and
+   both call sites `.catch(e => console.error(...))`, so Craig would have seen
+   nothing in Slack at all. `node --check` never sees it (the syntax is fine) and
+   no test exercised the line. **`eslint` with `no-undef` would have caught it at
+   commit time.** Adding one was NOT done unattended: the violation count across
+   ~20 services is unknown and could be large, and a noisy first run invites
+   blanket-disabling the rule, which is worse than not having it. Do it with
+   Craig, `no-undef` first and the style rules off.
+   *(A heuristic test was attempted instead — flag an identifier interpolated in
+   a template literal that appears exactly once in the file — and it FAILED to
+   catch this very instance, because `(${ms}ms)` contains `ms` twice: the
+   interpolation and the literal unit suffix. It was deleted rather than shipped;
+   a test that passes on the bug it was written for is worse than no test.)*
 6. **`platform_state.status` still has THREE writers meaning three different
    things — the last one wins (2026-07-30).** fleet-check.sh writes uptime
    ('healthy'/'error' from an HTTP probe, every 10 min), audit-runner writes

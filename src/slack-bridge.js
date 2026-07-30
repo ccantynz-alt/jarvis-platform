@@ -634,7 +634,14 @@ async function handleCommand(rawText, channel) {
     }
   }
 
-  console.log(`[slack] intent via ${via} (${ms}ms)`);
+  // `${ms}` — an identifier that has never existed in this module — sat here from
+  // 2026-07-08 (11d8af7, the lib/ extraction) until 2026-07-30. ESM is strict
+  // mode, so reading it throws ReferenceError, and the throw lands AFTER intent
+  // resolution but BEFORE the switch below: every Slack command would have died.
+  // Both call sites `.catch(e => console.error(...))`, so Craig would have seen
+  // nothing at all in Slack, not even an error. t0 was declared for this and
+  // never used.
+  console.log(`[slack] intent via ${via} (${Date.now() - t0}ms)`);
   console.log(`[slack] intent=${JSON.stringify(intent)} text="${rawText.replace(/<[^>]+>/g, '').slice(0, 60)}"`);
 
   switch (intent.type) {
