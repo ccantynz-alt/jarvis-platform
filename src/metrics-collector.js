@@ -4,6 +4,7 @@ import { createServer } from 'http';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { notify } from './lib/notify.js';
+import { serviceVerdict, VERDICT_POLICY } from './lib/service-verdict.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 
@@ -209,23 +210,51 @@ const SERVICE_DOWN_CHECKS = 2;   // ~60s at GUARD_INTERVAL_MS — rides out a re
 const downStreaks = {};
 const downAlerted = new Set();
 
+// Only consulted when a port probe has already failed, so this costs nothing on
+// the happy path.
+function unitState(name) {
+  const out = safeExec(`systemctl show jarvis-${name} -p ActiveState -p SubState 2>/dev/null`, '');
+  const get = (k) => (out.match(new RegExp(`^${k}=(.*)$`, 'm')) || [, ''])[1].trim();
+  return { active: get('ActiveState'), sub: get('SubState') };
+}
+
 function watchOwnServices(jarvis) {
   for (const [name, status] of Object.entries(jarvis)) {
     if (name === 'metrics') continue;   // if this loop is running, metrics is up
     const down = status !== 'ONLINE';
+
+    // Ask systemd what it thinks before deciding how loud to be (2026-07-30). A
+    // port that stops answering during a deploy is not the same event as a unit
+    // systemd has given up on, and this watcher treated them identically — it
+    // pushed a device alert for a 50-second restart of mine at 09:03. See
+    // lib/service-verdict.js.
+    const verdict = down ? serviceVerdict({ portDown: true, ...unitState(name) }) : 'ok';
+    const policy = VERDICT_POLICY[verdict] || VERDICT_POLICY.notlistening;
+
+    // A restart in progress is not a strike. Without this, a slow deploy still
+    // accumulates toward the alert threshold and fires the moment it crosses.
+    if (verdict === 'restarting') continue;
     downStreaks[name] = down ? (downStreaks[name] || 0) + 1 : 0;
 
-    if (down && downStreaks[name] >= SERVICE_DOWN_CHECKS && !downAlerted.has(name)) {
+    const streakMet = policy.immediate || downStreaks[name] >= SERVICE_DOWN_CHECKS;
+    if (down && policy.alert && streakMet && !downAlerted.has(name)) {
       downAlerted.add(name);
       const secs = Math.round(downStreaks[name] * GUARD_INTERVAL_MS / 1000);
+      const why = {
+        failed: 'systemd reports the unit as FAILED, so it has already given up — no waiting to confirm.',
+        stopped: 'systemd reports it INACTIVE, which with Restart=always means something stopped it deliberately.',
+        notlistening: `systemd believes it is running, but the port has not answered ${downStreaks[name]} consecutive checks (~${secs}s) — a live process that has stopped serving.`,
+      }[verdict];
       notify({
         source: 'metrics',
-        level: 'alert',
+        level: policy.level,
         title: `jarvis-${name} is not listening on :${JARVIS_SERVICES[name]}`,
-        body: `It has failed ${downStreaks[name]} consecutive port checks (~${secs}s). Nothing else in the estate ` +
-          `alerts on a dead Jarvis service — the off-box watchdog and the PC worker only prove the BOX answers. ` +
-          `Check: systemctl status jarvis-${name} && journalctl -u jarvis-${name} -n 50 --no-pager`,
-        speech: `Sir, jarvis ${name} has stopped listening.`,
+        body: `${why} Nothing else in the estate alerts on a dead Jarvis service — the off-box watchdog and the `
+          + 'PC worker only prove the BOX answers. '
+          + `Check: systemctl status jarvis-${name} && journalctl -u jarvis-${name} -n 50 --no-pager`,
+        speech: verdict === 'stopped'
+          ? `Sir, jarvis ${name} has been stopped.`
+          : `Sir, jarvis ${name} has stopped listening.`,
       }).catch(() => {});
     } else if (!down && downAlerted.has(name)) {
       downAlerted.delete(name);
