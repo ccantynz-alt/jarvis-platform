@@ -46,7 +46,7 @@ Notes:
 | jarvis-deck | src/deck-server.js | 9210 | loopback, exposed ONLY via `tailscale serve --https=8444` | **Command Deck v2.2** (2026-07-16, from Craig's Claude Design handoff) — public/command-deck.html: full-screen **CORE** 3D neural-core brain (default) + HUD/Hierarchy/Message Flow/Platforms tabs; PWA (deck.webmanifest + /icons/deck-*.png, source deck-icon.html); briefing panel (`{type:'briefing'}`); raw WS `/jarvis` = handoff contract v1.0 + `chat_chunk`/`notify`/`org`/`briefing`. All numbers real. Commands → the three-provider lib/agent.js brain with intent fallback; conversation in memory KV `deck-conversation`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs via src/lib/tts.js (cache + daily budget + `TTS_DISABLED`), speechSynthesis fallback. QA hooks `?demo-alert=1`/`?demo-briefing=1` (:9201 virtual-time captures can't see live WS pushes); `?view=hud\|org\|flow\|plat` deep-links a tab for screenshots (Hierarchy tab is `org`) — the org tier now renders real agent-org data, see jarvis-agents row. Evidence: docs/DECK-AUDIT-2026-07-16.md. Token = deck/gateway token or gateway cookie. |
 | jarvis-browser | src/browser-service.js | 9211 | loopback | SSRF-guarded web search, fetch, and Chromium render bridge for the brain |
 
-**Two periodic on-box scripts, NOT persistent daemons (documented 2026-07-24,
+**Three periodic on-box scripts, NOT persistent daemons (documented 2026-07-24,
 found late — see Rule 0 note below):**
 - **`scripts/fleet-check.sh`** — `jarvis-fleet-check.timer`, every 10 min.
   Cheap HTTP status probe of every platform's public URL, writes
@@ -76,6 +76,22 @@ found late — see Rule 0 note below):**
   /etc/systemd/system/jarvis-self-heal.* /opt/jarvis/systemd/jarvis-self-heal.*`
   before trusting it matches exactly (see docs on the browser-service
   discovery for why this check matters).
+- **`src/code-health.js`** — `jarvis-code-health.timer`, every 3 hours
+  (`config/code-health.env`). **The only thing on this box that looks for
+  CODE defects rather than dead ports** (Craig, 2026-07-30: "not just
+  finding HTTP problems but actually coding issues regardless of how deep
+  they go"). One sweep = the least-recently-swept local platform × one of
+  nine rotating review lenses (failure paths, data integrity, input trust,
+  auth, concurrency, money paths, integrations, config/deploy, recent
+  commits) → ONE read-only review agent → an **adversarial verifier** on
+  anything critical/high/security/data-loss → upsert into the new
+  `code_findings` table by fingerprint. `dismissed` is sticky, severity only
+  escalates, and a `fixed` finding that reappears is reopened as a
+  regression. **It fixes nothing** — findings become work only through the
+  dispatch confirmation gate, and the brain reads them via
+  `get_code_findings`. Shipped at `CODE_HEALTH_MODE=dry-run`. Spec:
+  **docs/CODE-HEALTH.md**; pure logic + tests: `src/lib/findings.js`,
+  `test/findings.test.js`.
 
 Health paths are namespaced for memory (`/memory/health`), screenshot
 (`/screenshot/health`), metrics (`/metrics/health`), deploy-gate
@@ -344,7 +360,11 @@ jarvis-platform/
 │   ├── orchestrator.js        — /dispatch API, spawns Claude agents, cron sprints
 │   ├── dashboard-server.js    — tailnet status panel + /screenshots browser
 │   ├── deploy-gate.js         — GateTest scan on every platform deploy
-│   └── browser-service.js     — guarded web search/fetch/render bridge
+│   ├── browser-service.js     — guarded web search/fetch/render bridge
+│   ├── code-health.js         — deep read-only code review on a timer (docs/CODE-HEALTH.md)
+│   └── lib/
+│       ├── findings.js        — pure code-health logic: fingerprints, lenses, verification budget
+│       └── push.js            — device alerts via ntfy, the channel that works with no tab open
 ├── scripts/
 │   ├── install.sh             — one-command server setup
 │   ├── session-start.sh       — run at start of every Claude session
