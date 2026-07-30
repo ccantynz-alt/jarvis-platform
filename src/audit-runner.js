@@ -5,6 +5,7 @@ import express from 'express';
 import Database from 'better-sqlite3';
 import { notify } from './lib/notify.js';
 import { resolveAuditStatus } from './lib/health-status.js';
+import { checkoutProblem } from './lib/checkout.js';
 
 mkdirSync('/opt/jarvis/reports', { recursive: true });
 
@@ -27,13 +28,8 @@ const ORCHESTRATOR = 'http://127.0.0.1:9205';
 const AUTO_FIX_MAX_ATTEMPTS = 2;
 
 const PLATFORM_CONFIG = {
-  zoobicon: {
-    path: process.env.ZOOBICON_PATH || '/var/www/zoobicon',
-    urls: ['https://zoobicon.com', 'https://zoobicon.com/builder'],
-    buildCmd: 'npm run build',
-    testCmd: 'npm test',
-    checkCmd: null
-  },
+  // zoobicon moved to URL_ONLY_CONFIG on 2026-07-30 — see the note there. It has
+  // no usable checkout on this box, so there was never anything here to build.
   // Added 2026-07-22 (Craig: audit the other 8 platforms). Path/tech-stack
   // from config/platforms.json; build/test commands inferred from tech
   // stack (npm for TS/React, bun for the Bun-based stack), matching the
@@ -60,10 +56,25 @@ const PLATFORM_CONFIG = {
     checkCmd: null
   },
   alecrae: {
-    path: process.env.ALECRAE_PATH || '/var/www/alecrae',
+    // /opt/alecrae, per config/platforms.json and CLAUDE.md — AlecRae runs on
+    // THIS box. This said /var/www/alecrae, which has never existed here; see
+    // lib/checkout.js for what that silently produced every day.
+    path: process.env.ALECRAE_PATH || '/opt/alecrae',
     urls: ['https://alecrae.com'],
-    buildCmd: 'npm run build',
-    testCmd: 'npm test',
+    // NON-MUTATING on purpose (Rule 4). Correcting the path above means these
+    // commands are about to run for the first time ever, inside a LIVE co-tenant:
+    // alecrae-api and alecrae-web are both active on this box, and /opt/alecrae is
+    // their working tree. `npm run build` was configured, which is wrong twice
+    // over — the repo is bun (packageManager: bun@1.2.0), and `turbo run build`
+    // would regenerate Next.js output underneath the running :4200 server.
+    // `bun run typecheck` reads the code and writes nothing; same reasoning and
+    // same shape as the gluecron entry above.
+    buildCmd: 'bun run typecheck',
+    // testCmd left null deliberately: `turbo run test` in a monorepo that also
+    // carries db:migrate/db:push scripts and k6 load tests is not something to
+    // start unattended against a co-tenant. Turning it on is Craig's call —
+    // flagged in docs/FINDINGS-2026-07-30.md.
+    testCmd: null,
     checkCmd: null
   },
   gatetest: {
@@ -122,21 +133,31 @@ const PLATFORM_CONFIG = {
 // auto-fix-dispatch (there is no local repo to dispatch a fix against).
 //
 // vapron (moved here 2026-07-23): found chasing Craig's report of Vapron
-// flip-flopping between "critical" and "healthy". Root cause: vapron's
-// `server` in config/platforms.json is 100.89.227.39 (box 158), NOT this
-// box (66.42.121.161) — its code has never existed locally here under any
-// path. audit-runner was running `bun run build` against a directory that
-// could never exist on THIS box, guaranteed-failing every daily audit and
-// tanking the score to critical, while fleet-check's simple HTTP check
-// correctly reported healthy 10 minutes later — same structural problem as
-// marcoreid/davenroe, just a second Jarvis-controlled box instead of Vercel.
-// A real fix would SSH into 158 and build there (Tailscale now supports
-// that box-to-box, see today's Tailscale work) — not done here, this just
-// stops the false-critical reports.
+// flip-flopping between "critical" and "healthy". vapron's `server` in
+// config/platforms.json is 100.89.227.39 (box 158), NOT this box, and
+// audit-runner was running `bun run build` against /var/www/vapron — failing
+// every daily audit and tanking the score to critical, while fleet-check's HTTP
+// check correctly reported healthy ten minutes later.
+//   CORRECTION 2026-07-30: that fix's note claimed vapron's code "has never
+//   existed locally here under any path". Not true — /root/vapron has been a full
+//   checkout since 2026-07-01 (last commit 2026-06-30, so ~30 days stale). The
+//   CONFIGURED path was simply wrong, which is the very same defect that was
+//   still live for zoobicon and alecrae a week later. Staying URL-only is still
+//   right: a month-old copy of a codebase deployed from another box would audit
+//   the wrong thing. Building on 158 over the tailnet remains the real fix.
+//
+// zoobicon (moved here 2026-07-30): audited daily for weeks against
+// /var/www/zoobicon, which does not exist. config/platforms.json points at
+// /root/zoobicon, and that directory holds nothing but a `.claude` folder — no
+// source, no package.json — so there is no checkout on this box either way.
+// Craig's flagship was handed a fabricated 70/'warning' every day, in silence.
+// URL-only until the repo is genuinely cloned here; then it can move back, and
+// lib/checkout.js's guard will keep it honest.
 const URL_ONLY_CONFIG = {
   marcoreid: { urls: ['https://www.marcoreid.com'] },
   davenroe: { urls: ['https://www.davenroe.com'] },
   vapron: { urls: ['https://vapron.ai'] },
+  zoobicon: { urls: ['https://zoobicon.com', 'https://zoobicon.com/builder'] },
 };
 
 // Fixed 2026-07-24 (docs/AUDIT-2026-07-17.md finding #3): this used to be
@@ -441,6 +462,47 @@ async function runAudit(platform) {
 
   const config = PLATFORM_CONFIG[platform];
   if (!config) throw new Error(`Unknown platform: ${platform}`);
+
+  // Preflight: never score a checkout that isn't usable. See lib/checkout.js for
+  // the full story — the short version is that a dead path went to spawnSync as
+  // cwd, the ENOENT text matched no error pattern, and the arithmetic produced a
+  // tidy 70/'warning' that the notifier stays silent about. Two platforms were
+  // audited daily for weeks and the answer was invented.
+  const problem = checkoutProblem(config);
+  if (problem) {
+    console.error(`[audit] ${platform}: NOT AUDITABLE — ${problem}`);
+    const report = {
+      platform,
+      audit_id: Date.now(),
+      timestamp: new Date().toISOString(),
+      status: 'unconfigured',
+      health_score: null,          // null, not a number — nothing was measured
+      build: null, tests: null, checks: null, screenshots: [], errors: [],
+      unauditable: problem,
+    };
+    // Same location the real audits write to, so this appears in the report
+    // history instead of vanishing.
+    try {
+      writeFileSync(join('/opt/jarvis/reports', `${platform}-${report.audit_id}.json`), JSON.stringify(report, null, 2));
+    } catch (e) {
+      console.warn(`[audit] could not write the unconfigured report: ${e.message}`);
+    }
+    // Said out loud, which is the part that was missing. 'warn' not 'alert': this
+    // is a misconfiguration, and the platform itself may be perfectly healthy —
+    // fleet-check still probes its URL every ten minutes. notifyAuditResult is
+    // bypassed deliberately: it is built around a numeric score and a
+    // critical/healthy split that do not apply, and it would auto-dispatch a
+    // repair agent at a codebase that isn't there.
+    await notify({
+      source: 'audit', level: 'warn', key: `audit-unconfigured:${platform}`,
+      title: `${platform}: daily audit cannot run — ${problem}`,
+      body: `The audit for ${platform} is misconfigured, so it is now reporting nothing rather than a made-up score. `
+        + 'Fix the path in config/secrets.env, or move the platform to URL_ONLY_CONFIG if it has no checkout on this box. '
+        + `Re-run with: curl -X POST http://127.0.0.1:9204/audit/run -H 'Content-Type: application/json' -d '{"platform":"${platform}"}'`,
+      speech: `Sir, the daily audit for ${platform} cannot run — its checkout is not where the configuration says it is.`,
+    });
+    return report;
+  }
 
   console.log(`[audit] Starting ${platform} audit at ${new Date().toISOString()}`);
 
