@@ -210,7 +210,11 @@ export async function runOnce() {
       // daily cap permanent instead of daily.
       const s = rollDay(stateOf(name));
       if (s.firstDown) { log(`${name}: recovered — clearing self-heal state`); }
-      saveState(name, { firstDown: null, lastAttempt: s.lastAttempt, day: s.day, attemptsToday: s.attemptsToday });
+      // Spread, don't rebuild. The old literal listed four fields, so any field
+      // added later was silently dropped on every healthy tick — dnsNoticeDay
+      // would have been the first casualty. Clearing it here is deliberate: the
+      // platform resolves again, so the registrar reminder has served its purpose.
+      saveState(name, { ...s, firstDown: null, dnsNoticeDay: null });
     }
   }
 
@@ -260,18 +264,34 @@ export async function runOnce() {
     const dns = await dnsState(url);
     if (dns === 'nxdomain') {
       log(`${name}: DOWN because ${hostOf(url)} does not resolve — registry/DNS, not this box. No agent dispatched.`);
-      // Counts as an attempt on purpose: it puts the cooldown in front of the
-      // next check so this notify can't repeat every five minutes.
-      s.lastAttempt = now();
-      s.attemptsToday += 1;
-      await notify({
-        source: 'self-heal', level: 'alert',
-        title: `${name} is down because its DOMAIN does not resolve`,
-        body: `${url} returns nothing because ${hostOf(url)} has no DNS record — an expired/parked domain or a ` +
-          `deleted zone, not a server fault. Check the registrar. Nothing on this box can fix it, so I have not ` +
-          `spent a repair agent (attempt ${s.attemptsToday}/${MAX_ATTEMPTS_PER_DAY} today).`,
-        speech: `Sir, ${name} is down because its domain no longer resolves. That is a registrar problem — I can't fix it from here.`,
-      });
+      // ONCE A DAY, and NOT counted as a repair attempt.
+      //
+      // My own first cut at this got both halves wrong within the hour (fixed
+      // 2026-07-30, ~1h after shipping): it sat above the cooldown and cap
+      // checks and both notified and counted on every 5-minute tick. Result: 24
+      // identical alerts in Craig's inbox and attemptsToday inflated to 16
+      // against a cap of 6 — the cap check never runs, because it is BELOW this
+      // block. Exactly the mistake this file has a comment about at the top: an
+      // action placed in front of its own guardrails.
+      //
+      // The right shape is neither of those. Counting it as an attempt is a lie
+      // (no agent was spent) and consumes the repair budget, which then
+      // escalates as though repairs had been tried and failed. And the cooldown
+      // is the wrong rate limit for a condition only a human at a registrar can
+      // clear. So: its own once-per-day marker. It re-reminds him each day the
+      // name is still gone, which for an expiring domain is precisely right.
+      if (s.dnsNoticeDay !== today()) {
+        s.dnsNoticeDay = today();
+        await notify({
+          source: 'self-heal', level: 'alert',
+          title: `${name} is down because its DOMAIN does not resolve`,
+          body: `${url} returns nothing because ${hostOf(url)} has no DNS record — an expired or parked domain, ` +
+            `or a deleted zone. Not a server fault, and nothing on this box can fix it: check the registrar. ` +
+            `No repair agent has been spent, and none will be while the name does not resolve. I will remind ` +
+            `you once a day until it does.`,
+          speech: `Sir, ${name} is down because its domain no longer resolves. That is a registrar problem — I can't fix it from here.`,
+        });
+      }
       saveState(name, s); continue;
     }
     if (dns === 'unresolvable') {
@@ -297,7 +317,7 @@ export async function runOnce() {
         const live = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
         if (live.ok || (live.status >= 300 && live.status < 400)) {
           log(`${name}: memory says error but LIVE probe returned ${live.status} — false alarm, clearing state`);
-          saveState(name, { firstDown: null, lastAttempt: s.lastAttempt, day: s.day, attemptsToday: s.attemptsToday });
+          saveState(name, { ...s, firstDown: null, dnsNoticeDay: null });   // spread — see the recovered loop above
           continue;
         }
       } catch { /* live probe also failed — genuinely down, proceed */ }
