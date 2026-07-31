@@ -99,6 +99,37 @@ function killed() {
   try { return existsSync(KILL_FILE); } catch { return false; }
 }
 
+/**
+ * Reporting a finished job is the ONE call that must not be given up on after
+ * a single try (2026-07-31). Everything else here is idempotent — a failed
+ * claim just means we poll again — but the work in a result has ALREADY
+ * HAPPENED. Lose it and the job sits `running` until its lease expires, gets
+ * re-queued, and RUNS A SECOND TIME: for `service.restart` that is a second
+ * restart, and for `shell` it is whatever Craig asked for, twice. Meanwhile
+ * Jarvis tells him it failed.
+ *
+ * Observed for real on the machine this runs on: at 100% CPU the worker's
+ * fetch to the gateway failed while plain curl to the same URL succeeded
+ * 5-for-5. A loaded PC is the NORMAL case for the box that keeps crashing —
+ * which is exactly when Craig most needs the answer to arrive.
+ */
+async function postResult(body, attempts = 4) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await api('result', body);
+      if (i > 1) log(`result posted on attempt ${i}`);
+      return true;
+    } catch (e) {
+      if (i === attempts) {
+        log(`result post FAILED after ${attempts} attempts: ${e.message} — the server will re-queue this job when the lease expires`);
+        return false;
+      }
+      await new Promise(r => setTimeout(r, 1000 * 2 ** (i - 1))); // 1s, 2s, 4s
+    }
+  }
+  return false;
+}
+
 let currentJobId = null;   // the agent job (one at a time — this is his own PC)
 let currentActionId = null; // the fast lane: a typed action, runs alongside
 let heartbeatTimer = null;
@@ -279,8 +310,7 @@ async function runActionJob(job) {
   try {
     const result = await runAction(job);
     log(`action job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
-    await api('result', { job_id: job.id, worker_id: WORKER_ID, ...result })
-      .catch(e => log(`result post failed: ${e.message}`));
+    await postResult({ job_id: job.id, worker_id: WORKER_ID, ...result });
   } finally {
     currentActionId = null;
   }
@@ -336,7 +366,7 @@ async function runJob(job) {
     ? `${result.stdout}\n\n[pc-worker] files touched under ${cwd}:\n${changed.map(f => '  ' + path.relative(cwd, f)).join('\n')}`
     : result.stdout;
 
-  await api('result', { job_id: job.id, worker_id: WORKER_ID, ...result, stdout }).catch(e => log(`result post failed: ${e.message}`));
+  await postResult({ job_id: job.id, worker_id: WORKER_ID, ...result, stdout });
   currentJobId = null;
 }
 
