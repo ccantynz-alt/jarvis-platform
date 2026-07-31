@@ -277,7 +277,10 @@ export async function runTool(name, input, ctx) {
     }
     case 'get_pc_status': {
       try {
-        const s = await withTimeout(fetch(`${ORCHESTRATOR}/pc/status`).then(r => r.json()));
+        // AbortSignal, not statusDigest's local withTimeout — that one is
+        // scoped to its own function and is NOT visible here (caught by
+        // `npm run lint`'s no-undef on the box, which is why lint exists).
+        const s = await fetch(`${ORCHESTRATOR}/pc/status`, { signal: AbortSignal.timeout(4000) }).then(r => r.json());
         const parts = [
           s.online ? `PC worker is ONLINE (last check-in ${s.seconds_since_seen}s ago)` : 'PC worker is NOT checking in',
           s.host ? `host: ${s.host}` : null,
