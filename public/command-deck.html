@@ -454,6 +454,10 @@ function onChatFinal(m) {
   if (streamEl) {
     streamEl.textContent = m.text;
     $('latest-reply').textContent = m.text;
+    // Voice v2 has the SERVER voice the stream, so speak() is never called and
+    // lastSpokenText would stay empty — the echo guard would have nothing to
+    // compare against on exactly the path Craig runs.
+    rememberSpoken(m.text);
     // Speak only whatever trailing fragment wasn't already queued sentence-
     // by-sentence — comparing against the full m.text (not the whitespace-
     // collapsed, 400-char-capped m.speech) so a long reply's tail is never
@@ -721,6 +725,7 @@ function speak(text) {
   if (qs.get('voice') === '0' || voiceMode === 'off') return;
   const t = String(text == null ? '' : text).trim();
   if (!t) return;
+  rememberSpoken(t); // what the next utterance is judged against — see isSelfEcho
   speechQ.push(t);
   while (speechQ.length > 6) speechQ.shift(); // never build a backlog monologue
   updatePendingBadge();
@@ -732,10 +737,13 @@ async function pumpSpeech() {
   if (!ttsPrimed) { updatePendingBadge(); return; } // waits for the first tap
   speechActive = true;
   while (speechQ.length) {
-    // iOS only: close the ear while speaking (speaker bleed + one-shot
-    // recognition). Desktop keeps listening for wake-word barge-in — see
-    // startListening/handleUtterance 2026-07-24.
-    if (IS_IOS && listening && rec) try { rec.abort(); } catch {}
+    // Close the ear while speaking, on EVERY platform (2026-07-31). This was
+    // `if (IS_IOS && ...)` — but desktop runs rec.continuous = true, one
+    // long-lived session, so the mic stayed wide open for the whole reply and
+    // Jarvis transcribed himself. The desktop exemption existed for wake-word
+    // barge-in; that is deliberately given up (Craig's call, 2026-07-31) in
+    // favour of Escape / the STOP bar / the mic button.
+    closeEar();
     const text = speechQ.shift();
     updatePendingBadge();
     try { await speakOnce(text); } catch { /* keep the queue moving */ }
@@ -855,6 +863,11 @@ function sendCommand(c) {
   addChat('YOU', c);
   if (ws && ws.readyState === 1) {
     S.thinking = true;
+    // Shut the ear the moment the turn leaves, not when the answer arrives.
+    // The reply lands seconds later and plays through the speaker; if the mic
+    // is still open then, the loop starts. S.thinking already blocked the mic
+    // being RE-opened — this closes the session that is open right now.
+    closeEar();
     // S.thinking now gates the mic (see startListening), so a reply that never
     // lands — dropped socket, wedged brain — would leave the deck permanently
     // deaf. Bounded: past this, reopen the ear and say so rather than sit
@@ -1075,6 +1088,12 @@ function startListening() {
   rec.onend = () => {
     if (gen !== recGen) return;
     listening = false; updateOrbLabel();
+    // WE closed this one (closeEar): whatever iOS had half-transcribed when
+    // Jarvis started speaking is not a turn Craig took — dropping it here stops
+    // a partial utterance being submitted by the abort itself. Desktop never
+    // accumulates finalText (continuous mode acts on each final result), so
+    // this only bites on iOS — which is exactly where it is hardest to see.
+    if (earClosed) { earClosed = false; finalText = ''; scheduleRelisten(); return; }
     srRestarts++;
     const said = finalText.trim();
     finalText = '';
@@ -1082,6 +1101,94 @@ function startListening() {
     scheduleRelisten(); // keep the ear open (guarded against his own voice)
   };
   try { rec.start(); } catch { /* rapid restart race — ignore */ }
+}
+
+// ── Self-echo defence, second structural pass (2026-07-31) ──────────────────
+// Craig, 2026-07-31: "still having trouble with jarvis hearing its own voice."
+// The KV transcript (memory key `jarvis-conversation`) proved it — whole
+// replies of his own were arriving back as *user* turns, e.g. "nothing yet and
+// that's telling itself it's been sitting cute about 3 minutes...", which is
+// this deck's own sentence with "queued" misheard as "cute".
+//
+// THREE holes, all in this file, none in gateway.html (which had already been
+// hardened the right way on 2026-07-28 and is the template followed here):
+//
+//   1. The ear was never SHUT on desktop. pumpSpeech aborted live recognition
+//      only `if (IS_IOS)`, and desktop runs rec.continuous = true — one
+//      long-lived session. So the mic stayed open across the entire reply.
+//      startListening's gates only stop the mic being RE-OPENED; nothing
+//      closed the session already running. Half a rule is not a rule.
+//   2. `v2TalkOver` let ANY 3+ word utterance heard mid-reply through as a
+//      command provided the text filter didn't call it an echo — i.e. it
+//      reinstated exactly the "rescue an open mic with a text heuristic"
+//      approach that 2026-07-26 recorded as structurally impossible.
+//   3. Nothing checked for echo AFTER speech ended. openFollowUpWindow() opens
+//      a 25-SECOND window in which any utterance is sent with no filter at
+//      all, so the acoustic tail (or a Bluetooth-delayed echo) landed straight
+//      in the brain as Craig's next turn.
+//
+// The order test, and why it is now LCS. A real echo is Jarvis's own words in
+// Jarvis's own ORDER — that is what separates it from coincidental vocabulary
+// overlap. The previous version scored a CONTIGUOUS run at one fixed offset,
+// which any single inserted or dropped word desynchronises for the whole
+// remainder — and dropping/mangling words is precisely what speech-to-text
+// does to a speaker echo. The real 50-word echo above scored far below the
+// threshold for that reason. Longest common SUBSEQUENCE keeps the ordering
+// requirement while tolerating the gaps STT introduces.
+//
+// The floor stays: a filter that silently eats real speech is worse than the
+// echo it prevents (2026-07-28, and it cost an evening). Under ECHO_MIN_WORDS
+// nothing is ever discarded, so "yes", "stop" and "do it" always get through;
+// past ECHO_WINDOW_MS nothing is judged at all; and a discard is always SAID
+// on screen, never silent.
+const ECHO_WINDOW_MS = 3000;  // beyond this, treat speech as genuinely Craig's
+const ECHO_RATIO     = 0.75;
+const ECHO_MIN_WORDS = 4;     // below this, ALWAYS send
+let lastSpokenText = '';
+
+function rememberSpoken(text) {
+  const t = String(text || '').trim();
+  if (t) lastSpokenText = t.slice(-1200); // only the tail can still be echoing
+}
+
+// What Jarvis is saying right now, or just said — the reference an utterance
+// is compared against. The live stream element wins while a reply is forming.
+function spokenReference() {
+  const live = ((streamEl && streamEl.textContent) || '').trim();
+  return live || lastSpokenText;
+}
+
+function isSelfEcho(said, spokenText) {
+  const words = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const heard = words(said);
+  const spoken = words(spokenText);
+  if (!spoken.length || heard.length < ECHO_MIN_WORDS) return false; // too short to carry evidence
+  // Longest common subsequence over WHOLE words (never substrings: "rest" is
+  // not "restarted"). Order-preserving, gap-tolerant.
+  const prev = new Array(spoken.length + 1).fill(0);
+  for (let i = 1; i <= heard.length; i++) {
+    let diag = 0;
+    for (let j = 1; j <= spoken.length; j++) {
+      const tmp = prev[j];
+      prev[j] = heard[i - 1] === spoken[j - 1] ? diag + 1 : Math.max(prev[j], prev[j - 1]);
+      diag = tmp;
+    }
+  }
+  return prev[spoken.length] / heard.length >= ECHO_RATIO;
+}
+
+// Shut the ear NOW, on every platform. startListening() only ever guarded the
+// OPENING of a session; this closes one already running, which is the half
+// that was missing. Safe to call at any time — abort() on a dead recognizer
+// throws, and 'aborted' is already ignored in rec.onerror.
+let earClosed = false; // set when WE aborted, so rec.onend can tell it apart
+function closeEar() {
+  clearTimeout(relistenTimer);
+  if (rec && listening) {
+    earClosed = true;
+    try { rec.abort(); } catch { /* already closed */ }
+  }
+  listening = false;
 }
 
 function handleUtterance(said) {
@@ -1092,41 +1199,36 @@ function handleUtterance(said) {
   //      what he's currently saying — true talk-over-him, like a phone call.
   if (S.speaking || speechActive || S.thinking || streamEl) {
     const bm = said.match(WAKE_RE);
-    const isEcho = (() => {
-      // 2026-07-28 rewrite. The old version scored bag-of-words overlap with
-      // spoken.includes(word) — a SUBSTRING test, so "rest" matched
-      // "restarted" and "the" matched "there" — had no minimum length, and
-      // returned TRUE outright when every word was short. So "yes", "no",
-      // "do it" and "and the rest" were classified as echo and thrown away
-      // while Jarvis was mid-reply. That is the other half of Craig's
-      // complaint: not just looping, but not hearing him when he did speak.
-      //
-      // A real echo is Jarvis's own words in Jarvis's own ORDER. Match whole
-      // words against a contiguous run of what is on screen, and never judge
-      // an utterance too short to carry evidence.
-      const norm = (t) => t.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
-      const spoken = norm((streamEl?.textContent || '') + ' ' + ($('latest-reply')?.textContent || ''));
-      const heard = norm(said);
-      if (!spoken.length || heard.length < 4) return false; // too short to judge → let him through
-      let best = 0;
-      for (let i = 0; i < spoken.length; i++) {
-        let hits = 0;
-        for (let j = 0; j < heard.length; j++) if (spoken[i + j] === heard[j]) hits++;
-        if (hits > best) best = hits;
-      }
-      return best / heard.length >= 0.8;
-    })();
-    const v2TalkOver = typeof V2 !== 'undefined' && V2 && !bm &&
-      said.split(/\s+/).filter(Boolean).length >= 3 && !isEcho;
-    if (!bm && !v2TalkOver) return showHeard(said, true); // echo or noise — ignore
+    // Heard while he is talking or generating: the ONLY way through is the wake
+    // word. `v2TalkOver` used to admit any 3+ word utterance the text filter
+    // didn't recognise as an echo — see the note above isSelfEcho for why that
+    // could never hold. With closeEar() this branch should now be nearly
+    // unreachable; it stays as the backstop for the acoustic tail.
+    if (!bm) return showHeard(said, true);
     interruptSpeech();
     showHeard(said, false);
-    const cmd = bm ? bm[1].trim() : said.trim();
+    const cmd = bm[1].trim();
     if (cmd) return sendCommand(cmd);
     awaitingCommand = Date.now() + 15000;
     addChat('JARVIS', 'Sir?', null); // interrupted: acknowledge silently on screen, ear open
     return;
   }
+  // Just FINISHED talking. This is where the loop actually got in: the 25s
+  // follow-up window below sends anything it hears with no filter, so the tail
+  // of his own reply became Craig's next turn. Judge it against what he just
+  // said, and say so out loud when something is dropped.
+  if (Date.now() - lastSpeechEndAt < ECHO_WINDOW_MS && !WAKE_RE.test(said) && isSelfEcho(said, spokenReference())) {
+    // Never a SILENT drop: if Craig sees this line when he really did speak,
+    // the filter is wrong and he can tell us so (2026-07-28's lesson).
+    console.warn('[voice] ignored as self-echo:', said);
+    showHeard(said + '  — that was my own voice coming back; say again if it was you', true);
+    return;
+  }
+  return routeUtterance(said);
+}
+
+// Jarvis is NOT talking — decide who this utterance was addressed to.
+function routeUtterance(said) {
   if (voiceMode === 'live') { showHeard(said, false); return sendCommand(said); }
   const m = said.match(WAKE_RE);
   if (m) {

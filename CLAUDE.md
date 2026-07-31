@@ -562,6 +562,41 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   compare against, and a CAS there would close it.
   The dispatch confirmation gate is deliberately NOT shared: a preview shown
   on one surface must not be confirmable from another.
+- **The ear is SHUT while Jarvis talks — on every platform, no exceptions
+  (2026-07-31).** This is the third time the echo loop has been "fixed" and the
+  first time the mic was actually closed on desktop. The rule the previous two
+  attempts kept eroding: *an open mic pointed at a speaker cannot be rescued by
+  a text-similarity heuristic.* What was actually wrong in
+  `public/command-deck.html` — gateway.html was already correct and is the
+  template: (1) `pumpSpeech` aborted live recognition only `if (IS_IOS)`, while
+  desktop runs `rec.continuous = true`, one long-lived session — so the mic was
+  open for the entire reply; `startListening`'s gates only ever stopped the mic
+  being RE-opened, never closed one already running. (2) `v2TalkOver` admitted
+  any 3+ word utterance heard mid-reply that the filter didn't call an echo —
+  reinstating exactly the approach 2026-07-26 recorded as impossible. (3)
+  `openFollowUpWindow()` opens a **25-second** window in which any utterance is
+  sent to the brain with NO echo check at all, so the acoustic tail landed as
+  Craig's next turn. All three are closed by `closeEar()` (aborts on every
+  platform, called from `sendCommand` the moment a turn leaves AND from
+  `pumpSpeech`) plus `isSelfEcho()` applied in the post-speech window.
+  **The filter is now LCS, not a contiguous run**, because STT mangles a
+  speaker echo ("queued"→"cute", "asleep"→"a sleep") and one dropped word
+  desynchronises a fixed-offset match for everything after it — a verbatim
+  50-word echo scored under threshold and was sent to the brain. Ordering is
+  still required (that is what separates echo from shared vocabulary); gaps are
+  not. Floors that must stay: under `ECHO_MIN_WORDS` nothing is ever dropped
+  ("yes"/"stop"/"do it"), past `ECHO_WINDOW_MS` nothing is judged, and a drop is
+  always shown on screen — a silent drop is indistinguishable from a broken
+  assistant and has already cost an evening.
+  **Cost, accepted by Craig 2026-07-31: no voice barge-in.** Interrupt with
+  Escape, the STOP bar, or the mic button. Do not reopen the mic during speech
+  to bring it back — a headset with hardware AEC is the only safe route to
+  talk-over, and that is a hardware change, not a code change.
+  **Diagnose it the same way every time:** `curl
+  127.0.0.1:9200/memory/kv/jarvis-conversation` and read the `user` turns. If
+  Jarvis's own sentences appear there, it is the mic, not the brain. That one
+  command found this in minutes. Tests: `test/deck-echo.test.js`, which now
+  carries the two real echoes from the 2026-07-31 transcript as regressions.
 - **Alerts reach his DEVICES now, not just open tabs (2026-07-30).** Every
   notification path before this needed something of Craig's to be listening —
   the inbox is a pull, gateway/deck pushes only land in a connected tab, TTS
