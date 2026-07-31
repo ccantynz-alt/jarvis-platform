@@ -410,15 +410,51 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     let dupNote = null;
     if (res.created && f.file_path) {
       try {
-        const siblings = await fetch(`${MEMORY}/memory/findings?platform=${encodeURIComponent(platform)}&status=dismissed&limit=50`)
+        // Two different questions, and the second one was missing (2026-07-31).
+        //
+        // DISMISSED siblings in the same file: a paraphrase of something already
+        // refuted, worth flagging before anyone spends time on it.
+        //
+        // OPEN or CONFIRMED siblings at the same file AND THE SAME LINE: almost
+        // certainly the SAME defect, re-worded. Proven on the gatetest sweep that
+        // prompted this — #108 "On a Stripe webhook retry the MCP tier emails a
+        // freshly generated API key that the upsert deliberately does not store"
+        // and #18 "MCP subscription webhook e-mails a freshly generated API key on
+        // every Stripe retry while the database keeps the original" are the same
+        // bug at website/app/api/stripe-webhook/route.ts:223, and fingerprints key
+        // on the title's significant words, so the rewording filed a second row.
+        // That one sweep then confirmed it TWICE: a fresh adversarial verifier on
+        // the new row, and the re-check pass on the old one. Two verifier spends
+        // and two entries in Craig's table for one defect.
+        //
+        // Still a NOTE and not a merge, deliberately: two genuinely distinct
+        // defects can share a line, and silently collapsing them would hide one
+        // behind the other's verdict. The line match just makes the note worth
+        // reading rather than routine.
+        const all = await fetch(`${MEMORY}/memory/findings?platform=${encodeURIComponent(platform)}&limit=200`)
           .then(r => r.json());
-        const sameFile = (Array.isArray(siblings) ? siblings : []).filter(s => s.file_path === f.file_path);
-        if (sameFile.length) {
-          const ids = sameFile.map(s => `#${s.id}`).join(', ');
-          log(`note: ${f.file_path} already has ${sameFile.length} DISMISSED finding(s) (${ids}) — this may be a reworded duplicate`);
-          dupNote = `NOTE: ${f.file_path} already carries dismissed finding(s) ${ids}. Fingerprints key on the `
-            + `title's significant words, so a paraphrase of an already-dismissed defect files again — check those before `
-            + 'spending time on this one.';
+        const list = Array.isArray(all) ? all : [];
+        const sameFile = list.filter(s => s.file_path === f.file_path && s.id !== res.id);
+        const dismissed = sameFile.filter(s => s.status === 'dismissed');
+        const sameLine = sameFile.filter(s => (s.status === 'open' || s.status === 'confirmed')
+          && Number.isFinite(f.line) && s.line === f.line);
+
+        const parts = [];
+        if (sameLine.length) {
+          const ids = sameLine.map(s => `#${s.id}`).join(', ');
+          log(`note: ${f.file_path}:${f.line} ALREADY has open finding(s) ${ids} at the same line — likely the same defect, reworded`);
+          parts.push(`LIKELY DUPLICATE: ${ids} ${sameLine.length === 1 ? 'is' : 'are'} already open at `
+            + `${f.file_path}:${f.line}. Fingerprints key on the title's significant words, so a rewording of the same `
+            + 'defect files a second row and gets verified a second time. Compare before treating this as new work.');
+        }
+        if (dismissed.length) {
+          const ids = dismissed.map(s => `#${s.id}`).join(', ');
+          log(`note: ${f.file_path} already has ${dismissed.length} DISMISSED finding(s) (${ids}) — this may be a reworded duplicate`);
+          parts.push(`NOTE: ${f.file_path} already carries dismissed finding(s) ${ids} — a paraphrase of an `
+            + 'already-refuted defect files again, so check those before spending time on this one.');
+        }
+        if (parts.length) {
+          dupNote = parts.join('\n\n');
           await patchFinding(res.id, { verdict: dupNote });
         }
       } catch { /* advisory only — never let this break a sweep */ }
