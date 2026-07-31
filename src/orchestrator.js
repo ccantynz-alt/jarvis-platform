@@ -661,6 +661,12 @@ async function reapExpiredPcLeases() {
 // Atomically claims the oldest queued executor='pc' job, or 204 when none.
 app.post('/worker/claim', async (req, res) => {
   const workerId = (req.body && req.body.worker_id) || 'unknown';
+  // Optional runtime filter (2026-07-31). The worker runs ONE agent job at a
+  // time — correct, it is Craig's own machine — but a typed action takes
+  // milliseconds and must not queue behind a 20-minute diagnostic, or "restart
+  // the worker service" is unanswerable again for exactly as long as Jarvis is
+  // busy being useful elsewhere. The worker's fast lane asks for 'action' only.
+  const wantRuntime = req.body && req.body.runtime;
   const enabled = await pcWorkerEnabled();
   if (!enabled) return res.status(204).end();
   let candidates;
@@ -669,6 +675,7 @@ app.post('/worker/claim', async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
+  if (wantRuntime) candidates = candidates.filter(r => (r.runtime || 'claude') === wantRuntime);
   candidates.sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at));
   const leaseUntil = new Date(Date.now() + PC_LEASE_MS).toISOString();
   for (const row of candidates) {
@@ -710,8 +717,13 @@ app.post('/worker/heartbeat', async (req, res) => {
       value: JSON.stringify({ worker_id: worker_id || 'unknown', host: host || null, elevated: !!elevated, at: new Date().toISOString() }),
     }).catch(() => {});
   }
-  if (job_id) {
-    await jobTransition(job_id, 'running', 'lease renewed', { lease_until: new Date(Date.now() + PC_LEASE_MS).toISOString() }, 'running').catch(() => {});
+  // job_ids (plural) because the worker can hold an agent job and a fast-lane
+  // action at the same time. Renewing only one would let the reaper reclaim
+  // work that is genuinely still running. job_id stays accepted for an older
+  // worker that has not been updated yet.
+  const held = [...(Array.isArray(req.body?.job_ids) ? req.body.job_ids : []), job_id].filter(Boolean);
+  for (const id of held) {
+    await jobTransition(id, 'running', 'lease renewed', { lease_until: new Date(Date.now() + PC_LEASE_MS).toISOString() }, 'running').catch(() => {});
   }
   res.json({ enabled: await pcWorkerEnabled() });
 });

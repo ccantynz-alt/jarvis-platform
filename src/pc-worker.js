@@ -65,6 +65,9 @@ function num(name, fallback, { allowZero = true } = {}) {
 }
 
 const POLL_MS       = num('POLL_MS', 10_000, { allowZero: false });
+// The fast lane polls harder than the agent lane: an action is a person
+// waiting for an answer, and the request is trivial for the server.
+const ACTION_POLL_MS = num('ACTION_POLL_MS', 3_000, { allowZero: false });
 const HEARTBEAT_MS  = num('HEARTBEAT_MS', 30_000, { allowZero: false });
 const DEFAULT_TIMEOUT_MIN = num('TIMEOUT_MIN', 30, { allowZero: false });
 const KILL_FILE     = cfg.KILL_FILE || path.join(process.env.ProgramData || 'C:\\ProgramData', 'jarvis', 'KILL');
@@ -96,7 +99,8 @@ function killed() {
   try { return existsSync(KILL_FILE); } catch { return false; }
 }
 
-let currentJobId = null;
+let currentJobId = null;   // the agent job (one at a time — this is his own PC)
+let currentActionId = null; // the fast lane: a typed action, runs alongside
 let heartbeatTimer = null;
 
 function startHeartbeat() {
@@ -104,8 +108,15 @@ function startHeartbeat() {
   heartbeatTimer = setInterval(() => {
     // `elevated` rides along so the server — and therefore Jarvis — knows what
     // this machine can actually do BEFORE he promises Craig a service restart.
-    api('heartbeat', { worker_id: WORKER_ID, job_id: currentJobId, elevated: isElevated, host: os.hostname() })
-      .catch(e => log(`heartbeat failed: ${e.message}`));
+    // Both held jobs are renewed: renewing only one would let the reaper
+    // reclaim work that is still genuinely running.
+    api('heartbeat', {
+      worker_id: WORKER_ID,
+      job_id: currentJobId,
+      job_ids: [currentJobId, currentActionId].filter(Boolean),
+      elevated: isElevated,
+      host: os.hostname(),
+    }).catch(e => log(`heartbeat failed: ${e.message}`));
   }, HEARTBEAT_MS);
   heartbeatTimer.unref?.();
 }
@@ -263,6 +274,33 @@ function diffChangedFiles(before, after, cap = 25) {
   return changed;
 }
 
+async function runActionJob(job) {
+  currentActionId = job.id;
+  try {
+    const result = await runAction(job);
+    log(`action job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
+    await api('result', { job_id: job.id, worker_id: WORKER_ID, ...result })
+      .catch(e => log(`result post failed: ${e.message}`));
+  } finally {
+    currentActionId = null;
+  }
+}
+
+// The fast lane. Runs on its own timer so a typed action ("restart the worker
+// service") is never stuck behind a long agent job — without it, Jarvis is
+// unable to act on the PC for exactly as long as he is busy being useful on it,
+// which is the complaint this whole change set exists to answer.
+async function actionPoll() {
+  if (killed() || currentActionId) return;
+  const job = await api('claim', { worker_id: WORKER_ID, runtime: 'action' });
+  if (job) await runActionJob(job);
+}
+
+async function actionLoop() {
+  try { await actionPoll(); } catch { /* the agent loop already reports and backs off */ }
+  setTimeout(actionLoop, ACTION_POLL_MS);
+}
+
 async function runJob(job) {
   currentJobId = job.id;
   log(`claimed job ${job.id.slice(0, 8)}: ${String(job.task).slice(0, 100)}`);
@@ -271,12 +309,8 @@ async function runJob(job) {
   // WORKSPACE_ROOT jail below is about where an agent may EDIT FILES; it has
   // no meaning for "restart a service" and must not be applied to it.
   if (job.runtime === 'action') {
-    const result = await runAction(job);
-    log(`action job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
-    await api('result', { job_id: job.id, worker_id: WORKER_ID, ...result })
-      .catch(e => log(`result post failed: ${e.message}`));
     currentJobId = null;
-    return;
+    return runActionJob(job);
   }
 
   // Never let a claimed job cd outside the sanctioned workspace, even if the
@@ -473,6 +507,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   detectElevation().catch(e => log(`elevation check failed: ${e.message}`));
   startHeartbeat();
   loop();
+  actionLoop();
 
   process.on('SIGINT', () => { stopHeartbeat(); process.exit(0); });
   process.on('SIGTERM', () => { stopHeartbeat(); process.exit(0); });
