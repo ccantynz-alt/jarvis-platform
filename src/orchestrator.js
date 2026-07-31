@@ -9,6 +9,7 @@ import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-age
 import { usageHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
+import { planAction, encodeActionJob } from './lib/pc-actions.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -679,7 +680,11 @@ app.post('/worker/claim', async (req, res) => {
     logEvent('DISPATCH', `PC job ${row.id.slice(0, 8)} claimed by ${workerId}`);
     return res.json({
       id: row.id, task: row.task, prompt: row.prompt, path: row.path,
-      timeout_min: row.timeout_min, model: row.model, lease_seconds: PC_LEASE_MS / 1000,
+      // runtime tells the worker HOW to run this: 'claude' (spawn an agent) or
+      // 'action' (a typed verb from lib/pc-actions.js, run directly). Without
+      // it every action job would be handed to the agent path as a prompt.
+      runtime: row.runtime, timeout_min: row.timeout_min, model: row.model,
+      lease_seconds: PC_LEASE_MS / 1000,
     });
   }
   return res.status(204).end();
@@ -689,13 +694,139 @@ app.post('/worker/claim', async (req, res) => {
 // Keeps the worker's presence known and, when it holds a job, extends the
 // lease so the reaper doesn't reclaim work still genuinely in progress.
 app.post('/worker/heartbeat', async (req, res) => {
-  const { worker_id, job_id } = req.body || {};
-  await dbPost('/memory/kv', { key: `pc-worker-last-seen:${worker_id || 'unknown'}`, value: new Date().toISOString() }).catch(() => {});
+  const { worker_id, job_id, elevated, host } = req.body || {};
+  const seenAt = new Date().toISOString();
+  await dbPost('/memory/kv', { key: `pc-worker-last-seen:${worker_id || 'unknown'}`, value: seenAt }).catch(() => {});
+  // Canonical "the PC checked in" key. The per-worker key above cannot be read
+  // back by the server (the id is hostname-derived and the KV API has no
+  // prefix scan), and /pc/status has to answer "is his PC there?".
+  await dbPost('/memory/kv', { key: 'pc-worker-last-seen', value: seenAt }).catch(() => {});
+  // What the PC can actually DO, recorded where the brain can read it — so
+  // Jarvis can say "I can't restart services, the worker isn't elevated"
+  // BEFORE promising a restart, instead of discovering it in a failed job.
+  if (elevated !== undefined) {
+    await dbPost('/memory/kv', {
+      key: 'pc-worker-capability',
+      value: JSON.stringify({ worker_id: worker_id || 'unknown', host: host || null, elevated: !!elevated, at: new Date().toISOString() }),
+    }).catch(() => {});
+  }
   if (job_id) {
     await jobTransition(job_id, 'running', 'lease renewed', { lease_until: new Date(Date.now() + PC_LEASE_MS).toISOString() }, 'running').catch(() => {});
   }
   res.json({ enabled: await pcWorkerEnabled() });
 });
+
+// ── POST /pc/action — typed control of Craig's PC ───────────────────────────
+// { verb, args?, wait_seconds?, timeout_min?, enqueued_by? }
+//
+// Enqueues an executor='pc', runtime='action' job that the worker executes as
+// PowerShell directly (see src/lib/pc-actions.js). Priority 1: a person is
+// waiting on this, so it goes ahead of scheduled paperwork in the claim order.
+//
+// wait_seconds lets a conversational turn get its ANSWER inline rather than a
+// job id — "is Docker running on my PC" should be answered, not tracked. It
+// polls the job row; on timeout it returns what it has with status 'pending',
+// which is a real outcome (the PC may be asleep), not an error.
+//
+// This endpoint does NOT decide whether Craig approved anything. The
+// confirmation gate lives in lib/conversation.js and is the brain's job — see
+// brain-tools.js `pc_control`. Anything reaching here is already authorised.
+app.post('/pc/action', async (req, res) => {
+  const { verb, args, wait_seconds, timeout_min } = req.body || {};
+  let plan;
+  try {
+    plan = planAction(verb, args || {});
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  const capability = await pcWorkerCapability();
+  if (plan.needsAdmin && capability && capability.elevated === false) {
+    return res.status(409).json({
+      error: 'the PC worker is not running elevated, so it cannot control services',
+      remedy: 'run scripts/install-pc-worker.ps1 from an admin PowerShell on the PC',
+      capability,
+    });
+  }
+
+  const jobId = randomUUID();
+  const encoded = encodeActionJob(plan);
+  try {
+    await dbPost('/memory/jobs', {
+      id: jobId,
+      platform: 'craig-pc',
+      executor: 'pc',
+      runtime: encoded.runtime,
+      task: encoded.task,
+      prompt: encoded.prompt,
+      enqueued_by: (req.body && req.body.enqueued_by) || 'api',
+      priority: 1,
+      timeout_min: timeout_min ?? 5,
+      max_attempts: 1,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: 'failed to enqueue PC action: ' + e.message });
+  }
+  logEvent('DISPATCH', `PC action ${jobId.slice(0, 8)} queued — ${plan.description}`);
+
+  const waitMs = Math.min(Math.max(Number(wait_seconds) || 0, 0), 120) * 1000;
+  if (!waitMs) return res.json({ jobId, status: 'queued', action: plan.verb, description: plan.description });
+
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 500));
+    let row;
+    try { row = await dbGet(`/memory/jobs/${jobId}`); } catch { continue; }
+    if (row.status === 'completed' || row.status === 'failed') {
+      return res.json({
+        jobId, status: row.status, action: plan.verb, description: plan.description,
+        exit_code: row.exit_code, output: row.output || '', error: row.error || null,
+      });
+    }
+  }
+  // Not a failure: the PC may simply be asleep. Say which it is.
+  const seen = await pcWorkerLastSeen();
+  return res.json({
+    jobId, status: 'pending', action: plan.verb, description: plan.description,
+    worker_last_seen: seen,
+    note: seen && Date.now() - Date.parse(seen) < 120_000
+      ? 'the worker is online and should pick this up shortly'
+      : 'the PC has not checked in recently — it is probably asleep or offline; the job stays queued',
+  });
+});
+
+// GET /pc/status — is the PC there, and what can it do?
+app.get('/pc/status', async (req, res) => {
+  const [seen, capability] = await Promise.all([pcWorkerLastSeen(), pcWorkerCapability()]);
+  const ageMs = seen ? Date.now() - Date.parse(seen) : null;
+  res.json({
+    online: ageMs != null && ageMs < 120_000,
+    last_seen: seen,
+    seconds_since_seen: ageMs == null ? null : Math.round(ageMs / 1000),
+    elevated: capability ? capability.elevated : null,
+    host: capability ? capability.host : null,
+    enabled: await pcWorkerEnabled(),
+  });
+});
+
+// The per-worker key is `pc-worker-last-seen:<worker_id>`, and the worker id is
+// hostname-derived — which the server does not know in advance. There is no
+// prefix/scan on the KV API (only GET /memory/kv/:key), so the heartbeat also
+// stamps this one canonical key. Checked, not assumed: an earlier draft of this
+// read a `?prefix=` endpoint that does not exist.
+async function pcWorkerLastSeen() {
+  try {
+    const row = await dbGet('/memory/kv/pc-worker-last-seen');
+    return row && row.value ? row.value : null;
+  } catch { return null; }
+}
+
+async function pcWorkerCapability() {
+  try {
+    const row = await dbGet('/memory/kv/pc-worker-capability');
+    return row && row.value ? JSON.parse(row.value) : null;
+  } catch { return null; }
+}
 
 // POST /worker/result { job_id, worker_id, code, stdout, stderr, timedOut }
 app.post('/worker/result', async (req, res) => {

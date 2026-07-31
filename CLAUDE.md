@@ -257,6 +257,56 @@ offline) re-queues automatically. Excluded from the daily audit sprint (no
 repo, no build). Kill switches: memory KV `pc-worker-enabled`, local
 `%ProgramData%\jarvis\KILL` file, or revoke the token.
 
+**PC worker, second capability pass (2026-07-31) — Jarvis can now OPERATE the
+PC, not just run agents on it.** Craig: "jarvis needs better access to the pc so
+he can restart services and do anything he needs." What prompted it, verbatim
+from that day's `jarvis-conversation` transcript, with his PC crashing and a
+diagnostic job stuck in the queue:
+> Craig: "restart the worker service"
+> Jarvis: "That's the one thing I can't do from here, sir. The only channel to
+> that machine is the worker itself — it calls out to me, I never reach in."
+- **`src/lib/pc-actions.js` is the vocabulary** — 10 typed verbs run as
+  PowerShell directly, no agent spawn, sub-second, costs no subscription turn:
+  read-only `service.status` / `service.list` / `process.list` / `system.info` /
+  `eventlog.errors`, and mutating `service.restart` / `.start` / `.stop` /
+  `process.kill` / `shell` (the "anything he needs" escape hatch). PURE and
+  fully unit-tested (`test/pc-actions.test.js`).
+- **Read-only runs instantly; anything that CHANGES the machine goes through the
+  SAME dispatch confirmation gate as a fleet job** (Craig's ruling, 2026-07-31).
+  Deliberately the same gate, not a second one — that path has been got wrong
+  twice already and every fix must keep landing in one place with one test file.
+  `mutates` defaults to TRUE for an undeclared verb: getting it backwards means
+  a misheard sentence changing his machine.
+- **Transport is `-EncodedCommand`, never stdin, and never string
+  interpolation.** MEASURED before shipping: `powershell -Command -` runs
+  NOTHING for a multi-line script and exits 0 with empty output — every action
+  would have "succeeded" silently returning nothing. Base64-of-UTF-16LE is also
+  inherently argv-safe. Arguments are embedded via `psQuote()` (PowerShell
+  single-quoted literals have no escapes but `''`), so nothing untrusted ever
+  reaches a shell parser — the same bug class already fixed on this path in
+  2026-07-26.
+- **Elevation is the whole point and it is NOT automatic.** `Restart-Service`
+  needs an admin token. `scripts/install-pc-worker.ps1` now registers the task
+  `-RunLevel Highest` — still as **Craig's own account**, never SYSTEM, because
+  the worker spawns `claude` against the subscription login under his
+  `%USERPROFILE%\.claude`. The worker MEASURES its own elevation at startup,
+  ships it in every heartbeat (→ KV `pc-worker-capability`), and an admin-only
+  verb attempted without it returns the sentence that fixes it rather than
+  "Access is denied". **As of 2026-07-31 the live task is `RunLevel: Limited` —
+  Craig must re-run the installer from an ADMIN PowerShell once; until he does,
+  service control correctly refuses.**
+- **`JarvisPcWorkerWatchdog`** — a second scheduled task, every 5 min, as
+  SYSTEM, that starts `JarvisPcWorker` if its process is gone. A dead worker
+  cannot restart a dead worker; no capability inside the worker can ever close
+  that hole. Deliberately one inline command with no repo dependency, because
+  it must work when everything else has not.
+- **Server side:** `POST /pc/action {verb, args, wait_seconds}` and
+  `GET /pc/status` on the orchestrator (:9205, loopback). Actions ride the
+  existing jobs table on the **`runtime`** column (`'action'` vs `'claude'`) —
+  no schema migration, no existing reader changed. `/worker/claim` returns
+  `runtime` (without it every action would be handed to the agent path as a
+  prompt). Brain tools: `pc_control` and `get_pc_status`.
+
 **Second box, 158 (Vapron, 149.28.119.158 / `vapron-158.tailbd6217.ts.net`):**
 on the tailnet, health exposed tailnet-only (`tailscale serve --https=8443`
 → Vapron's ops-agent `:9095/health`), and `jarvis-heartbeat.timer` (NOT
@@ -432,6 +482,7 @@ jarvis-platform/
 │   └── lib/
 │       ├── cookies.js         — ONE cookie parser that cannot throw (a raw upgrade handler dies if it does)
 │       ├── findings.js        — pure code-health logic: fingerprints, lenses, verification budget
+│       ├── pc-actions.js      — the typed vocabulary of what Jarvis may do to Craig's PC (pure)
 │       ├── slack-auth.js      — who may command Jarvis from Slack; FAILS CLOSED
 │       └── push.js            — device alerts via ntfy, the channel that works with no tab open
 ├── scripts/

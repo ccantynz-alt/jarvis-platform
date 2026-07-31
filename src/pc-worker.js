@@ -24,6 +24,7 @@ import { existsSync, readFileSync, statSync, readdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
+import { decodeActionJob, buildPowerShellArgs, cleanStderr } from './lib/pc-actions.js';
 
 function loadEnvFile(p) {
   if (!existsSync(p)) return {};
@@ -101,7 +102,9 @@ let heartbeatTimer = null;
 function startHeartbeat() {
   stopHeartbeat();
   heartbeatTimer = setInterval(() => {
-    api('heartbeat', { worker_id: WORKER_ID, job_id: currentJobId })
+    // `elevated` rides along so the server — and therefore Jarvis — knows what
+    // this machine can actually do BEFORE he promises Craig a service restart.
+    api('heartbeat', { worker_id: WORKER_ID, job_id: currentJobId, elevated: isElevated, host: os.hostname() })
       .catch(e => log(`heartbeat failed: ${e.message}`));
   }, HEARTBEAT_MS);
   heartbeatTimer.unref?.();
@@ -156,6 +159,77 @@ function runClaude(prompt, cwd, timeoutMin) {
   });
 }
 
+// ── Typed actions (2026-07-31) ───────────────────────────────────────────────
+//
+// A second kind of job, alongside the `claude` agent above: a verb from
+// lib/pc-actions.js executed directly by PowerShell. No agent, no subscription
+// turn, sub-second. This is what makes "restart the worker service" a sentence
+// Jarvis can act on rather than one he has to apologise for.
+//
+// ELEVATION. Restarting a Windows service needs an administrator token. The
+// scheduled task is registered with -RunLevel Highest (scripts/
+// install-pc-worker.ps1), but that can silently not be the case — an older
+// registration, a task recreated by hand, a different machine. So the worker
+// MEASURES it at startup and reports it in every heartbeat, and an admin-only
+// verb attempted without it fails with that sentence rather than a raw
+// "Access is denied" that nobody can act on.
+let isElevated = null;   // null = not yet known
+
+function powershell(script, timeoutMin) {
+  return new Promise((resolve) => {
+    const proc = spawn('powershell.exe', buildPowerShellArgs(script), {
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '', stderr = '', timedOut = false, settled = false;
+    const killTimer = setTimeout(() => {
+      timedOut = true;
+      try { spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F']); } catch { /* already gone */ }
+    }, Math.max(1, timeoutMin) * 60_000);
+    proc.stdout.on('data', d => { stdout += d.toString(); });
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    const settle = (code, err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      const cleaned = cleanStderr(err ? err + '\n' + stderr : stderr);
+      resolve({ code, stdout: stdout.slice(-8000), stderr: cleaned.slice(-2000), timedOut });
+    };
+    proc.on('close', code => settle(code));
+    proc.on('error', err => settle(null, err.message));
+  });
+}
+
+async function detectElevation() {
+  const r = await powershell(
+    `([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()` +
+    `).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)`, 1);
+  isElevated = /true/i.test(r.stdout);
+  log(`elevation: ${isElevated ? 'ADMINISTRATOR — service control available' : 'standard user — service control will FAIL (re-run scripts/install-pc-worker.ps1 as admin)'}`);
+  return isElevated;
+}
+
+async function runAction(job) {
+  let plan;
+  try {
+    plan = decodeActionJob(job);
+  } catch (e) {
+    return { code: 1, stdout: '', stderr: `refused: ${e.message}`, timedOut: false };
+  }
+  if (plan.needsAdmin && isElevated === false) {
+    // Say the actionable thing. "Access is denied" sends Craig hunting; this
+    // names the one command that fixes it.
+    return {
+      code: 1, stdout: '', timedOut: false,
+      stderr: 'refused: this needs an elevated worker and JarvisPcWorker is running as a standard user. ' +
+        'Fix: run scripts/install-pc-worker.ps1 from an ADMIN PowerShell on the PC, then restart the task.',
+    };
+  }
+  log(`action ${plan.verb} — ${plan.description}`);
+  const r = await powershell(plan.script, job.timeout_min || 5);
+  return r;
+}
+
 // Bounded recursive mtime snapshot — used to tell Craig WHAT a PC job
 // touched. Deliberately a listing, not a content upload (that needs a real
 // artifact store, tracked separately) — but a listing already answers "did
@@ -192,6 +266,18 @@ function diffChangedFiles(before, after, cap = 25) {
 async function runJob(job) {
   currentJobId = job.id;
   log(`claimed job ${job.id.slice(0, 8)}: ${String(job.task).slice(0, 100)}`);
+
+  // A typed action: PowerShell, directly, no agent and no workspace. The
+  // WORKSPACE_ROOT jail below is about where an agent may EDIT FILES; it has
+  // no meaning for "restart a service" and must not be applied to it.
+  if (job.runtime === 'action') {
+    const result = await runAction(job);
+    log(`action job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
+    await api('result', { job_id: job.id, worker_id: WORKER_ID, ...result })
+      .catch(e => log(`result post failed: ${e.message}`));
+    currentJobId = null;
+    return;
+  }
 
   // Never let a claimed job cd outside the sanctioned workspace, even if the
   // dispatcher supplied an odd path.
@@ -382,6 +468,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
     process.exit(1);
   }
   log(`starting — worker_id=${WORKER_ID} gateway=${GATEWAY_URL} workspace=${WORKSPACE_ROOT}`);
+  // Measure elevation before the first heartbeat so the server never has to
+  // guess, and so the log says plainly what this worker can and cannot do.
+  detectElevation().catch(e => log(`elevation check failed: ${e.message}`));
   startHeartbeat();
   loop();
 

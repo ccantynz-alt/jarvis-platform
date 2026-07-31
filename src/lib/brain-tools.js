@@ -13,9 +13,10 @@
 
 import {
   handleStatus, handlePlatformStatus, handleJobs, handleAsk,
-  handleBriefing, handleRoadmap, previewDispatch, gateNote,
+  handleBriefing, handleRoadmap, previewDispatch, previewPcAction, handlePcAction, gateNote,
   platformNames, matchPlatform, MEMORY, ORCHESTRATOR,
 } from './conversation.js';
+import { planAction } from './pc-actions.js';
 
 // ── Browser tool bridge ──────────────────────────────────────────────────────
 const BROWSER = 'http://127.0.0.1:9211';
@@ -144,6 +145,18 @@ export const TOOLS = [
       task: { type: 'string', description: 'what the agent should do' },
       confirmed: { type: 'boolean', description: 'true ONLY after Craig has verbally confirmed' },
     }, required: ['task'] } },
+  { name: 'pc_control', description: "Act on CRAIG'S OWN WINDOWS PC (not the fleet box) — check or restart Windows services, list/kill processes, read the crash & error event log, snapshot the machine, or run a PowerShell command. Diagnostics run instantly. Anything that CHANGES the machine is staged and needs Craig's spoken yes. Use this for 'restart the worker service', 'why does my PC keep crashing', 'what's eating my memory'.",
+    input_schema: { type: 'object', properties: {
+      action: { type: 'string', description: "one of: service.status, service.list, process.list, system.info, eventlog.errors (all read-only, instant); service.restart, service.start, service.stop, process.kill, shell (all staged for confirmation)" },
+      name: { type: 'string', description: 'service or process name, for the service.*/process.kill actions' },
+      pid: { type: 'number', description: 'process id, as an alternative to name for process.kill' },
+      command: { type: 'string', description: 'PowerShell to run, for action=shell' },
+      hours: { type: 'number', description: 'how far back to read the event log (eventlog.errors, default 48)' },
+      top: { type: 'number', description: 'how many rows for the list actions' },
+      filter: { type: 'string', description: 'substring filter for service.list' },
+    }, required: ['action'] } },
+  { name: 'get_pc_status', description: "Is Craig's PC online, is the Jarvis worker running on it, and does it have administrator rights (needed to restart services)? Check this before promising anything on the PC.",
+    input_schema: { type: 'object', properties: {}, required: [] } },
   { name: 'web_search', description: "Search the public web for a query and get back a list of result titles, URLs and snippets. Use to find pages before fetching/rendering them.",
     input_schema: { type: 'object', properties: { query: { type: 'string' }, count: { type: 'number', description: 'how many results (1-10, default 6)' } }, required: ['query'] } },
   { name: 'fetch_url', description: "Fetch a web page's text WITHOUT running JavaScript (fast). Returns title + readable text. Use for articles, docs, APIs; use render_page when the site needs JS or you need a screenshot.",
@@ -261,6 +274,56 @@ export async function runTool(name, input, ctx) {
       return `NEEDS CONFIRMATION. A dispatch to "${platform}" is prepared: ${task}. ` +
         `It will NOT run until Craig affirms in a LATER reply — his next message goes through the gate, not through you. ` +
         `Tell him what you'll do, ask him to say yes, and wait. Do not call this tool again for the same job.`;
+    }
+    case 'get_pc_status': {
+      try {
+        const s = await withTimeout(fetch(`${ORCHESTRATOR}/pc/status`).then(r => r.json()));
+        const parts = [
+          s.online ? `PC worker is ONLINE (last check-in ${s.seconds_since_seen}s ago)` : 'PC worker is NOT checking in',
+          s.host ? `host: ${s.host}` : null,
+          s.elevated === true ? 'running as ADMINISTRATOR — service control available'
+            : s.elevated === false ? 'running as a standard user — it CANNOT restart services; Craig must re-run scripts/install-pc-worker.ps1 from an admin PowerShell'
+              : 'elevation unknown (no heartbeat carrying it yet)',
+          s.enabled === false ? 'the server-side kill switch (KV pc-worker-enabled) is OFF' : null,
+        ].filter(Boolean);
+        if (!s.online) {
+          parts.push('nothing will run on the PC until the worker checks in — it is asleep, offline, or the JarvisPcWorker scheduled task is not running');
+        }
+        return parts.join('. ') + '.';
+      } catch (e) {
+        return `Could not read PC status: ${e.message}`;
+      }
+    }
+    case 'pc_control': {
+      const action = String(input.action || '').trim();
+      const args = {};
+      for (const k of ['name', 'pid', 'command', 'hours', 'top', 'filter']) {
+        if (input[k] !== undefined && input[k] !== null && input[k] !== '') args[k] = input[k];
+      }
+      let plan;
+      try {
+        plan = planAction(action, args);
+      } catch (e) {
+        return `That is not something I can do on the PC: ${e.message}`;
+      }
+      // Read-only: just do it and report. Craig asked for diagnostics to be
+      // instant — making him confirm "what's using my memory" is friction with
+      // no safety value, because nothing changes.
+      if (!plan.mutates) {
+        const res = await handlePcAction(plan.verb, plan.args, () => {}, 45);
+        return res.text;
+      }
+      // Mutating: the SAME gate as dispatch_job. The tool can only ever
+      // PREVIEW — `confirmed` is not even an input, so the model has no way to
+      // self-confirm and act on Craig's machine.
+      const staged = previewPcAction(ctx.gate, plan);
+      if (staged.alreadyStaged) {
+        return `ALREADY STAGED — "${plan.description}" is still waiting on Craig from an earlier turn. ` +
+          `Calling this tool again does NOTHING and you must not imply otherwise. Tell him it is staged and that a plain "yes" starts it, then stop.`;
+      }
+      return `NEEDS CONFIRMATION. On the PC this would: ${plan.description}. ` +
+        `It will NOT run until Craig affirms in a LATER reply — his next message goes through the gate, not through you. ` +
+        `Tell him what you would do, ask him to say yes, and wait. Do not call this tool again for the same action.`;
     }
     case 'web_search': {
       const r = await browserCall('/browser/search', { query: input.query || '', count: input.count });

@@ -589,6 +589,74 @@ export function previewDispatch(gate, platform, task) {
 }
 
 /**
+ * Stage a PC action (2026-07-31). Craig's ruling: diagnostics on his PC run
+ * instantly, anything that CHANGES the machine waits for his word — restarting
+ * a service, killing a process, running a shell command.
+ *
+ * It deliberately reuses the dispatch gate rather than inventing a second
+ * confirmation path. That gate is the only route from "Craig said go" to
+ * something with full permissions, it has been got wrong twice (too narrow on
+ * 2026-07-30, then too loose the same day), and every fix since has landed in
+ * ONE place with ONE test file. A parallel gate would double that surface and
+ * halve the attention each half gets.
+ */
+export function previewPcAction(gate, plan) {
+  const m = `On the PC I'm ready to ${plan.description}. Shall I, sir? Say yes and I'll do it.`;
+  if (!gate) return { text: m, speech: m, previewed: true };
+  const same = gate.pending && gate.pending.kind === 'pc' &&
+    gate.pending.verb === plan.verb &&
+    JSON.stringify(gate.pending.args || {}) === JSON.stringify(plan.args || {});
+  if (same) {
+    gate.pending.restaged = (gate.pending.restaged || 0) + 1;
+    gate.pending.expiresTurn = gate.turn + GATE_TTL_TURNS;
+    return { text: m, speech: m, previewed: true, alreadyStaged: true };
+  }
+  gate.pending = {
+    kind: 'pc', verb: plan.verb, args: plan.args, description: plan.description,
+    // platform/task are kept so every existing reader of gate.pending
+    // (statusDigest, gateNote, the lapse path) keeps working unchanged.
+    platform: 'craig-pc', task: plan.description,
+    turn: gate.turn, expiresTurn: gate.turn + GATE_TTL_TURNS,
+  };
+  return { text: m, speech: m, previewed: true };
+}
+
+/** Run a confirmed PC action through the orchestrator and report it plainly. */
+export async function handlePcAction(verb, args, onEvent = () => {}, waitSeconds = 45) {
+  try {
+    const r = await fetch(`${ORCHESTRATOR}/pc/action`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verb, args, wait_seconds: waitSeconds, enqueued_by: 'brain' }),
+    });
+    const data = await r.json();
+    if (data.error) {
+      const remedy = data.remedy ? ` ${data.remedy}.` : '';
+      const m = `I couldn't do that on the PC, sir — ${data.error}.${remedy}`;
+      return { text: m, speech: m, data };
+    }
+    if (data.status === 'pending') {
+      const m = `It's queued for the PC, sir, but the machine hasn't picked it up — ${data.note}.`;
+      return { text: m, speech: m, data };
+    }
+    const failed = data.status === 'failed' || (data.exit_code != null && data.exit_code !== 0);
+    const detail = String(data.output || data.error || '').trim();
+    if (failed) {
+      const m = `That didn't work on the PC, sir. ${detail.slice(0, 600) || 'No detail came back.'}`;
+      return { text: m, speech: m, data };
+    }
+    return {
+      text: detail ? `Done on the PC — ${data.description}.\n\n${detail.slice(0, 3000)}` : `Done on the PC — ${data.description}.`,
+      speech: `Done, sir.`,
+      data,
+    };
+  } catch (e) {
+    const m = `I couldn't reach the dispatcher to run that on the PC, sir — ${e.message}`;
+    return { text: m, speech: m };
+  }
+}
+
+/**
  * Call FIRST on every command. A dispatch staged in an EARLIER turn runs when
  * Craig affirms, is dropped when he declines, and otherwise KEEPS WAITING —
  * ordinary conversation no longer destroys it, and when it finally lapses the
@@ -605,6 +673,12 @@ export async function resolveDispatchGate(gate, text, onEvent = () => {}) {
 
   if (verdict === 'yes') {
     gate.pending = null;
+    // A staged PC action runs on Craig's machine, not through a fleet agent.
+    if (p.kind === 'pc') {
+      const res = await handlePcAction(p.verb, p.args, onEvent);
+      gate.launched = { platform: 'craig-pc', task: p.description, jobId: res.data?.jobId || null, ok: !!res.data?.jobId };
+      return { handled: true, ...res };
+    }
     const res = await handleDispatch(p.task, p.platform, onEvent);
     // Let the brain know out loud what its own tool could not do — see
     // gateNote(). Without this the model has no evidence the job ever ran.
