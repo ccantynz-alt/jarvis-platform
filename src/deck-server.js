@@ -139,7 +139,14 @@ app.use(express.json());
 // guessing game — the client shows this hash on screen; if it matches the
 // repo HEAD the deploy chain (git → box → browser) is proven end to end.
 let BUILD = 'unknown';
-try { BUILD = execSync('git rev-parse --short HEAD', { cwd: '/opt/jarvis', encoding: 'utf8' }).trim(); } catch {}
+// -c safe.directory for the same reason as dashboard-server's lastCommit(): this
+// service has no HOME, so git cannot read root's config. /opt/jarvis is root-owned
+// so it works today — this keeps it working if that ever changes, since the catch
+// would otherwise leave BUILD as 'unknown' with no explanation.
+try {
+  BUILD = execSync('git -c safe.directory=/opt/jarvis rev-parse --short HEAD',
+    { cwd: '/opt/jarvis', encoding: 'utf8' }).trim();
+} catch (e) { console.warn(`[deck] could not read build sha: ${e.message}`); }
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'jarvis-deck', build: BUILD, clients: wss?.clients?.size ?? 0, link: 'ready', tts: ttsEnabled() });

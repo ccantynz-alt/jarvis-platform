@@ -406,10 +406,30 @@ app.get('/api/platform-status', async (req, res) => {
   } catch {}
 
   // Last git commit per platform (deploy proxy)
+  //
+  // `-c safe.directory` because this silently returned null for the one platform
+  // it mattered most for (2026-07-31). /opt/alecrae is owned by alecrae:alecrae
+  // and this service runs as root with no HOME (the unit sets neither `User=` nor
+  // `Environment=HOME`), so git refused it for "dubious ownership", spawnSync's
+  // non-zero exit was never checked, `out.stdout` was empty, and the function
+  // returned null exactly as if the platform had no commits. The dashboard's "last
+  // deploy" column was therefore blank for AlecRae — the platform that is 28
+  // commits behind production and whose deploy staleness is the single most
+  // important fact on that panel.
+  //
+  // Same root cause as code-health's checkoutInfo(), found by looking for the rest
+  // of the class after fixing that one. The status check is new too: an empty
+  // stdout from a FAILED git call and an empty stdout from a repo with no commits
+  // are not the same thing, and only one of them deserves silence.
   function lastCommit(path) {
     if (!path || !existsSync(path)) return null;
     try {
-      const out = spawnSync('git', ['-C', path, 'log', '-1', '--format=%ci %s'], { encoding: 'utf8' });
+      const out = spawnSync('git', ['-c', `safe.directory=${path}`, '-C', path, 'log', '-1', '--format=%ci %s'],
+        { encoding: 'utf8' });
+      if (out.status !== 0) {
+        console.warn(`[dashboard] git log failed for ${path}: ${String(out.stderr || '').split('\n')[0]}`);
+        return null;
+      }
       return out.stdout?.trim().slice(0, 80) || null;
     } catch { return null; }
   }
