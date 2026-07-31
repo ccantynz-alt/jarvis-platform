@@ -37,6 +37,20 @@ const LEVEL_ORDER = { info: 1, warn: 2, alert: 3 };
 const LEVEL_PRIORITY = { info: 2, warn: 4, alert: 5 };
 const LEVEL_TAGS = { info: 'information_source', warn: 'warning', alert: 'rotating_light' };
 
+// PER PROCESS, and that matters more than it looks (noted 2026-07-31).
+//
+// The long-running services — deck, gateway, metrics, orchestrator, agents — keep
+// this across every alert they raise, so the dedupe and the hourly cap below work
+// as written. The ONESHOT ones do not: self-heal and code-health are a fresh
+// process on every timer tick, so this map is always empty for them and neither
+// limit ever applies. Their protection has to be their own durable state — as
+// self-heal's `dnsNoticeDay` marker is, which is why gatetest produced 42 "does
+// not resolve" detections and exactly one alert on 31 July, against 8 the day
+// before.
+//
+// So: do not add a limit HERE and assume it covers a timer-driven caller. It will
+// look correct in a test, work in the services you are watching, and do nothing at
+// all in the ones that fire every five minutes.
 const state = {
   warned: false,          // "no topic configured" is said once, not per alert
   recent: new Map(),      // title → {at, level} of the last push, for dedupe
