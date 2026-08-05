@@ -771,6 +771,43 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   this, run both directions — the false-affirm list AND the 21 real
   confirmations.
 
+## GOVERNANCE — how autonomous work gets authorised (2026-08-05)
+
+**Read `docs/GOVERNANCE.md` before adding any capability that changes something
+outside this repo.** The org had reports flowing UP and no approvals coming
+DOWN: an agent that decided to act, acted. Proven the same day — a repair agent
+dispatched for a one-line merge defect in gluecron committed a **1,028-line
+feature across 9 files**, exited 0, and pushed to a live product repo. Every
+guardrail worked; they all governed which work to START. **A prompt is a
+request, not a boundary** — there was no gate on what came back.
+
+The model is PROPOSE → REVIEW (by a DIFFERENT agent, the domain's officer) →
+APPROVE/REJECT/ESCALATE → EXECUTE, with an append-only audit trail. One
+mechanism shared by all six officers (cto/coo/cfo/clo/cmo/cro — matching
+`config/agents.json`), because six bespoke review paths would drift and five
+would rot unnoticed. Separation of duties (`proposer !== reviewer`) is enforced
+in `canTransition()`, not by convention. `ALWAYS_HUMAN` change classes —
+payment, credential, legal_filing, production_data, public_content,
+infrastructure — plus anything `high` risk or of *unrecognised* risk can never
+be agent-approved and escalate by construction. Note the deliberate
+counter-property: ordinary low/medium `code_fix` work IS agent-approvable and is
+tested as such, because a control that blocks everything gets switched off.
+Pure logic + tests: `src/lib/proposals.js`, `test/proposals.test.js`.
+
+**Repository boundaries (Craig: "separate repo zero cross contamination"):**
+Jarvis may fix **Jarvis** directly — it owns this repo. Everything else is
+**proposal-only**: observe, describe, file, track, escalate. Jarvis does not
+merge another product's code and does not host product source (a working copy on
+this box goes stale — `194 behind` — and drifts — `ahead 216` — and blurs
+ownership). The end state is merge authority inside each platform's own repo,
+with that repo's own credential and CI; the isolation comes from **credential
+scope + review gate, not from an agent's label**. Ordering, most safety first:
+(1) stop writing to `main`, branch+PR only; (2) per-repo credentials replacing
+the single root SSH key; (3) merge authority moves into each platform.
+
+**`FIX_RUNNER_MODE=off` since 2026-08-05** and it stays off until it emits
+PR-backed proposals instead of pushing. Findings keep accumulating safely.
+
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
 1. **No external watcher — REPLACED 2026-07-30, not patched.** The whole
