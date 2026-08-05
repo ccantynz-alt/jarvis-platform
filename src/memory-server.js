@@ -171,6 +171,10 @@ try { db.exec('ALTER TABLE jobs ADD COLUMN worker_id TEXT'); } catch { /* alread
 // express 500s, fleet-check.sh's 10-minute writes are all discarded, and
 // self-heal sees an empty fleet. A table's owner must create its own columns.
 try { db.exec('ALTER TABLE platform_state ADD COLUMN consecutive_critical INTEGER DEFAULT 0'); } catch { /* already present */ }
+// Same reasoning for audit-runner.js's repeat bookkeeping (2026-08-05): this
+// service must not be the one that 500s because another service hasn't started.
+try { db.exec('ALTER TABLE platform_state ADD COLUMN audit_fingerprint TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE platform_state ADD COLUMN audit_repeat INTEGER DEFAULT 0'); } catch { /* already present */ }
 try { db.exec('ALTER TABLE code_findings ADD COLUMN commit_sha TEXT'); } catch { /* already present */ }
 // When a finding was last RE-CHECKED against current code (2026-07-30). Without
 // this the table only ever grows: nothing marked anything `fixed`, so a confirmed
@@ -308,25 +312,49 @@ app.post('/memory/platform/update', (req, res) => {
   // Omission now means "leave it alone"; only an explicit value writes. An
   // explicit 0 or [] still lands, which is why these are `!== undefined` checks
   // and not `||`.
-  const existing = db.prepare('SELECT * FROM platform_state WHERE platform = ?').get(platform);
-  const keep = (v, fallback) => (v === undefined || v === null ? fallback : v);
+  // 2026-08-05: the read-then-preserve version of this was fixed twice and broke
+  // a THIRD time the moment audit-runner.js added audit_fingerprint/audit_repeat
+  // — every 10-minute fleet-check write nulled them, so the repeat counter
+  // could never reach its threshold and the suppression it feeds silently did
+  // nothing. Caught only because the behaviour was verified live rather than
+  // read.
+  //
+  // The pattern was the defect, not any individual omission: with INSERT OR
+  // REPLACE, a column is destroyed by NOT being mentioned, so every future
+  // column added by any other service is wiped by default and the failure is
+  // silent. An UPSERT inverts that — it touches exactly the columns named here
+  // and leaves every other column, present or future, alone by construction.
+  // Do not turn this back into INSERT OR REPLACE.
+  //
+  // Omission still means "leave it alone" (COALESCE against the stored value),
+  // while an explicit 0 or [] still lands — which is why these are null checks
+  // and not `||`.
+  // The parameters are referenced directly rather than through `excluded.`
+  // because the two branches need different fallbacks for the same null:
+  // a fresh row falls back to the column default, an existing row falls back to
+  // its stored value. `status` is NOT NULL, and a column DEFAULT does not apply
+  // when NULL is passed explicitly — so the INSERT half must spell 'unknown'
+  // out, while `excluded.status` would then carry that 'unknown' into the
+  // UPDATE half and overwrite a real status with it.
   db.prepare(`
-    INSERT OR REPLACE INTO platform_state
-    (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, notes, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
+    INSERT INTO platform_state (platform, status, last_known_errors, health_score, notes, updated_at)
+    VALUES (@platform, COALESCE(@status, 'unknown'), @last_known_errors, COALESCE(@health_score, 0), @notes, @updated_at)
+    ON CONFLICT(platform) DO UPDATE SET
+      status            = COALESCE(@status,            platform_state.status),
+      last_known_errors = COALESCE(@last_known_errors, platform_state.last_known_errors),
+      health_score      = COALESCE(@health_score,      platform_state.health_score),
+      notes             = COALESCE(@notes,             platform_state.notes),
+      updated_at        = @updated_at
+  `).run({
     platform,
-    keep(status, existing?.status ?? 'unknown'),
-    last_known_errors === undefined || last_known_errors === null
-      ? (existing?.last_known_errors ?? '[]')
+    status: status ?? null,
+    last_known_errors: last_known_errors === undefined || last_known_errors === null
+      ? null
       : JSON.stringify(last_known_errors),
-    existing?.last_audit ?? null,
-    existing?.last_screenshot ?? null,
-    keep(health_score, existing?.health_score ?? 0),
-    existing?.consecutive_critical ?? 0,
-    keep(notes, existing?.notes ?? null),
-    new Date().toISOString()
-  );
+    health_score: health_score ?? null,
+    notes: notes ?? null,
+    updated_at: new Date().toISOString(),
+  });
   res.json({ ok: true });
 });
 

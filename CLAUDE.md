@@ -851,7 +851,23 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
    and orchestrator's `logToMemory` writes a JOB outcome ('healthy'/'error' from
    an exit code, per job). The dangerous direction is fixed — an audit can no
    longer erase a real outage, see `lib/health-status.js` — and omitted columns
-   are now preserved rather than zeroed. What remains: fleet-check's 'healthy'
+   are now preserved rather than zeroed. **The column-loss half is now
+   STRUCTURAL, not another patch (2026-08-05):** `/memory/platform/update` had
+   been fixed twice and broke a FOURTH time the moment audit-runner added
+   `audit_fingerprint`/`audit_repeat` — fleet-check's 10-minute write nulled
+   them, so the repeat counter never reached its threshold and the suppression
+   it feeds silently did nothing (caught only by verifying the behaviour live).
+   With `INSERT OR REPLACE` a column is destroyed by NOT being named, so every
+   column any other service adds later is wiped by default, in silence. It is
+   now an **UPSERT** (`ON CONFLICT(platform) DO UPDATE SET`) touching only the
+   columns it manages; a future column survives by construction. Do not turn it
+   back. Note the parameters are referenced directly rather than via `excluded.`
+   because `status` is NOT NULL and a column DEFAULT does not apply to an
+   explicit NULL — so the INSERT half spells out `'unknown'`, and
+   `excluded.status` would then carry that into the UPDATE half and overwrite a
+   real status. Pinned by `test/platform-state-preserve.test.js`, which needs
+   `node_modules` and so SKIPS on a dev checkout — **run it on the box**.
+   What remains: fleet-check's 'healthy'
    overwrites an audit's 'critical' build verdict within 10 minutes, so a broken
    build reads healthy on the deck. Nothing dangerous happens (self-heal only
    acts on 'error', and the audit notifies + auto-dispatches independently) but
