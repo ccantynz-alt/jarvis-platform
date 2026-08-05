@@ -6,6 +6,9 @@ import Database from 'better-sqlite3';
 import { notify } from './lib/notify.js';
 import { resolveAuditStatus } from './lib/health-status.js';
 import { checkoutProblem } from './lib/checkout.js';
+import {
+  auditFingerprint, nextRepeat, auditNotifyLevel, repeatSuffix,
+} from './lib/audit-noise.js';
 
 mkdirSync('/opt/jarvis/reports', { recursive: true });
 
@@ -17,6 +20,13 @@ const db = new Database('/opt/jarvis/memory/jarvis.db');
 // it carries its own migration for the column it needs rather than assuming
 // startup order.
 try { db.exec('ALTER TABLE platform_state ADD COLUMN consecutive_critical INTEGER DEFAULT 0'); } catch { /* already present */ }
+// 2026-08-05: what the last audit FOUND, and how many runs in a row have found
+// exactly that. Distinct from consecutive_critical, which counts criticals
+// regardless of cause — a platform critical for a different reason each day is
+// news every day, and must not be suppressed by a counter that cannot tell the
+// difference. See lib/audit-noise.js.
+try { db.exec('ALTER TABLE platform_state ADD COLUMN audit_fingerprint TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE platform_state ADD COLUMN audit_repeat INTEGER DEFAULT 0'); } catch { /* already present */ }
 
 const GATETEST_ADMIN_PASSWORD = process.env.GATETEST_ADMIN_PASSWORD;
 const ORCHESTRATOR = 'http://127.0.0.1:9205';
@@ -261,6 +271,11 @@ function getExistingStatus(platform) {
   return row?.status ?? null;
 }
 
+function getAuditRepeatState(platform) {
+  const row = db.prepare('SELECT audit_fingerprint, audit_repeat FROM platform_state WHERE platform = ?').get(platform);
+  return { fingerprint: row?.audit_fingerprint ?? null, repeat: row?.audit_repeat ?? 0 };
+}
+
 // Is there already a job in flight for this platform? Don't pile a second
 // auto-dispatch on top of one still running from a prior audit.
 async function hasJobInFlight(platform) {
@@ -373,15 +388,24 @@ function writeAuditState(platform, report) {
   // whatever fleet-check.sh had last written there — confirmed live
   // earlier today, "notes":null right after a manual audit trigger).
   const existingNotes = getExistingNotes(platform);
+
+  // Has this audit found anything NEW? (2026-08-05 — the repeat-noise fix.)
+  // Read before the write, like consecutive_critical above and for the same
+  // reason: INSERT OR REPLACE deletes and reinserts the row.
+  const prior = getAuditRepeatState(platform);
+  const fingerprint = auditFingerprint(report);
+  const newRepeat = nextRepeat(prior.fingerprint, prior.repeat, fingerprint);
+
   db.prepare(`
     INSERT OR REPLACE INTO platform_state
-    (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, notes, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (platform, status, last_known_errors, last_audit, last_screenshot, health_score, consecutive_critical, notes, audit_fingerprint, audit_repeat, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     platform, status, JSON.stringify(report.errors), new Date().toISOString(),
-    report.screenshots.find(s => s.ok)?.filepath || null, report.health_score, newConsecutive, existingNotes, new Date().toISOString()
+    report.screenshots.find(s => s.ok)?.filepath || null, report.health_score, newConsecutive, existingNotes,
+    fingerprint, newRepeat, new Date().toISOString()
   );
-  return newConsecutive;
+  return { consecutive: newConsecutive, repeat: newRepeat };
 }
 
 // A "critical" audit is about BUILD/TEST health of the local checkout —
@@ -407,14 +431,21 @@ function liveSiteLine(report) {
     : 'Live site pages also failed to render — possibly a real outage.';
 }
 
-async function notifyAuditResult(platform, report, newConsecutive, { noAutoFix = false } = {}) {
+// `repeat` is how many consecutive runs have produced this EXACT result
+// (lib/audit-noise.js). Past ANNOUNCE_REPEATS the level drops to 'info', which
+// is below PUSH_MIN_LEVEL — the finding still lands in the durable inbox, it
+// just stops buzzing his phone and stops being spoken. vapron and
+// screenshot-to-code can never be auto-fixed by design, so before this they
+// raised an identical warn/alert every day forever (2026-08-05).
+async function notifyAuditResult(platform, report, newConsecutive, { noAutoFix = false, repeat = 1 } = {}) {
   if (report.status !== 'critical') return;
   const siteLine = liveSiteLine(report);
   const siteUp = siteLine.startsWith('Live site is UP');
+  const tail = repeatSuffix(repeat);
   if (noAutoFix) {
     await notify({
-      source: 'audit-runner', level: 'warn',
-      title: `⚠️ ${platform} build/test audit critical (${report.health_score}/100) — no auto-fix (${noAutoFix === 'no-remote' ? 'no git remote' : noAutoFix === 'url-only' ? 'no local checkout' : 'third-party code'})`,
+      source: 'audit-runner', level: auditNotifyLevel('warn', repeat),
+      title: `⚠️ ${platform} build/test audit critical (${report.health_score}/100) — no auto-fix (${noAutoFix === 'no-remote' ? 'no git remote' : noAutoFix === 'url-only' ? 'no local checkout' : 'third-party code'})${tail}`,
       body: `${siteLine} Errors: ${report.errors.slice(0, 5).join('; ')}`,
       speech: `Sir, ${platform}'s audit came back critical${siteUp ? ', though the live site itself is up' : ''} — this one needs your eyes, I can't auto-fix it.`,
     }).catch(() => {});
@@ -425,8 +456,8 @@ async function notifyAuditResult(platform, report, newConsecutive, { noAutoFix =
   } else if (newConsecutive <= AUTO_FIX_MAX_ATTEMPTS) {
     const jobId = await dispatchAutoFix(platform, report);
     await notify({
-      source: 'audit-runner', level: 'warn',
-      title: `🔧 ${platform} build/test audit critical (${report.health_score}/100) — auto-fix ${jobId ? 'dispatched' : 'FAILED to dispatch'}`,
+      source: 'audit-runner', level: auditNotifyLevel('warn', repeat),
+      title: `🔧 ${platform} build/test audit critical (${report.health_score}/100) — auto-fix ${jobId ? 'dispatched' : 'FAILED to dispatch'}${tail}`,
       body: `${siteLine} ${jobId
         ? `Job ${jobId}, attempt ${newConsecutive}/${AUTO_FIX_MAX_ATTEMPTS}. Errors: ${report.errors.slice(0, 5).join('; ')}`
         : `Dispatch failed — this needs a human look. Errors: ${report.errors.slice(0, 5).join('; ')}`}`,
@@ -436,8 +467,8 @@ async function notifyAuditResult(platform, report, newConsecutive, { noAutoFix =
     }).catch(() => {});
   } else {
     await notify({
-      source: 'audit-runner', level: 'alert',
-      title: `🚨 ${platform} — ${AUTO_FIX_MAX_ATTEMPTS} auto-fix attempts still critical, ESCALATED not re-dispatching`,
+      source: 'audit-runner', level: auditNotifyLevel('alert', repeat),
+      title: `🚨 ${platform} — ${AUTO_FIX_MAX_ATTEMPTS} auto-fix attempts still critical, ESCALATED not re-dispatching${tail}`,
       body: `Errors: ${report.errors.slice(0, 8).join('; ')}`,
       speech: `Sir, ${platform} has failed ${AUTO_FIX_MAX_ATTEMPTS} auto-fix attempts in a row and still looks critical — I've stopped re-dispatching, this needs your eyes.`,
     }).catch(() => {});
@@ -478,8 +509,8 @@ async function runUrlOnlyAudit(platform, config) {
   report.health_score = Math.max(0, 100 - httpFailed.length * 50 - screenshotsFailed.length * 30);
   report.status = report.health_score > 80 ? 'healthy' : report.health_score > 50 ? 'warning' : 'critical';
 
-  const newConsecutive = writeAuditState(platform, report);
-  await notifyAuditResult(platform, report, newConsecutive, { noAutoFix: 'url-only' });
+  const { consecutive: newConsecutive, repeat } = writeAuditState(platform, report);
+  await notifyAuditResult(platform, report, newConsecutive, { noAutoFix: 'url-only', repeat });
 
   const reportPath = join('/opt/jarvis/reports', `${platform}-${auditId}.json`);
   writeFileSync(reportPath, JSON.stringify(report, null, 2));
@@ -487,7 +518,7 @@ async function runUrlOnlyAudit(platform, config) {
 
   fetch('http://127.0.0.1:9203/slack/report', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ platform, status: report.status, issues: report.errors, fixed: [], health_score: report.health_score }),
+    body: JSON.stringify({ platform, status: report.status, issues: report.errors, fixed: [], health_score: report.health_score, repeat }),
   }).catch(() => {});
 
   return report;
@@ -621,8 +652,8 @@ async function runAudit(platform) {
   // Step 6: Write to memory + self-repair notify (shared with runUrlOnlyAudit
   // above — consecutive_critical is read BEFORE the write since INSERT OR
   // REPLACE deletes+reinserts the row, so any column left out would reset).
-  const newConsecutive = writeAuditState(platform, report);
-  await notifyAuditResult(platform, report, newConsecutive, { noAutoFix: config.noAutoFix });
+  const { consecutive: newConsecutive, repeat } = writeAuditState(platform, report);
+  await notifyAuditResult(platform, report, newConsecutive, { noAutoFix: config.noAutoFix, repeat });
 
   // Step 7: Save report to disk
   const reportPath = join('/opt/jarvis/reports', `${platform}-${auditId}.json`);
@@ -638,7 +669,8 @@ async function runAudit(platform) {
       status: report.status,
       issues: report.errors,
       fixed: [],
-      health_score: report.health_score
+      health_score: report.health_score,
+      repeat
     })
   }).catch(() => {});
 

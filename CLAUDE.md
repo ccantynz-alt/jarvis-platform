@@ -481,6 +481,7 @@ jarvis-platform/
 │   ├── code-health.js         — deep read-only code review on a timer (docs/CODE-HEALTH.md)
 │   └── lib/
 │       ├── cookies.js         — ONE cookie parser that cannot throw (a raw upgrade handler dies if it does)
+│       ├── audit-noise.js     — an audit that found the same thing yesterday stops shouting (pure)
 │       ├── findings.js        — pure code-health logic: fingerprints, lenses, verification budget
 │       ├── pc-actions.js      — the typed vocabulary of what Jarvis may do to Craig's PC (pure)
 │       ├── slack-auth.js      — who may command Jarvis from Slack; FAILS CLOSED
@@ -571,6 +572,34 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   bypass all of this by design — mute never mutes answers. Tuning vars in
   secrets.env.example. If Slack floods again, find the caller posting
   with level=critical or a constantly-changing dedupe key.
+- **An audit that finds what it found yesterday goes QUIET, not loud
+  (2026-08-05).** Craig: *"why am i receiving over 100 slack notifications"*. The
+  answer was not a live flood — the Slack bot had posted 2–3 messages a day for
+  three weeks and had handled zero incoming messages since 30 July (every one is
+  logged at `slack-bridge.js`'s `[bolt]` line; the count was 0). It was 246
+  messages from 1–14 July sitting unread, re-delivered as a burst. But the
+  investigation found the real ongoing defect: **vapron (50/100) and
+  screenshot-to-code (47/100) can never be auto-fixed by design** — no local
+  checkout and a third-party fork respectively — so they posted a
+  byte-identical `critical` audit EVERY DAY, forever. `critical` bypasses quiet
+  hours and mute in notify-center.js, and the matching `warn` notify() is at
+  PUSH_MIN_LEVEL so it buzzed his phone through ntfy too. NotifyCenter's per-key
+  dedupe structurally could not catch it: **cooldown 30 minutes, repeat interval
+  24 hours** — every repeat arrived looking brand new. The escalation branch was
+  worse, raising `alert`, which lib/push.js exempts from BOTH dedupe and the
+  hourly cap. Now `platform_state.audit_fingerprint`/`audit_repeat` (additive
+  migration in audit-runner.js) count consecutive IDENTICAL results — verdict +
+  score + sorted errors — and past `ANNOUNCE_REPEATS = 2` the Slack level drops
+  to `info` (digest) and the notify level to `info` (below the push threshold).
+  **Nothing is dropped**: the finding still lands in the durable inbox and still
+  appears in the daily digest, carrying an "unchanged, day N" suffix so a
+  demoted entry isn't mistaken for a lesser event. The fingerprint deliberately
+  covers the error LIST, not just the status, so a platform that breaks in a
+  NEW way is loud again on the very next run — "already broken" must never
+  become a reason to swallow "and now it's broken differently". Note
+  `audit_repeat` is NOT `consecutive_critical`: the latter counts criticals
+  regardless of cause and would suppress a platform that fails differently each
+  day. Logic + tests: `src/lib/audit-noise.js`, `test/audit-noise.test.js`.
 - **Every numeric limit goes through `src/lib/guardrail.js` (2026-07-28).**
   systemd's `EnvironmentFile` does NOT strip inline comments, so
   `MAX=6 # per day` arrives as the string `"6 # per day"`; `Number()` makes it

@@ -33,6 +33,8 @@ import { spawn } from 'child_process';
 import { NotifyCenter, parseDuration } from './notify-center.js';
 import { detectIntent, matchPlatform, normalizeText } from './intent.js';
 import { parseAllowlist, senderAllowed } from './lib/slack-auth.js';
+import { auditSlackLevel } from './lib/audit-noise.js';
+import { createHash } from 'crypto';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -786,7 +788,7 @@ app.post('/slack/send', async (req, res) => {
 // Healthy reports batch into the digest; warnings post immediately (deduped);
 // critical always posts. This alone kills the daily per-platform spam.
 app.post('/slack/report', async (req, res) => {
-  const { platform, status, issues = [], fixed = [], health_score } = req.body;
+  const { platform, status, issues = [], fixed = [], health_score, repeat = 1 } = req.body;
   const emoji = status === 'healthy' ? '✅' : status === 'warning' ? '⚠️' : '🔴';
   const score = health_score != null ? ` | Score: ${health_score}/100` : '';
 
@@ -804,9 +806,23 @@ app.post('/slack/report', async (req, res) => {
     text += fixed.slice(0, 5).map(f => `✓ ${String(f).slice(0, 120)}`).join('\n');
   }
 
-  const level = status === 'healthy' ? 'info' : status === 'warning' ? 'warning' : 'critical';
-  const result = await notifyCenter.notify({ text, level, key: `audit-${platform}` });
-  res.json({ ok: true, ...result });
+  // An audit that found exactly what it found yesterday is not news. `repeat`
+  // comes from audit-runner (platform_state.audit_repeat) and counts
+  // consecutive IDENTICAL results; past ANNOUNCE_REPEATS this drops to 'info'
+  // so the report folds into the digest instead of posting as `critical`,
+  // which in notify-center.js bypasses both quiet hours and mute.
+  //
+  // This is what was generating the daily VAPRON (50/100) and
+  // SCREENSHOT-TO-CODE (47/100) criticals — neither can ever be auto-fixed, so
+  // both re-announced an unchanged verdict every day since 30 July. The
+  // per-key dedupe could not catch it: cooldown 30 min, repeat interval 24 h.
+  //
+  // The dedupe key now carries the result identity too, so a report that
+  // CHANGES is never suppressed by the previous one's cooldown.
+  const level = auditSlackLevel(status, repeat);
+  const fp = createHash('md5').update(`${status}|${health_score}|${issues.join('|')}`).digest('hex').slice(0, 8);
+  const result = await notifyCenter.notify({ text, level, key: `audit-${platform}-${fp}` });
+  res.json({ ok: true, level, repeat, ...result });
 });
 
 // POST /slack/alert — urgent platform alert
