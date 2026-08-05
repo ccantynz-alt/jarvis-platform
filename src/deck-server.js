@@ -230,6 +230,38 @@ app.get('/api/ops', (req, res) => {
   res.json(state.ops || {});
 });
 
+// POST /api/ops/review {id, decision, notes} — Craig decides a proposal.
+//
+// This is the ONE place a human verdict enters the governance layer from the
+// deck (docs/GOVERNANCE.md). actor_kind is hardcoded 'human' and actor_id
+// 'craig': reaching this route already required the deck token, so the caller
+// IS Craig, and letting the body name the actor would make the audit trail
+// forgeable by anything that could reach loopback.
+//
+// The decision is NOT applied here — it is forwarded to memory-server, whose
+// canTransition() is the single authority. If Craig taps approve on something
+// an agent staged illegally, the gate still refuses and says why.
+app.post('/api/ops/review', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  const { id, decision, notes } = req.body || {};
+  const TO = { approve: 'approved', reject: 'rejected', escalate: 'escalated' };
+  if (!Number.isInteger(id) || !TO[decision]) {
+    return res.status(400).json({ error: 'id (integer) and decision (approve|reject|escalate) required' });
+  }
+  try {
+    const r = await fetch(`${MEMORY}/memory/proposals/${id}/transition`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: TO[decision], actor_id: 'craig', actor_kind: 'human', notes: notes || null }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await r.json();
+    pollOps().catch(() => {});   // push the new queue to every client now
+    res.status(r.status).json(body);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 // POST /api/ops/inbox-read {id} or {all:true} — the deliberate v1 scope of
 // deck WRITE access: marking a notification read is harmless and idempotent.
 // Findings/jobs/reports stay read-only here — dismissing a finding is sticky
@@ -705,12 +737,13 @@ async function pollPlatforms() {
 // briefly unreachable should read as "stale", never as "there are no findings".
 const trunc = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 async function pollOps() {
-  const [inbox, findings, summary, reports, jobs] = await Promise.all([
+  const [inbox, findings, summary, reports, jobs, proposals] = await Promise.all([
     jget(`${MEMORY}/memory/notifications?limit=40`),
     jget(`${MEMORY}/memory/findings?open_only=1&limit=60`),
     jget(`${MEMORY}/memory/findings/summary`),
     jget(`${MEMORY}/memory/agent-reports?limit=30`),
     jget(`${MEMORY}/memory/jobs?limit=30`),
+    jget(`${MEMORY}/memory/proposals?open_only=1&limit=40`),
   ]);
   const prev = state.ops || {};
   state.ops = {
@@ -731,6 +764,17 @@ async function pollOps() {
     reports: Array.isArray(reports) ? reports.map(r => ({
       id: r.id, agent: r.agent, ts: r.ts, status: r.status, summary: trunc(r.summary, 180),
     })) : prev.reports ?? null,
+    // Escalations first — those are the ones waiting on Craig specifically.
+    proposals: Array.isArray(proposals) ? proposals
+      .sort((a, b) => (a.status === 'escalated' ? 0 : 1) - (b.status === 'escalated' ? 0 : 1) || b.id - a.id)
+      .map(p => ({
+        id: p.id, domain: p.domain, platform: p.platform, status: p.status,
+        change_class: p.change_class, risk: p.risk,
+        title: trunc(p.title, 150), rationale: trunc(p.rationale, 240),
+        artifact_url: p.artifact_url, created_by: p.created_by,
+        reviewed_by: p.reviewed_by, review_notes: trunc(p.review_notes, 200),
+        created_at: p.created_at,
+      })) : prev.proposals ?? null,
     jobs: Array.isArray(jobs) ? jobs.map(j => ({
       id: String(j.id).slice(0, 8), platform: j.platform, task: trunc(j.task, 100),
       status: j.status, runtime: j.runtime, created_at: j.created_at,

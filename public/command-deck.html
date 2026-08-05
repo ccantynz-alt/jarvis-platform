@@ -253,6 +253,13 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 
     <!-- OPS VIEW — the work itself: inbox, code findings, agent reports, job queue -->
     <div id="view-ops" class="view hidden" style="overflow:auto;padding:18px">
+      <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(255,181,71,.3);background:rgba(20,16,10,.6);border-radius:4px;padding:12px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="section-label" style="color:#ffb547">REVIEW · <span id="ops-revcount">0</span> AWAITING DECISION</div>
+          <div class="mono" style="margin-left:auto;font-size:10px;color:#6b8a9e">NOTHING MERGES WITHOUT APPROVAL</div>
+        </div>
+        <div id="ops-review" style="display:flex;flex-direction:column;gap:8px;overflow-y:auto;max-height:40vh"></div>
+      </div>
       <div id="ops-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start">
         <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
           <div style="display:flex;align-items:center;gap:10px">
@@ -663,9 +670,80 @@ function opsRow(dot, main, meta, dim) {
   el.querySelector('.ot').textContent = meta;
   return el;
 }
+const PROP_COLOR = { escalated: '#ff4d6a', proposed: '#ffb547', under_review: '#00e5ff', approved: '#3dffa0' };
+// A decision is irreversible and this is a touchscreen — every button confirms
+// once before it fires (governance: an approval is a real authorisation, and
+// the deck must not make one a stray tap).
+function decideProposal(id, decision, btn) {
+  if (btn.dataset.armed !== '1') {
+    const was = btn.textContent;
+    btn.dataset.armed = '1';
+    btn.textContent = 'CONFIRM?';
+    setTimeout(() => { if (btn.dataset.armed === '1') { btn.dataset.armed = '0'; btn.textContent = was; } }, 4000);
+    return;
+  }
+  btn.dataset.armed = '0';
+  btn.textContent = '…';
+  fetch('/api/ops/review', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, decision }),
+  }).then(r => r.json()).then(d => {
+    // The server is the authority — if the gate refused, show the reason
+    // rather than pretending it worked.
+    if (d && d.error) { btn.textContent = 'REFUSED'; btn.title = d.reason || d.error; }
+  }).catch(() => { btn.textContent = 'ERR'; });
+}
+function renderReview() {
+  const list = (S.ops && S.ops.proposals) || [];
+  const pending = list.filter(p => p.status !== 'approved');
+  $('ops-revcount').textContent = pending.length;
+  const box = $('ops-review');
+  box.innerHTML = '';
+  if (!list.length) { box.textContent = 'No proposals awaiting a decision.'; box.style.color = '#5f7a8c'; box.style.fontSize = '12px'; return; }
+  box.style.color = ''; box.style.fontSize = '';
+  for (const p of list) {
+    const dot = PROP_COLOR[p.status] || '#7d99aa';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding:8px;border:1px solid rgba(0,229,255,.08);border-radius:3px;background:rgba(4,8,14,.5)';
+    row.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px;min-width:0">' +
+        '<div style="width:7px;height:7px;border-radius:50%;flex:none;background:' + dot + ';box-shadow:0 0 6px ' + dot + '"></div>' +
+        '<div class="rt" style="font-size:12px;color:#eaffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>' +
+        '<div class="mono rs" style="margin-left:auto;flex:none;font-size:10px;color:' + dot + '"></div>' +
+      '</div>' +
+      '<div class="rr" style="font-size:11px;color:#7d99aa"></div>' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<a class="ra mono" target="_blank" rel="noopener" style="font-size:10px;color:#00e5ff"></a>' +
+        '<div class="racts" style="margin-left:auto;display:flex;gap:6px"></div>' +
+      '</div>';
+    row.querySelector('.rt').textContent = `#${p.id} [${p.domain}] ${p.title}`;
+    row.querySelector('.rs').textContent = `${p.status} · ${p.risk} · ${p.change_class}`;
+    row.querySelector('.rr').textContent = p.review_notes ? `${p.rationale}  —  ${p.reviewed_by || 'officer'}: ${p.review_notes}` : p.rationale;
+    const a = row.querySelector('.ra');
+    if (p.artifact_url) { a.href = p.artifact_url; a.textContent = '▸ view the diff'; }
+    else { a.removeAttribute('href'); a.textContent = 'no artifact attached yet'; a.style.color = '#5f7a8c'; }
+    const acts = row.querySelector('.racts');
+    // Approve is offered only where a decision is still open, and only with an
+    // artifact — approving a change nobody can see is the failure this prevents.
+    const open = ['proposed', 'under_review', 'escalated'].includes(p.status);
+    for (const [label, decision, color] of [['APPROVE', 'approve', '#3dffa0'], ['REJECT', 'reject', '#ff4d6a']]) {
+      if (!open) continue;
+      if (decision === 'approve' && !p.artifact_url) continue;
+      const b = document.createElement('div');
+      b.setAttribute('role', 'button'); b.tabIndex = 0;
+      b.className = 'mono';
+      b.style.cssText = `font-size:10px;letter-spacing:1px;color:${color};border:1px solid ${color}55;border-radius:3px;padding:3px 9px;cursor:pointer`;
+      b.textContent = label;
+      b.onclick = () => decideProposal(p.id, decision, b);
+      acts.appendChild(b);
+    }
+    box.appendChild(row);
+  }
+}
 function renderOps() {
   const o = S.ops;
   if (!o) return;
+  renderReview();
   if (o.inbox) {
     $('ops-unread').textContent = o.inbox.unread;
     const box = $('ops-inbox'); box.innerHTML = '';
