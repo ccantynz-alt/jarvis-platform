@@ -207,6 +207,7 @@ export function describeDecision(p = {}) {
     case 'escalated': return `escalated to Craig${p.review_notes ? ` — ${p.review_notes}` : ''}`;
     case 'executed':  return `executed under approval by ${who}`;
     case 'failed':    return `execution FAILED${p.review_notes ? ` — ${p.review_notes}` : ''}`;
+    case 'withdrawn': return `withdrawn${p.review_notes ? ` — ${p.review_notes}` : ''}`;
     default:          return `${p.status}, awaiting ${DOMAINS[p.domain]?.officer || 'review'}`;
   }
 }

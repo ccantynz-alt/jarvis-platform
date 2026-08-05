@@ -873,6 +873,30 @@ app.post('/memory/proposals/:id/transition', (req, res) => {
   res.json({ ok: true, id: row.id, status: to, decision: describeDecision(after) });
 });
 
+// POST /memory/proposals/:id/artifact {artifact_url, artifact_kind}
+//
+// The agent attaches what it produced — a pushed branch and its compare URL.
+// Separate from /transition on purpose: attaching evidence is not a state
+// change and must not require (or imply) a decision. Only allowed while the
+// proposal is still awaiting one, so an artifact cannot be swapped underneath
+// an approval that was granted against a different diff.
+app.post('/memory/proposals/:id/artifact', (req, res) => {
+  const { artifact_url, artifact_kind = 'branch' } = req.body || {};
+  if (!artifact_url) return res.status(400).json({ error: 'artifact_url required' });
+  const row = db.prepare('SELECT * FROM proposals WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'proposal not found' });
+  if (!['proposed', 'under_review'].includes(row.status)) {
+    return res.status(409).json({ error: `cannot attach an artifact to a ${row.status} proposal` });
+  }
+  const now = new Date().toISOString();
+  db.prepare('UPDATE proposals SET artifact_url = ?, artifact_kind = ?, updated_at = ? WHERE id = ?')
+    .run(artifact_url, artifact_kind, now, row.id);
+  db.prepare(`INSERT INTO proposal_audit (proposal_id, from_status, to_status, actor_id, actor_kind, notes, at)
+              VALUES (?, ?, ?, ?, 'agent', ?, ?)`)
+    .run(row.id, row.status, row.status, req.body.actor_id || row.created_by, `artifact attached: ${artifact_url}`, now);
+  res.json({ ok: true, id: row.id, artifact_url });
+});
+
 // GET /memory/proposals-summary — counts for the deck
 app.get('/memory/proposals-summary', (req, res) => {
   const byStatus = db.prepare('SELECT status, COUNT(*) AS n FROM proposals GROUP BY status').all();

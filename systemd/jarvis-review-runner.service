@@ -1,0 +1,28 @@
+[Unit]
+Description=Jarvis review-runner — officers decide on change proposals (docs/GOVERNANCE.md)
+After=network-online.target jarvis-memory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jarvis
+# Order matters: review-runner.env loads second so its values win any collision
+# with secrets.env (matches jarvis-code-health.service and jarvis-fix-runner.service).
+EnvironmentFile=/opt/jarvis/config/secrets.env
+EnvironmentFile=/opt/jarvis/config/review-runner.env
+ExecStart=/usr/bin/node src/review-runner.js
+# Type=oneshot DISABLES the start timeout by default, and this tick spawns up to
+# REVIEW_MAX_PER_TICK reviewer agents at REVIEW_TIMEOUT_MIN each. A stalled unit
+# sits in 'activating' and systemd then skips EVERY subsequent timer activation
+# — silently, with nothing being reviewed. That is what happened to
+# jarvis-fleet-check on 2026-07-30. The default is not a default: set it.
+# 3 × 10 min plus slack.
+TimeoutStartSec=2100
+
+# Reviewers read diffs; they do not build. Modest, and always yields to anything
+# Craig is waiting on (Rule 4 — this box has co-tenants).
+MemoryMax=768M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

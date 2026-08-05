@@ -173,8 +173,27 @@ export function selectForDispatch(findings, ctx, limits) {
  * rather than guess. The alternative — "fix the criticals" — is how an agent
  * ends up refactoring a repo unattended.
  */
-export function buildFixTask(finding) {
+/** The branch an unattended repair is allowed to create. Never a default branch. */
+export function fixBranchName(finding) {
+  return `jarvis/fix-${finding.id}`;
+}
+
+/**
+ * The prompt a repair agent gets.
+ *
+ * Rewritten 2026-08-05 from "commit and push" to "branch and PROPOSE". The
+ * previous version asked for the minimum change and got a 1,028-line feature
+ * pushed to gluecron's main — a prompt is a request, not a boundary
+ * (docs/GOVERNANCE.md). The agent now cannot land anything: it works on
+ * `jarvis/fix-<id>`, pushes only that branch, and records the compare URL
+ * against a proposal an officer must approve. Merging is nobody's job here.
+ *
+ * @param {object} finding
+ * @param {number} proposalId  the proposal this agent is producing evidence for
+ */
+export function buildFixTask(finding, proposalId) {
   const loc = finding.file_path ? `${finding.file_path}${finding.line ? ':' + finding.line : ''}` : 'see evidence';
+  const branch = fixBranchName(finding);
   return [
     `Fix ONE confirmed ${finding.severity} defect in ${finding.platform}. Do not fix anything else.`,
     ``,
@@ -185,13 +204,39 @@ export function buildFixTask(finding) {
     String(finding.evidence || '(none recorded)').slice(0, 4000),
     finding.suggested_fix ? `\nSuggested direction (not binding):\n${String(finding.suggested_fix).slice(0, 1500)}` : '',
     ``,
-    `Rules:`,
-    `- Change the minimum needed to close THIS defect. No refactors, no drive-by cleanups.`,
-    `- This finding was recorded against commit ${finding.commit_sha || '(unknown)'}. The checkout may be behind its remote — check whether it is already fixed upstream and STOP if so, reporting that.`,
-    `- If the finding turns out to be wrong or you cannot verify the defect is real, make NO change and say so plainly. A false finding closed by an unnecessary edit is worse than an open one.`,
-    `- Add or extend a test that fails before your change and passes after, where the project has a test suite.`,
-    `- Run the project's own build and tests. If they were already failing before you started, say so rather than fixing unrelated breakage.`,
-    `- Commit with a message explaining the defect and the fix, then push.`,
-    `- Report what you changed, the test evidence, and anything you deliberately left alone.`,
+    `HOW THIS LANDS — read before you start:`,
+    `You are producing a PROPOSAL, not a release. You may not merge, and you may`,
+    `not push to main/master. An officer reviews your branch and decides.`,
+    ``,
+    `1. git checkout -b ${branch}   (branch from the current HEAD; if the branch`,
+    `   already exists, reuse it — do not create a second one)`,
+    `2. Make the change. Change the MINIMUM needed to close THIS defect. No`,
+    `   refactors, no drive-by cleanups, no unrelated features. If you find`,
+    `   yourself touching files unrelated to the finding, stop: that is a`,
+    `   separate proposal, and adding it here will get the whole thing rejected.`,
+    `3. Add or extend a test that fails before your change and passes after,`,
+    `   where the project has a test suite.`,
+    `4. Run the project's own build and tests. If they were ALREADY failing`,
+    `   before you started, say so rather than fixing unrelated breakage.`,
+    `5. Commit with a message explaining the defect and the fix.`,
+    `6. git push -u origin ${branch}    ← the branch ONLY. Never main.`,
+    `7. Record the artifact so the officer can review it:`,
+    `   curl -s -X POST http://127.0.0.1:9200/memory/proposals/${proposalId}/artifact \\`,
+    `     -H 'Content-Type: application/json' \\`,
+    `     -d '{"artifact_url":"<the branch compare URL>","artifact_kind":"branch"}'`,
+    `   The compare URL is https://github.com/<owner>/<repo>/compare/<base>...${branch}`,
+    `   (derive owner/repo from \`git remote get-url origin\`; base is the branch`,
+    `   you branched from).`,
+    ``,
+    `STOP CONDITIONS — these are successes, not failures. In each case make NO`,
+    `change, push nothing, and report why:`,
+    `- The defect is already fixed. This finding was recorded against commit`,
+    `  ${finding.commit_sha || '(unknown)'} and the checkout may have moved on.`,
+    `- You cannot substantiate the defect. A false finding closed by an`,
+    `  unnecessary edit is worse than an open one.`,
+    `- The fix would require changes well beyond the finding's scope.`,
+    ``,
+    `Report what you changed, the test evidence, the branch name, and anything`,
+    `you deliberately left alone.`,
   ].filter(Boolean).join('\n');
 }

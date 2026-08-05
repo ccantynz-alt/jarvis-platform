@@ -15,8 +15,8 @@
  *
  * MODE (env FIX_RUNNER_MODE): 'off' | 'dry-run' | 'live'
  *   off      — do nothing at all.
- *   dry-run  — log and notify what it WOULD dispatch, launch nothing.
- *   live     — actually dispatch.
+ *   dry-run  — log what it WOULD propose, create and launch nothing.
+ *   live     — open proposals and dispatch agents to produce their branches.
  * Shipped dry-run, exactly like code-health and self-heal before it: a
  * selection this consequential gets read by a human against the real findings
  * table before it is allowed to spend agents.
@@ -36,7 +36,7 @@
 
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
-import { fixEligibility, selectForDispatch, buildFixTask, DENIED_PLATFORMS } from './lib/fix-dispatch.js';
+import { fixEligibility, selectForDispatch, buildFixTask, fixBranchName, DENIED_PLATFORMS } from './lib/fix-dispatch.js';
 import { hasSource } from './lib/checkout.js';
 import { execFileSync } from 'child_process';
 import { readFileSync } from 'fs';
@@ -129,12 +129,46 @@ async function busyPlatforms() {
   return set;
 }
 
-async function dispatchFix(finding) {
+/**
+ * Open the proposal FIRST, then dispatch the agent to produce its evidence.
+ *
+ * Order matters: the proposal is the durable record that this work was
+ * authorised to be attempted and by whom. If the dispatch then fails, we have a
+ * proposal with no artifact — visible and reviewable — rather than an agent
+ * running with nothing on record (docs/GOVERNANCE.md).
+ */
+async function openProposal(finding) {
+  const r = await fetch(`${MEMORY}/memory/proposals`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      domain: 'cto',                 // code changes are the CTO's office
+      platform: finding.platform,
+      change_class: 'code_fix',
+      // Severity is about the DEFECT; risk is about the CHANGE. A critical bug
+      // does not make its repair a risky edit — conflating them would send every
+      // fix to Craig and the gate would be switched off within a week. A scoped,
+      // tested, branch-only fix is medium by default.
+      risk: 'medium',
+      title: `${finding.platform}: ${finding.title}`.slice(0, 200),
+      rationale: `Confirmed ${finding.severity} ${finding.kind} finding #${finding.id}. `
+        + `Auto-selected for repair: adversarially verified, checkout current, no duplicate flagged.`,
+      evidence: String(finding.evidence || finding.title).slice(0, 6000),
+      finding_id: finding.id,
+      created_by: `fix-runner`,
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body?.error || `proposal ${r.status}`);
+  return body.id;
+}
+
+async function dispatchFix(finding, proposalId) {
   const r = await fetch(`${ORCHESTRATOR}/dispatch`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       platform: finding.platform,
-      task: buildFixTask(finding),
+      task: buildFixTask(finding, proposalId),
       enqueued_by: 'fix-runner',
     }),
     signal: AbortSignal.timeout(15000),
@@ -198,22 +232,27 @@ async function tick() {
 
   for (const finding of picked) {
     const where = `${finding.platform} #${finding.id} (${finding.severity}) ${finding.file_path || ''}`;
-    if (MODE === 'dry-run') { log(`WOULD dispatch: ${where} — ${finding.title.slice(0, 90)}`); continue; }
+    if (MODE === 'dry-run') { log(`WOULD propose: ${where} — ${finding.title.slice(0, 90)}`); continue; }
     try {
-      const jobId = await dispatchFix(finding);
+      // Proposal FIRST, then the agent that produces its evidence. If dispatch
+      // then fails we hold a proposal with no artifact — visible and
+      // reviewable — rather than an agent running with nothing on record.
+      const proposalId = await openProposal(finding);
+      const jobId = await dispatchFix(finding, proposalId);
       if (!jobId) throw new Error('orchestrator returned no jobId');
       // Claim BEFORE counting the attempt, so a failed claim cannot leave a
       // running agent that the next tick is blind to and dispatches again.
       await claimFinding(finding.id, jobId);
       state.attemptsToday += 1;
       await saveState(state);
-      log(`dispatched ${where} → job ${jobId}`);
+      log(`proposal ${proposalId} + job ${jobId} → ${where}`);
       await notify({
         source: 'fix-runner', level: 'info',
-        title: `🔧 Auto-fixing ${finding.platform} #${finding.id}: ${finding.title.slice(0, 110)}`,
+        title: `🔧 Fix PROPOSED for ${finding.platform} #${finding.id}: ${finding.title.slice(0, 100)}`,
         body: `Confirmed ${finding.severity} ${finding.kind} at ${finding.file_path || '?'}:${finding.line ?? '?'}. ` +
-              `Repair agent ${jobId} dispatched (${state.attemptsToday}/${MAX_PER_DAY} today).`,
-        speech: `I've dispatched a fix for a confirmed ${finding.severity} in ${finding.platform}, sir.`,
+              `Agent ${jobId} is preparing branch ${fixBranchName(finding)} for proposal ${proposalId}. ` +
+              `Nothing merges without CTO review (${state.attemptsToday}/${MAX_PER_DAY} today).`,
+        speech: `I've prepared a fix proposal for a confirmed ${finding.severity} in ${finding.platform}, sir. It awaits review.`,
       }).catch(() => {});
     } catch (e) {
       log(`dispatch FAILED for ${where}: ${e.message}`);

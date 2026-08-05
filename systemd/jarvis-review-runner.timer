@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the officer review pass over open change proposals every 20 minutes
+
+[Timer]
+# Not on boot: a restart storm must not turn into a review storm.
+OnBootSec=40min
+# Offset from jarvis-fix-runner's 30 min so a proposal has time to get its
+# branch pushed and its artifact attached before an officer looks for one —
+# a reviewer that arrives early finds no artifact, logs it, and leaves.
+OnUnitActiveSec=20min
+AccuracySec=2min
+RandomizedDelaySec=3min
+
+[Install]
+WantedBy=timers.target

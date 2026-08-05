@@ -12,7 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DENIED_PLATFORMS, fixEligibility, selectForDispatch, buildFixTask,
+  DENIED_PLATFORMS, fixEligibility, selectForDispatch, buildFixTask, fixBranchName,
 } from '../src/lib/fix-dispatch.js';
 
 const PUSHABLE = new Set(['gluecron', 'gatetest', 'bookaride', 'voxlen']);
@@ -202,21 +202,45 @@ test('nothing eligible means nothing picked, and it does not throw', () => {
 // ── the prompt ──────────────────────────────────────────────────────────────
 
 test('the task names one finding and forbids collateral work', () => {
-  const t = buildFixTask(f());
+  const t = buildFixTask(f(), 42);
   assert.match(t, /Fix ONE confirmed critical defect in gluecron/);
   assert.match(t, /src\/routes\/api\.ts:182/);
-  assert.match(t, /No refactors/);
+  assert.match(t, /No\s+refactors/);
+});
+
+test('THE 1,028-LINE LESSON: the agent cannot land anything itself', () => {
+  // A repair agent asked for "the minimum change" pushed a 1,028-line feature
+  // to gluecron's main. The prompt is now explicit that it produces a PROPOSAL:
+  // branch only, no merge, no default branch.
+  const t = buildFixTask(f(), 42);
+  assert.match(t, /You are producing a PROPOSAL, not a release/);
+  assert.match(t, /you may not merge/i);
+  assert.match(t, /Never main/);
+  assert.match(t, /git checkout -b jarvis\/fix-188/);
+  assert.match(t, /git push -u origin jarvis\/fix-188/);
+});
+
+test('the task tells the agent how to record its artifact against the proposal', () => {
+  const t = buildFixTask(f(), 42);
+  assert.match(t, /\/memory\/proposals\/42\/artifact/);
+  assert.match(t, /compare\/<base>\.\.\.jarvis\/fix-188/);
 });
 
 test('the task tells the agent to stop rather than invent a fix', () => {
-  const t = buildFixTask(f());
-  assert.match(t, /make NO change and say so plainly/);
-  assert.match(t, /already fixed upstream and STOP/);  // the stale-checkout case
-  assert.match(t, /ae2a071/);
+  const t = buildFixTask(f(), 42);
+  assert.match(t, /STOP CONDITIONS — these are successes, not failures/);
+  assert.match(t, /cannot substantiate the defect/);
+  assert.match(t, /ae2a071/);  // the commit it was found against
+});
+
+test('branch names are per-finding, so two fixes never share one', () => {
+  assert.equal(fixBranchName({ id: 188 }), 'jarvis/fix-188');
+  assert.notEqual(fixBranchName({ id: 1 }), fixBranchName({ id: 2 }));
 });
 
 test('a finding with no file or evidence still produces a usable task', () => {
-  const t = buildFixTask({ id: 9, platform: 'gatetest', severity: 'critical', title: 'x', kind: 'security' });
+  const t = buildFixTask({ id: 9, platform: 'gatetest', severity: 'critical', title: 'x', kind: 'security' }, 7);
   assert.match(t, /see evidence/);
   assert.match(t, /\(none recorded\)/);
+  assert.match(t, /jarvis\/fix-9/);
 });
