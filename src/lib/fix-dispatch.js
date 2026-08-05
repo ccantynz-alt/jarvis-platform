@@ -67,9 +67,13 @@ export const CAUTION_RE =
  * @param {(p:string)=>boolean} ctx.canPush  platform has a checkout AND a git remote
  * @param {string} [ctx.minSeverity]         lowest severity eligible (default 'critical')
  * @param {object} [ctx.denied]              platform → reason
+ * @param {(p:string)=>number} [ctx.behindCount]  commits the checkout is behind origin
  * @returns {{eligible: boolean, reason: string}}
  */
-export function fixEligibility(finding, { canPush, minSeverity = 'critical', denied = DENIED_PLATFORMS } = {}) {
+export function fixEligibility(finding, {
+  canPush, minSeverity = 'critical', denied = DENIED_PLATFORMS,
+  behindCount = () => 0,
+} = {}) {
   if (!finding || !finding.platform) return { eligible: false, reason: 'malformed finding' };
 
   const rank = SEVERITY_RANK[finding.severity];
@@ -85,6 +89,18 @@ export function fixEligibility(finding, { canPush, minSeverity = 'critical', den
   if (denied[finding.platform]) return { eligible: false, reason: denied[finding.platform] };
   if (!canPush(finding.platform)) {
     return { eligible: false, reason: 'no local checkout with a git remote — nowhere to push a fix' };
+  }
+  // A checkout BEHIND its remote is not a safe base for an unattended fix
+  // (2026-08-05). Found when Craig said "we have a repo its connected": the
+  // real Zoobicon checkout lives at universal-ai-operator/target_code/zoobicon
+  // and was **194 commits behind origin/main**. An agent there would re-fix
+  // bugs already fixed upstream, and commit onto a base that is guaranteed to
+  // conflict. code-health already records commit_sha for exactly this reason
+  // ("a local checkout can be behind its remote"), but recording it only helps
+  // a human reading the finding — this is the gate that stops an agent.
+  const behind = behindCount(finding.platform);
+  if (behind > 0) {
+    return { eligible: false, reason: `checkout is ${behind} commits behind its remote — pull before any unattended fix` };
   }
   // findings.js writes this marker into the verdict when a reworded finding
   // lands near an existing row. Two agents on one bug race each other.

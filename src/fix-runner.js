@@ -66,8 +66,17 @@ async function jget(url) {
 // there SOURCE to edit, and is there a REMOTE to push it to. A repo with code
 // but no remote (universal-ai-operator) produces a commit nobody ever deploys.
 // Resolved once per tick and cached — this shells out to git.
-function buildPushableSet(registry) {
+// Also measures how far behind origin each checkout is. A stale base is not
+// safe to fix on — see fix-dispatch.js's staleness gate and the Zoobicon case
+// (194 commits behind). This does NOT fetch: a fetch on every tick against
+// every platform is network Craig didn't ask for, and `git status`'s stored
+// upstream count is what a human would read anyway. It means the count is only
+// as fresh as the last fetch — which is the conservative direction, since a
+// checkout that LOOKS current but is actually behind still gets caught by the
+// agent's own "check whether it is already fixed upstream and STOP" rule.
+function buildCheckoutState(registry) {
   const pushable = new Set();
+  const behind = new Map();
   for (const [name, entry] of Object.entries(registry)) {
     const path = entry?.path;
     if (!path || entry?.executor === 'pc' || entry?.server === 'vercel') continue;
@@ -75,10 +84,17 @@ function buildPushableSet(registry) {
     try {
       const url = execFileSync('git', ['-C', path, 'remote', 'get-url', 'origin'],
         { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim();
-      if (url) pushable.add(name);
+      if (!url) continue;
+      pushable.add(name);
+      try {
+        // HEAD..@{u} = commits on the upstream we do not have, i.e. how far BEHIND.
+        const b = execFileSync('git', ['-C', path, 'rev-list', '--count', 'HEAD..@{u}'],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }).trim();
+        behind.set(name, Number(b) || 0);
+      } catch { /* no upstream configured — treat as current, other gates still apply */ }
     } catch { /* no .git, or no origin — not pushable, which is the answer */ }
   }
-  return pushable;
+  return { pushable, behind };
 }
 
 async function loadState() {
@@ -148,8 +164,13 @@ async function tick() {
   try { registry = JSON.parse(readFileSync('/opt/jarvis/config/platforms.json', 'utf8')).platforms || {}; }
   catch (e) { log(`registry unreadable (${e.message}) — skipping`); return; }
 
-  const pushable = buildPushableSet(registry);
-  const ctx = { canPush: (p) => pushable.has(p), minSeverity: MIN_SEVERITY, denied: DENIED_PLATFORMS };
+  const { pushable, behind } = buildCheckoutState(registry);
+  const ctx = {
+    canPush: (p) => pushable.has(p),
+    behindCount: (p) => behind.get(p) || 0,
+    minSeverity: MIN_SEVERITY,
+    denied: DENIED_PLATFORMS,
+  };
   const state = await loadState();
   const busy = await busyPlatforms();
 

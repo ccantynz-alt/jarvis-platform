@@ -62,6 +62,27 @@ test('a finding already being fixed is not dispatched twice', () => {
   assert.match(r.reason, /already dispatched/);
 });
 
+test('THE ZOOBICON CASE: a checkout behind its remote is not a safe base', () => {
+  // The real Zoobicon checkout was 194 commits behind origin/main. An agent
+  // there re-fixes bugs already fixed upstream and commits onto a base
+  // guaranteed to conflict.
+  const r = fixEligibility(f({ platform: 'zoobicon' }), {
+    canPush: () => true, behindCount: () => 194,
+  });
+  assert.equal(r.eligible, false);
+  assert.match(r.reason, /194 commits behind/);
+});
+
+test('an up-to-date checkout passes the staleness gate', () => {
+  assert.equal(fixEligibility(f(), { ...ctx, behindCount: () => 0 }).eligible, true);
+});
+
+test('an unknown behind-count does not silently block every fix', () => {
+  // Default is 0: if we cannot measure it, fall back to the other gates rather
+  // than disabling auto-fixing fleet-wide the first time git is unavailable.
+  assert.equal(fixEligibility(f(), ctx).eligible, true);
+});
+
 test('THE DRY-RUN CATCH: status says confirmed, the verdict prose says otherwise', () => {
   // gluecron #31, real row, 2026-08-05: stored status 'confirmed', while its
   // verifier wrote "PARTIALLY re-verified and NOT confirmed at origin/main —

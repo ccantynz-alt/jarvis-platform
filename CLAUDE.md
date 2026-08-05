@@ -126,7 +126,25 @@ did). Trust that command, not this list:**
   real finding there may already be fixed upstream. Spec:
   **docs/CODE-HEALTH.md**; pure logic + tests: `src/lib/findings.js`,
   `test/findings.test.js`.
-  **A path existing is not the same as code being there (2026-07-30).** The timer
+  **A path pointing at the WRONG code is worse than a path pointing at none
+  (2026-08-05).** `zoobicon`'s registry path was `/root/zoobicon`, a directory
+  holding only a `.claude` folder — so the flagship was URL-only audited and
+  skipped by code-health as "no source". The real checkout was sitting inside
+  ANOTHER platform: `universal-ai-operator/target_code/zoobicon`, which is that
+  CrewAI engine's *working copy of Zoobicon* (`master_engine.py` hardcodes the
+  base_dir and both reads and WRITES it). So every sweep of the operator walked
+  into the target directory and filed **Zoobicon's** bugs under
+  **universal-ai-operator's** name — nine confirmed criticals including
+  unauthenticated Stripe-portal session minting, `x-user-role: admin` header
+  spoofing, and RCE via `new Function` in `/api/v2/edit` — against a checkout
+  **194 commits behind origin/main**, attributed to a platform with no git
+  remote and therefore excluded from every auto-fix path. Zoobicon now has a
+  genuine clone at `/root/zoobicon` and `universal-ai-operator` is in
+  `CODE_HEALTH_SKIP`. **The lesson for the registry: a `path` is a claim about
+  WHOSE code lives there, and nothing was checking it.** When adding a platform,
+  confirm the path holds that platform's own source and not a vendored or target
+  copy of something else.
+- **A path existing is not the same as code being there (2026-07-30).** The timer
   picked `zoobicon` at `/root/zoobicon` — a directory holding only a `.claude`
   folder — spent a review agent, returned 0 findings in 25s, and recorded the
   platform as SWEPT with a 20-hour cooldown, so the flagship read as reviewed
