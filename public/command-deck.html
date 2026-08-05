@@ -254,22 +254,22 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
     <!-- OPS VIEW — the work itself: inbox, code findings, agent reports, job queue -->
     <div id="view-ops" class="view hidden" style="overflow:auto;padding:18px">
       <div id="ops-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start">
-        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+        <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
           <div style="display:flex;align-items:center;gap:10px">
             <div class="section-label">INBOX · <span id="ops-unread">0</span> UNREAD</div>
             <div id="ops-readall" role="button" tabindex="0" class="mono" style="margin-left:auto;font-size:10px;letter-spacing:2px;color:#00e5ff;border:1px solid rgba(0,229,255,.35);border-radius:3px;padding:3px 8px;cursor:pointer">MARK ALL READ</div>
           </div>
           <div id="ops-inbox" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
         </div>
-        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+        <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
           <div class="section-label">CODE FINDINGS · <span id="ops-fcounts" class="mono" style="letter-spacing:1px"></span></div>
           <div id="ops-findings" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
         </div>
-        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+        <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
           <div class="section-label">AGENT REPORTS · LATEST FILINGS</div>
           <div id="ops-reports" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
         </div>
-        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+        <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
           <div class="section-label">JOB QUEUE · DISPATCH ENGINE</div>
           <div id="ops-jobs" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
         </div>
