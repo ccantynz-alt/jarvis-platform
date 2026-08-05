@@ -210,6 +210,46 @@ app.get('/tts', async (req, res) => {
   res.send(out.buf);
 });
 
+// ── OPS tab data (2026-08-05, Craig: "we need it all available on command deck")
+//
+// Everything Jarvis knows was already durable in memory (:9200) but only
+// reachable by asking the brain or curling loopback — the inbox sat at 754
+// unread because no surface Craig actually watches showed it. These three
+// routes put the work itself on the deck: the inbox (with the only mutating
+// action, mark-read), code-health findings, agent-org reports, and the job
+// queue. Same auth model as /tts: cookie/token, or loopback for the
+// screenshot service.
+//
+// GET /api/ops exists alongside the WS `ops` broadcast for two reasons: the
+// client fetches it at boot so the tab is populated before the first tick,
+// and :9201 virtual-time captures never see WS pushes at all (the same
+// reason the ?demo-* QA hooks exist) — without this, every screenshot of
+// the tab would be empty and Rule 2 unverifiable.
+app.get('/api/ops', (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  res.json(state.ops || {});
+});
+
+// POST /api/ops/inbox-read {id} or {all:true} — the deliberate v1 scope of
+// deck WRITE access: marking a notification read is harmless and idempotent.
+// Findings/jobs/reports stay read-only here — dismissing a finding is sticky
+// (code-health doctrine) and killing a job is a real action; both belong in
+// the confirmation-gated brain path, not one tap on a touchscreen.
+app.post('/api/ops/inbox-read', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  const { id, all } = req.body || {};
+  if (!all && typeof id !== 'number') return res.status(400).json({ error: 'id (number) or all:true required' });
+  const path = all ? 'read-all' : `${id}/read`;
+  try {
+    const r = await fetch(`${MEMORY}/memory/notifications/${path}`, { method: 'POST' });
+    const out = await r.json();
+    pollOps().catch(() => {}); // push the new unread count to every client now, not at the next tick
+    res.json(out);
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 app.get('/', (req, res) => {
   if (req.query.token !== undefined) {
     if (!tokenMatches(req.query.token)) return res.status(403).send('Forbidden');
@@ -644,6 +684,47 @@ async function pollPlatforms() {
   saveState();
 }
 
+// OPS every 15s — the inbox, code-health findings, agent-org reports and the
+// job queue, compacted to what the tab renders. Each block falls back to its
+// previous value on a failed fetch rather than blanking a panel: memory being
+// briefly unreachable should read as "stale", never as "there are no findings".
+const trunc = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+async function pollOps() {
+  const [inbox, findings, summary, reports, jobs] = await Promise.all([
+    jget(`${MEMORY}/memory/notifications?limit=40`),
+    jget(`${MEMORY}/memory/findings?open_only=1&limit=60`),
+    jget(`${MEMORY}/memory/findings/summary`),
+    jget(`${MEMORY}/memory/agent-reports?limit=30`),
+    jget(`${MEMORY}/memory/jobs?limit=30`),
+  ]);
+  const prev = state.ops || {};
+  state.ops = {
+    inbox: inbox?.notifications ? {
+      unread: inbox.unread,
+      items: inbox.notifications.map(n => ({
+        id: n.id, ts: n.ts, level: n.level, source: n.source,
+        title: trunc(n.title, 140), read: !!n.read_at,
+      })),
+    } : prev.inbox ?? null,
+    findings: Array.isArray(findings) ? findings.map(f => ({
+      id: f.id, platform: f.platform, severity: f.severity, kind: f.kind,
+      title: trunc(f.title, 160),
+      file: f.file_path ? `${f.file_path}${f.line ? ':' + f.line : ''}` : null,
+      status: f.status, seen: f.seen_count, last_seen: f.last_seen,
+    })) : prev.findings ?? null,
+    findingCounts: summary?.openBySeverity ?? prev.findingCounts ?? null,
+    reports: Array.isArray(reports) ? reports.map(r => ({
+      id: r.id, agent: r.agent, ts: r.ts, status: r.status, summary: trunc(r.summary, 180),
+    })) : prev.reports ?? null,
+    jobs: Array.isArray(jobs) ? jobs.map(j => ({
+      id: String(j.id).slice(0, 8), platform: j.platform, task: trunc(j.task, 100),
+      status: j.status, runtime: j.runtime, created_at: j.created_at,
+      finished_at: j.finished_at, exit_code: j.exit_code,
+    })) : prev.jobs ?? null,
+  };
+  broadcast({ type: 'ops', ...state.ops });
+}
+
 // ── WebSocket ────────────────────────────────────────────────────────────────
 
 const server = createServer(app);
@@ -699,6 +780,7 @@ wss.on('connection', (ws, req) => {
   if (state.orgTiers) send({ type: 'org', tiers: state.orgTiers, total: state.orgTotal });
   if (state.queues.length) send({ type: 'queues', queues: state.queues });
   if (state.platforms.length) send({ type: 'platforms', platforms: state.platforms });
+  if (state.ops) send({ type: 'ops', ...state.ops });
   send({ type: 'stats', ...state.stats });
   for (const f of [...state.feedCache].reverse()) send({ type: 'feed', ...f });
   for (const w of [...state.wireCache].reverse()) send({ type: 'wire', ...w });
@@ -897,6 +979,7 @@ const tick = (fn, ms) => { fn().catch(e => console.error('[deck]', e.message)); 
 tick(pollActivity, 5000);
 tick(pollStats, 10000);
 tick(pollOrg, 15000);
+tick(pollOps, 15000);
 tick(pollPlatforms, 30000);
 
 server.listen(PORT, '127.0.0.1', () => {

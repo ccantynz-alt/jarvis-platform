@@ -250,6 +250,31 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
       <div id="platforms" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px"></div>
       <div style="margin-top:14px;font-size:13px;color:#5f7a8c">Fleet is adaptive — new platforms register themselves with JARVIS and inherit a full agent squad automatically.</div>
     </div>
+
+    <!-- OPS VIEW — the work itself: inbox, code findings, agent reports, job queue -->
+    <div id="view-ops" class="view hidden" style="overflow:auto;padding:18px">
+      <div id="ops-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start">
+        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div class="section-label">INBOX · <span id="ops-unread">0</span> UNREAD</div>
+            <div id="ops-readall" role="button" tabindex="0" class="mono" style="margin-left:auto;font-size:10px;letter-spacing:2px;color:#00e5ff;border:1px solid rgba(0,229,255,.35);border-radius:3px;padding:3px 8px;cursor:pointer">MARK ALL READ</div>
+          </div>
+          <div id="ops-inbox" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
+        </div>
+        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+          <div class="section-label">CODE FINDINGS · <span id="ops-fcounts" class="mono" style="letter-spacing:1px"></span></div>
+          <div id="ops-findings" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
+        </div>
+        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+          <div class="section-label">AGENT REPORTS · LATEST FILINGS</div>
+          <div id="ops-reports" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
+        </div>
+        <div class="ops-panel" style="display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
+          <div class="section-label">JOB QUEUE · DISPATCH ENGINE</div>
+          <div id="ops-jobs" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- COMMAND LINE -->
@@ -268,7 +293,7 @@ const qs = new URLSearchParams(location.search);
 // ── State ────────────────────────────────────────────────────────────────────
 const S = {
   view: 'core', link: 'SIM', mic: false, speaking: false,
-  agents: [], queues: [], platforms: [], org: null,
+  agents: [], queues: [], platforms: [], org: null, ops: null,
   // Real values arrive over the live link; SIM seeds these only under ?sim=1.
   msgRate: 0, queueDepth: 0, tasksDone: 0, uptime: '—',
   bootTs: Date.now(),
@@ -279,7 +304,7 @@ const ts = () => new Date().toLocaleTimeString('en-GB');
 if (qs.get('scanlines') === '0') { $('scan1').remove(); $('scan2').remove(); }
 
 // ── Tabs / views ─────────────────────────────────────────────────────────────
-const TABS = [['core','CORE'],['hud','HUD'],['org','HIERARCHY'],['flow','MESSAGE FLOW'],['plat','PLATFORMS']];
+const TABS = [['core','CORE'],['hud','HUD'],['org','HIERARCHY'],['flow','MESSAGE FLOW'],['plat','PLATFORMS'],['ops','OPS']];
 // The brain (orb+voice+chat) is one DOM stack, reparented between CORE and HUD
 function placeCenterStack(view) {
   const stack = $('center-stack');
@@ -316,7 +341,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Deep-link a view for screenshots / bookmarks: ?view=hud|org|flow|plat
+// Deep-link a view for screenshots / bookmarks: ?view=hud|org|flow|plat|ops
 const wantView = qs.get('view');
 if (wantView && TABS.some(([id]) => id === wantView) && wantView !== S.view) {
   [...$('tabs').children][TABS.findIndex(([id]) => id === wantView)].click();
@@ -334,6 +359,7 @@ function layout() {
     : (mid ? 'minmax(240px,280px) minmax(360px,1fr) minmax(260px,320px)'
            : 'minmax(280px,340px) minmax(420px,1fr) minmax(300px,380px)');
   $('hud-left').style.order = narrow ? 2 : 0;
+  $('ops-grid').style.gridTemplateColumns = narrow ? '1fr' : '1fr 1fr';
   // CORE = the brain full screen; HUD = compact orb in the center column
   const orb = S.view === 'core'
     ? Math.round(Math.min(h * 0.52, w * 0.82))
@@ -612,6 +638,91 @@ function renderPlatforms() {
     box.appendChild(el);
   }
 }
+
+// ── OPS — inbox / findings / reports / jobs (all real, no SIM data) ─────────
+const SEV_COLOR = { critical: '#ff4d6a', high: '#ff8f5c', medium: '#ffb547', low: '#7d99aa' };
+const RPT_COLOR = { ok: '#3dffa0', action_needed: '#ffb547', escalate: '#ff4d6a' };
+const JOB_COLOR = { queued: '#7d99aa', claimed: '#00e5ff', running: '#00e5ff', completed: '#3dffa0', failed: '#ff4d6a', timeout: '#ff4d6a', held: '#ffb547' };
+function agoc(iso) {
+  if (!iso) return '—';
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  if (s < 90) return Math.round(s) + 's ago';
+  if (s < 5400) return Math.round(s / 60) + 'm ago';
+  if (s < 129600) return Math.round(s / 3600) + 'h ago';
+  return Math.round(s / 86400) + 'd ago';
+}
+// One row shape for every panel: [dot] main-text [meta right]. All content set
+// via textContent — titles/summaries are agent-written free text.
+function opsRow(dot, main, meta, dim) {
+  const el = document.createElement('div');
+  el.style.cssText = 'display:flex;align-items:baseline;gap:8px;font-size:12px;line-height:1.5;padding:3px 2px;border-bottom:1px solid rgba(0,229,255,.05)' + (dim ? ';opacity:.45' : '');
+  el.innerHTML = '<div style="width:7px;height:7px;border-radius:50%;flex:none;align-self:center;background:' + dot + ';box-shadow:0 0 6px ' + dot + '"></div>' +
+    '<div class="om" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dcedf6"></div>' +
+    '<div class="mono ot" style="margin-left:auto;flex:none;font-size:10px;color:#5f7a8c"></div>';
+  el.querySelector('.om').textContent = main;
+  el.querySelector('.ot').textContent = meta;
+  return el;
+}
+function renderOps() {
+  const o = S.ops;
+  if (!o) return;
+  if (o.inbox) {
+    $('ops-unread').textContent = o.inbox.unread;
+    const box = $('ops-inbox'); box.innerHTML = '';
+    for (const n of o.inbox.items) {
+      const row = opsRow(({ info: '#00e5ff', warn: '#ffb547', alert: '#ff4d6a' })[n.level] || '#00e5ff',
+        n.title, n.source + ' · ' + agoc(n.ts), n.read);
+      if (!n.read) {
+        row.style.cursor = 'pointer';
+        row.title = 'Mark read';
+        row.onclick = () => {
+          row.style.opacity = '.45'; // optimistic — the ops push that follows is authoritative
+          fetch('/api/ops/inbox-read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: n.id }) }).catch(() => {});
+        };
+      }
+      box.appendChild(row);
+    }
+    if (!o.inbox.items.length) box.textContent = 'Inbox zero, sir.';
+  }
+  if (o.findings) {
+    const counts = (o.findingCounts || []).map(c => c.n + ' ' + c.severity).join(' · ');
+    $('ops-fcounts').textContent = counts ? counts + ' OPEN' : 'NONE OPEN';
+    const box = $('ops-findings'); box.innerHTML = '';
+    for (const f of o.findings) {
+      box.appendChild(opsRow(SEV_COLOR[f.severity] || '#7d99aa',
+        '[' + f.platform + '] ' + f.title + (f.file ? '  — ' + f.file : ''),
+        f.severity + (f.seen > 1 ? ' ·×' + f.seen : '')));
+    }
+    if (!o.findings.length) box.textContent = 'No open findings.';
+  }
+  if (o.reports) {
+    const box = $('ops-reports'); box.innerHTML = '';
+    for (const r of o.reports) {
+      box.appendChild(opsRow(RPT_COLOR[r.status] || '#7d99aa',
+        r.agent + ' — ' + r.summary, (r.status === 'ok' ? '' : r.status + ' · ') + agoc(r.ts)));
+    }
+    if (!o.reports.length) box.textContent = 'No reports filed yet.';
+  }
+  if (o.jobs) {
+    const box = $('ops-jobs'); box.innerHTML = '';
+    for (const j of o.jobs) {
+      box.appendChild(opsRow(JOB_COLOR[j.status] || '#7d99aa',
+        (j.platform ? '[' + j.platform + '] ' : '') + j.task,
+        j.status + ' · ' + agoc(j.finished_at || j.created_at)));
+    }
+    if (!o.jobs.length) box.textContent = 'Queue empty.';
+  }
+}
+$('ops-readall').onclick = () => {
+  fetch('/api/ops/inbox-read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ all: true }) }).catch(() => {});
+  if (S.ops?.inbox) { S.ops.inbox.unread = 0; S.ops.inbox.items.forEach(n => { n.read = true; }); renderOps(); }
+};
+// Boot snapshot over HTTP: populates the tab before the first WS tick, and it
+// is the ONLY data path a :9201 virtual-time capture ever sees (captures miss
+// WS pushes entirely — same reason the ?demo-* hooks exist). WS wins after.
+fetch('/api/ops').then(r => r.json()).then(o => {
+  if (o && (o.inbox || o.findings) && !S.ops) { S.ops = o; renderOps(); }
+}).catch(() => {});
 
 // ── Org chart ────────────────────────────────────────────────────────────────
 function defaultTiers() {
@@ -1922,6 +2033,7 @@ function handleMsg(m) {
   }
   else if (m.type === 'queues' && Array.isArray(m.queues)) { S.queues = m.queues; renderQueues(); }
   else if (m.type === 'platforms' && Array.isArray(m.platforms)) { S.platforms = m.platforms; renderPlatforms(); }
+  else if (m.type === 'ops') { S.ops = m; renderOps(); }
   else if (m.type === 'org' && Array.isArray(m.tiers)) { S.org = { tiers: m.tiers, total: m.total }; if (S.view === 'org') renderOrg(); renderAgents(); }
   else if (m.type === 'chat_chunk') onChatChunk(m.text);
   else if (m.type === 'chat') onChatFinal(m);
