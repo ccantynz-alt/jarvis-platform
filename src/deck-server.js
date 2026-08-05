@@ -250,12 +250,20 @@ app.post('/api/ops/inbox-read', async (req, res) => {
   }
 });
 
+const authCookieHeader = (token) =>
+  `${AUTH_COOKIE}=${encodeURIComponent(token)}; Max-Age=${COOKIE_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax; Secure`;
+
 app.get('/', (req, res) => {
   if (req.query.token !== undefined) {
     if (!tokenMatches(req.query.token)) return res.status(403).send('Forbidden');
-    res.setHeader('Set-Cookie',
-      `${AUTH_COOKIE}=${encodeURIComponent(req.query.token)}; Max-Age=${COOKIE_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax; Secure`);
-    return res.redirect('/');
+    res.setHeader('Set-Cookie', authCookieHeader(req.query.token));
+    // Preserve the rest of the query — a ?token=…&view=ops login used to land
+    // on CORE because this redirect dropped everything (2026-08-05, found the
+    // first time Craig was sent a deep-linked login URL).
+    const rest = new URLSearchParams(req.query);
+    rest.delete('token');
+    const qs = rest.toString();
+    return res.redirect('/' + (qs ? '?' + qs : ''));
   }
   if (!isAuthed(req) && !isLocalDirect(req)) {
     console.log(`[deck] 403 for ${req.headers['x-forwarded-for'] || req.socket.remoteAddress} (${req.headers['tailscale-user-login'] || 'unknown user'})`);
@@ -278,6 +286,13 @@ Append <b style="color:#00e5ff">/?token=&lt;deck token&gt;</b> to this address o
 (the deck token lives in <b style="color:#00e5ff">config/deck.token</b> on the box — Gateway logins no longer unlock the Deck).</p></div></body></html>`);
   }
   res.set('Cache-Control', 'no-cache, must-revalidate');
+  // Sliding session (2026-08-05): the cookie was stamped ONCE at ?token= login
+  // with a hard 30-day Max-Age, so a device that visited the deck every single
+  // day still got silently locked out a month after login — "Forbidden" with no
+  // explanation, indistinguishable from a broken deck. Re-stamp on every authed
+  // page load: a device only expires after 30 days of not visiting at all.
+  const tok = requestToken(req);
+  if (tok && tokenMatches(tok)) res.setHeader('Set-Cookie', authCookieHeader(tok));
   res.sendFile('/opt/jarvis/public/command-deck.html');
 });
 
