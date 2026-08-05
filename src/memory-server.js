@@ -733,6 +733,40 @@ app.get('/memory/findings/summary', (req, res) => {
   res.json({ rows, openBySeverity });
 });
 
+// POST /memory/findings/:id/reattribute {platform, file_path}
+//
+// A finding filed against the wrong platform (2026-08-05). code-health swept
+// universal-ai-operator, walked into `target_code/zoobicon` — that CrewAI
+// engine's working copy of the FLAGSHIP — and filed nine of Zoobicon's
+// criticals under the operator's name, with a `target_code/zoobicon/` path
+// prefix. Attributed there they were unfixable: the operator has no git remote,
+// so every auto-fix path correctly refused them.
+//
+// This is a correction, not an edit: the defect and its verification stand, only
+// the label was wrong. The fingerprint MUST be recomputed because it keys on
+// `platform:file:title` (lib/findings.js) — leave it stale and the next sweep of
+// the correct platform files a duplicate of a finding already in the table.
+// A collision means the correct row already exists, so this reports rather than
+// clobbering it: UNIQUE on fingerprint would throw, and a 409 is the honest answer.
+app.post('/memory/findings/:id/reattribute', (req, res) => {
+  const { platform, file_path } = req.body || {};
+  if (!platform && !file_path) return res.status(400).json({ error: 'platform and/or file_path required' });
+  const row = db.prepare('SELECT * FROM code_findings WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'finding not found' });
+
+  const nextPlatform = platform || row.platform;
+  const nextPath     = file_path || row.file_path;
+  const nextFp       = fingerprint(nextPlatform, nextPath, row.title);
+
+  const clash = db.prepare('SELECT id FROM code_findings WHERE fingerprint = ? AND id != ?').get(nextFp, row.id);
+  if (clash) {
+    return res.status(409).json({ error: 'a finding with that identity already exists', existing_id: clash.id });
+  }
+  db.prepare('UPDATE code_findings SET platform = ?, file_path = ?, fingerprint = ? WHERE id = ?')
+    .run(nextPlatform, nextPath, nextFp, row.id);
+  res.json({ ok: true, id: row.id, platform: nextPlatform, file_path: nextPath, fingerprint: nextFp });
+});
+
 // PATCH /memory/findings/:id — a verifier's verdict, or a fix landing
 app.patch('/memory/findings/:id', (req, res) => {
   const { status, verdict, fix_job_id, severity, checked } = req.body || {};
