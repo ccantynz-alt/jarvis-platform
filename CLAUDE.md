@@ -46,7 +46,7 @@ Notes:
 | jarvis-deck | src/deck-server.js | 9210 | loopback, exposed ONLY via `tailscale serve --https=8444` | **Command Deck v2.2** (2026-07-16, from Craig's Claude Design handoff) — public/command-deck.html: full-screen **CORE** 3D neural-core brain (default) + HUD/Hierarchy/Message Flow/Platforms tabs; PWA (deck.webmanifest + /icons/deck-*.png, source deck-icon.html); briefing panel (`{type:'briefing'}`); raw WS `/jarvis` = handoff contract v1.0 + `chat_chunk`/`notify`/`org`/`briefing`. All numbers real. Commands → the three-provider lib/agent.js brain with intent fallback; conversation in memory KV `deck-conversation`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs via src/lib/tts.js (cache + daily budget + `TTS_DISABLED`), speechSynthesis fallback. QA hooks `?demo-alert=1`/`?demo-briefing=1` (:9201 virtual-time captures can't see live WS pushes); `?view=hud\|org\|flow\|plat\|ops` deep-links a tab for screenshots (Hierarchy tab is `org`) — the org tier now renders real agent-org data, see jarvis-agents row. **OPS tab (2026-08-05, Craig: "we need it all available on command deck"):** inbox (unread badge + tap-to-read + mark-all — the ONLY mutating deck action, proxied via `POST /api/ops/inbox-read`; findings/jobs stay read-only because dismiss is sticky and job control belongs behind the confirmation gate), open code-health findings, agent-org reports, and the job queue — all real data via a 15s `pollOps()` broadcast (`{type:'ops'}`) plus `GET /api/ops`, the HTTP snapshot that populates the tab at boot and is the only path a virtual-time capture can see. Evidence: docs/DECK-AUDIT-2026-07-16.md. Token: the deck mints its OWN — `config/deck.token` on the box (env override `JARVIS_DECK_TOKEN`); the gateway token does NOT unlock the deck (corrected 2026-08-05 after this line sent a login attempt to the wrong secret — the code's lock screen already said so). Login once per device via `?token=`; the cookie now re-stamps on every authed page load (sliding 30-day expiry — a visited device never locks out). |
 | jarvis-browser | src/browser-service.js | 9211 | loopback | SSRF-guarded web search, fetch, and Chromium render bridge for the brain |
 
-**FIVE periodic timers, NOT persistent daemons (documented 2026-07-24, found
+**SIX periodic timers, NOT persistent daemons (documented 2026-07-24, found
 late — see Rule 0 note below; corrected from "three" on 2026-07-30 when
 `systemctl list-timers "jarvis-*"` turned out to list two more than this file
 did). Trust that command, not this list:**
@@ -137,6 +137,35 @@ did). Trust that command, not this list:**
   manifest). universal-ai-operator is loose Python with no manifest — reviewable,
   not buildable — and getting those backwards silently drops a platform from one
   system or the other.
+- **`src/fix-runner.js`** — `jarvis-fix-runner.timer`, every 30 min
+  (`config/fix-runner.env`). **The thing that closes code-health's loop
+  (2026-08-05, Craig: "jarvis should automatically be fixing them").**
+  code-health deliberately fixes nothing; this picks the worst CONFIRMED,
+  pushable, unclaimed findings and dispatches ONE repair agent each, at most one
+  per platform per tick. Eligibility is `src/lib/fix-dispatch.js` (pure,
+  `test/fix-dispatch.test.js`) and it is deliberately strict, because a
+  full-permission agent editing the wrong repo unattended is worse than a bug
+  waiting: **confirmed-only** (10 of the 25 open criticals were `open` or
+  "verifier produced no usable verdict"); **a checkout WITH a git remote**
+  (universal-ai-operator holds NINE criticals and has no `.git` at all — nowhere
+  to push); **no suspected duplicates**; **denied platforms**
+  (screenshot-to-code = third-party fork, alecrae = live co-tenant + mail
+  findings are report-only, jarvis = an agent must not rewrite the orchestrator
+  running it); and **`CAUTION_RE`** — a verifier that hedged in PROSE while the
+  row still says `status: confirmed`. That last gate exists because the first
+  dry-run tick picked gluecron #31, stored `confirmed`, whose verdict reads
+  "PARTIALLY re-verified and NOT confirmed at origin/main — treat with care".
+  When the enum and the prose disagree, the prose wins. `fix_job_id` is stamped
+  as a DURABLE claim before the attempt is counted, so a restart cannot
+  double-dispatch. Guardrails via `guardrail()`: `FIX_MAX_PER_DAY=4`,
+  `FIX_MAX_CONCURRENT=2`, `FIX_MIN_SEVERITY=critical`. **`FIX_RUNNER_MODE=live`
+  since 2026-08-05**, flipped after two dry-run ticks were read against the real
+  table; first live tick fixed bookaride #17 (Stripe webhook answered 200 on a
+  missing key, so a paid booking was dropped forever) and gatetest #149
+  (`/api/heal/ssh` had no auth at all), both with tests, both pushed.
+  **Note what does NOT happen: nothing here marks a finding `fixed`.** Only
+  code-health's own re-check does, on a later sweep against current code — the
+  fixer never marks its own homework.
 - **`scripts/backup-memory.sh`** — `jarvis-backup.timer`, daily 03:30 UTC.
   SQLite memory-store backup (the "no DB backups" debt cleared 2026-07-06).
 - **`scripts/pull-vapron-backup.sh`** — `jarvis-vapron-backup.timer`, daily
@@ -479,9 +508,11 @@ jarvis-platform/
 │   ├── deploy-gate.js         — GateTest scan on every platform deploy
 │   ├── browser-service.js     — guarded web search/fetch/render bridge
 │   ├── code-health.js         — deep read-only code review on a timer (docs/CODE-HEALTH.md)
+│   ├── fix-runner.js          — dispatches repair agents for CONFIRMED findings (closes the loop)
 │   └── lib/
 │       ├── cookies.js         — ONE cookie parser that cannot throw (a raw upgrade handler dies if it does)
 │       ├── audit-noise.js     — an audit that found the same thing yesterday stops shouting (pure)
+│       ├── fix-dispatch.js    — which findings an agent may repair unattended (pure)
 │       ├── findings.js        — pure code-health logic: fingerprints, lenses, verification budget
 │       ├── pc-actions.js      — the typed vocabulary of what Jarvis may do to Craig's PC (pure)
 │       ├── slack-auth.js      — who may command Jarvis from Slack; FAILS CLOSED
