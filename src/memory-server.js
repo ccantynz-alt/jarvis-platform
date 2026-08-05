@@ -5,6 +5,7 @@ import { clampLimit } from './lib/guardrail.js';
 // The one definition of a finding's identity, shared with code-health.js so the
 // producer and the store cannot disagree about what counts as the same defect.
 import { fingerprint } from './lib/findings.js';
+import { validateProposal, canTransition, describeDecision } from './lib/proposals.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
@@ -150,6 +151,52 @@ db.exec(`
     resolved_at TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_code_findings_platform ON code_findings(platform, status, severity);
+
+  -- Governance (2026-08-05, docs/GOVERNANCE.md). A PROPOSAL is a change an
+  -- agent wants to make and has NOT made. It is distinct from a finding (a
+  -- defect that exists) and from a job (work being executed): the proposal is
+  -- the thing a human or an officer can refuse.
+  --
+  -- artifact_url is the PR — the proposal's evidence that the change is real
+  -- and reviewable without being applied.
+  CREATE TABLE IF NOT EXISTS proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT NOT NULL,
+    platform TEXT,
+    change_class TEXT NOT NULL,
+    risk TEXT NOT NULL DEFAULT 'medium',
+    title TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    evidence TEXT NOT NULL,
+    artifact_url TEXT,
+    artifact_kind TEXT,
+    finding_id INTEGER,
+    job_id TEXT,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    reviewed_by TEXT,
+    reviewed_at TEXT,
+    review_notes TEXT,
+    executed_at TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, domain);
+
+  -- APPEND-ONLY. Nothing in this codebase may UPDATE or DELETE a row here —
+  -- a trail that can be edited proves nothing, and this is the table that
+  -- answers "who approved this change, on what basis" during due diligence.
+  CREATE TABLE IF NOT EXISTS proposal_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id INTEGER NOT NULL,
+    from_status TEXT,
+    to_status TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    notes TEXT,
+    at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_proposal_audit_proposal ON proposal_audit(proposal_id, id);
 `);
 
 // Additive migrations for columns added after a table first shipped.
@@ -731,6 +778,107 @@ app.get('/memory/findings/summary', (req, res) => {
     WHERE status IN ('open','confirmed') GROUP BY severity
   `).all();
   res.json({ rows, openBySeverity });
+});
+
+// ── Governance: proposals (docs/GOVERNANCE.md) ──────────────────────────────
+//
+// The gate is enforced HERE, server-side, not in the callers. Every caller is
+// an agent, and an agent that can talk itself past a control is not gated by
+// it. canTransition() is the single authority; this endpoint refuses anything
+// it refuses, and records every accepted move in the append-only trail.
+
+// POST /memory/proposals — an agent proposes a change it has NOT made
+app.post('/memory/proposals', (req, res) => {
+  const p = req.body || {};
+  const v = validateProposal(p);
+  if (!v.valid) return res.status(400).json({ error: 'incomplete proposal', missing: v.missing });
+  const now = new Date().toISOString();
+  const r = db.prepare(`
+    INSERT INTO proposals
+      (domain, platform, change_class, risk, title, rationale, evidence,
+       artifact_url, artifact_kind, finding_id, job_id, status, created_by, created_at, updated_at)
+    VALUES (@domain, @platform, @change_class, @risk, @title, @rationale, @evidence,
+       @artifact_url, @artifact_kind, @finding_id, @job_id, 'proposed', @created_by, @now, @now)
+  `).run({
+    domain: p.domain, platform: p.platform ?? null, change_class: p.change_class,
+    risk: p.risk, title: p.title, rationale: p.rationale, evidence: p.evidence,
+    artifact_url: p.artifact_url ?? null, artifact_kind: p.artifact_kind ?? null,
+    finding_id: p.finding_id ?? null, job_id: p.job_id ?? null,
+    created_by: p.created_by, now,
+  });
+  db.prepare(`INSERT INTO proposal_audit (proposal_id, from_status, to_status, actor_id, actor_kind, notes, at)
+              VALUES (?, NULL, 'proposed', ?, ?, ?, ?)`)
+    .run(r.lastInsertRowid, p.created_by, 'agent', p.notes || null, now);
+  res.json({ ok: true, id: r.lastInsertRowid, status: 'proposed' });
+});
+
+// GET /memory/proposals?status=&domain=&awaiting_human=1
+app.get('/memory/proposals', (req, res) => {
+  const limit = clampLimit(req.query.limit, 50, 500);
+  const where = [];
+  const vals = [];
+  for (const col of ['status', 'domain', 'platform', 'created_by']) {
+    if (req.query[col]) { where.push(`${col} = ?`); vals.push(req.query[col]); }
+  }
+  if (req.query.awaiting_human) where.push("status = 'escalated'");
+  if (req.query.open_only) where.push("status IN ('proposed','under_review','escalated','approved')");
+  const rows = db.prepare(`
+    SELECT * FROM proposals ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+    ORDER BY id DESC LIMIT ?
+  `).all(...vals, limit);
+  res.json(rows);
+});
+
+// GET /memory/proposals/:id — the proposal plus its full trail
+app.get('/memory/proposals/:id', (req, res) => {
+  const row = db.prepare('SELECT * FROM proposals WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'proposal not found' });
+  const trail = db.prepare('SELECT * FROM proposal_audit WHERE proposal_id = ? ORDER BY id').all(req.params.id);
+  res.json({ ...row, audit: trail, decision: describeDecision(row) });
+});
+
+// POST /memory/proposals/:id/transition {to, actor_id, actor_kind, notes}
+//
+// The ONE way a proposal changes state. Deliberately not a PATCH of arbitrary
+// columns: `status` must never be settable directly, or the gate becomes
+// advisory. A refusal returns 409 with the reason, so the caller learns WHY
+// rather than retrying blindly.
+app.post('/memory/proposals/:id/transition', (req, res) => {
+  const { to, actor_id, actor_kind = 'agent', notes } = req.body || {};
+  const row = db.prepare('SELECT * FROM proposals WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'proposal not found' });
+
+  const actor = { id: actor_id, kind: actor_kind };
+  const check = canTransition(row, to, actor);
+  if (!check.allowed) return res.status(409).json({ error: 'transition refused', reason: check.reason });
+
+  const now = new Date().toISOString();
+  const isDecision = ['approved', 'rejected', 'escalated'].includes(to);
+  db.prepare(`
+    UPDATE proposals SET
+      status = ?,
+      reviewed_by  = CASE WHEN ? THEN ? ELSE reviewed_by END,
+      reviewed_at  = CASE WHEN ? THEN ? ELSE reviewed_at END,
+      review_notes = COALESCE(?, review_notes),
+      executed_at  = CASE WHEN ? = 'executed' THEN ? ELSE executed_at END,
+      updated_at = ?
+    WHERE id = ?
+  `).run(to, isDecision ? 1 : 0, actor_id, isDecision ? 1 : 0, now, notes || null, to, now, now, row.id);
+
+  db.prepare(`INSERT INTO proposal_audit (proposal_id, from_status, to_status, actor_id, actor_kind, notes, at)
+              VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .run(row.id, row.status, to, actor_id, actor_kind, notes || null, now);
+
+  const after = db.prepare('SELECT * FROM proposals WHERE id = ?').get(row.id);
+  res.json({ ok: true, id: row.id, status: to, decision: describeDecision(after) });
+});
+
+// GET /memory/proposals-summary — counts for the deck
+app.get('/memory/proposals-summary', (req, res) => {
+  const byStatus = db.prepare('SELECT status, COUNT(*) AS n FROM proposals GROUP BY status').all();
+  const byDomain = db.prepare(`SELECT domain, COUNT(*) AS n FROM proposals
+                               WHERE status IN ('proposed','under_review','escalated') GROUP BY domain`).all();
+  res.json({ byStatus, byDomain });
 });
 
 // POST /memory/findings/:id/reattribute {platform, file_path}
