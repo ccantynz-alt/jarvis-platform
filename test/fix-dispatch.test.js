@@ -62,6 +62,43 @@ test('a finding already being fixed is not dispatched twice', () => {
   assert.match(r.reason, /already dispatched/);
 });
 
+test('THE DRY-RUN CATCH: status says confirmed, the verdict prose says otherwise', () => {
+  // gluecron #31, real row, 2026-08-05: stored status 'confirmed', while its
+  // verifier wrote "PARTIALLY re-verified and NOT confirmed at origin/main —
+  // treat with care". It was picked by the first dry-run tick. When the enum
+  // and the prose disagree, the prose wins.
+  const r = fixEligibility(f({
+    verdict: 'PARTIALLY re-verified and NOT confirmed at origin/main b4e86b2 — treat with care.',
+  }), ctx);
+  assert.equal(r.eligible, false);
+  assert.match(r.reason, /hedged/);
+});
+
+test('every hedging phrase a verifier actually used is caught', () => {
+  for (const v of [
+    'verifier produced no usable verdict — left unproven',
+    'could not verify the defect is real',
+    'unable to confirm against current code',
+    'may already be fixed upstream',
+    'Verify against lib/pr-merge.ts at origin/main before acting on this one',
+  ]) {
+    assert.equal(fixEligibility(f({ verdict: v }), ctx).eligible, false, v);
+  }
+});
+
+test('a plainly confirmed verdict is NOT caught by the caution filter', () => {
+  // The filter must not swallow the ordinary case — that would silently
+  // disable auto-fixing altogether, which is the worse failure.
+  for (const v of [
+    'confirmed by verifier',
+    'Verified end to end with no mitigating guard',
+    'RE-VERIFIED at origin/main d557bad, code identical, still line 372',
+    'Confirmed: route.ts:71 fires the workflow in an unawaited async IIFE',
+  ]) {
+    assert.equal(fixEligibility(f({ verdict: v }), ctx).eligible, true, v);
+  }
+});
+
 test('the three denied platforms are refused with their real reason', () => {
   for (const p of Object.keys(DENIED_PLATFORMS)) {
     const r = fixEligibility(f({ platform: p }), { canPush: () => true });

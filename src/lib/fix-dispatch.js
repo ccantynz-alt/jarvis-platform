@@ -53,6 +53,15 @@ export const DENIED_PLATFORMS = {
 export const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 
 /**
+ * Phrases a verifier uses when it could not actually stand the finding up.
+ * These appear in `verdict` prose on rows whose `status` column still says
+ * 'confirmed', so the enum alone is not enough to trust a finding with an
+ * unattended agent.
+ */
+export const CAUTION_RE =
+  /NOT confirmed|treat with care|left unproven|no usable verdict|could not (?:verify|reproduce)|unable to (?:verify|confirm)|may (?:already )?(?:be|have been) fixed|verify (?:against|before)/i;
+
+/**
  * @param {object} finding                 a code_findings row
  * @param {object} ctx
  * @param {(p:string)=>boolean} ctx.canPush  platform has a checkout AND a git remote
@@ -81,6 +90,17 @@ export function fixEligibility(finding, { canPush, minSeverity = 'critical', den
   // lands near an existing row. Two agents on one bug race each other.
   if (/LIKELY DUPLICATE/i.test(String(finding.verdict || ''))) {
     return { eligible: false, reason: 'flagged as a likely duplicate of an existing finding' };
+  }
+  // `status` and `verdict` can disagree, and when they do the PROSE is right.
+  // Found by running the first dry-run tick (2026-08-05): gluecron #31 is
+  // stored `status: confirmed`, but its verifier wrote "PARTIALLY re-verified
+  // and NOT confirmed at origin/main — treat with care ... Verify against
+  // lib/pr-merge.ts at origin/main before acting on this one." A verifier that
+  // hedged in words wrote its doubt somewhere the status enum cannot express,
+  // and this was one tick away from spending a full-permission agent on it.
+  const caution = CAUTION_RE.exec(String(finding.verdict || ''));
+  if (caution) {
+    return { eligible: false, reason: `verifier hedged ("${caution[0]}") — needs a human before an agent touches it` };
   }
   return { eligible: true, reason: 'confirmed, pushable, unclaimed' };
 }
