@@ -1,0 +1,28 @@
+[Unit]
+Description=Jarvis fix-runner — dispatches repair agents for CONFIRMED code-health findings
+After=network-online.target jarvis-memory.service jarvis-orchestrator.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jarvis
+# Order matters: fix-runner.env loads second so its values win any collision
+# with secrets.env (matches jarvis-code-health.service and jarvis-self-heal.service).
+EnvironmentFile=/opt/jarvis/config/secrets.env
+EnvironmentFile=/opt/jarvis/config/fix-runner.env
+ExecStart=/usr/bin/node src/fix-runner.js
+# Type=oneshot DISABLES the start timeout by default, and this tick makes HTTP
+# calls to memory and the orchestrator plus a `git remote get-url` per platform.
+# A stalled dependency would otherwise leave the unit 'activating' forever and
+# systemd would skip every subsequent timer activation — silently, with nothing
+# being repaired and every service still green. That is exactly what happened to
+# jarvis-fleet-check on 2026-07-30. The default is not a default: set it.
+TimeoutStartSec=300
+
+# This unit only DISPATCHES; the repair agents themselves run under the
+# orchestrator and are bounded by its own limits. So this stays tiny.
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

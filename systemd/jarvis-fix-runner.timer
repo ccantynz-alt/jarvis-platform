@@ -1,0 +1,17 @@
+[Unit]
+Description=Dispatch repair agents for confirmed code-health findings every 30 minutes
+
+[Timer]
+# Not on boot: a restart storm must not turn into a dispatch storm.
+OnBootSec=35min
+# 30 min is well inside a repair agent's runtime, which is intentional — the tick
+# is cheap and idempotent (a finding in flight carries fix_job_id and is skipped),
+# so this is a steady drip bounded by FIX_MAX_PER_DAY, not a cadence that decides
+# throughput. The daily cap is the real limit.
+OnUnitActiveSec=30min
+AccuracySec=2min
+# Don't line every service's timer up on the hour.
+RandomizedDelaySec=4min
+
+[Install]
+WantedBy=timers.target
