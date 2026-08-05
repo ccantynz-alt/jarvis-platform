@@ -144,16 +144,33 @@ pushing to `main` is today's blast radius wearing a nicer costume.
 |---|---|
 | `src/lib/proposals.js` — lifecycle, separation of duties, risk rules | **done** 2026-08-05 |
 | `test/proposals.test.js` — 23 cases, both directions | **done** 2026-08-05 |
-| `proposals` + `proposal_audit` tables in `memory-server.js` | pending |
-| REST surface (`/memory/proposals`, transitions) | pending |
-| Officer review agents (persona + scheduled review pass) | pending |
-| `fix-runner` emits PR-backed proposals instead of pushing | pending |
-| Deck REVIEW panel — approve/reject/escalate from the OPS tab | pending |
-| Per-repo credentials | pending — needs Craig (GitHub App or deploy keys) |
+| `proposals` + `proposal_audit` tables in `memory-server.js` | **done** — append-only trail |
+| REST surface (`/memory/proposals`, `/transition`, `/artifact`) | **done** — gate enforced server-side |
+| `fix-runner` proposes instead of pushing | **done** — branch `jarvis/fix-<id>`, never main, never merges |
+| Officer review pass (`src/review-runner.js` + timer) | **done** — dry-run |
+| Deck REVIEW panel — approve/reject from the OPS tab | **done** — verified by screenshot |
+| Pre-push guard on all checkouts | **done** — `scripts/install-push-guards.sh`, 9 installed, verified refusing `main` |
+| Per-repo credentials + branch protection | **Craig** — `docs/CREDENTIAL-SCOPING.md` |
+| Per-platform merge workflow | **Craig** — same doc, after credentials |
 
-**`FIX_RUNNER_MODE=off` since 2026-08-05** and it stays off until it emits
-proposals rather than pushes. Findings continue to accumulate safely; nothing is
-lost by waiting.
+### Live modes (2026-08-05)
+
+- **`FIX_RUNNER_MODE=live`** — safe to run now that it cannot land anything: it
+  opens a proposal, and its agent may only push `jarvis/fix-<id>`. Worst case
+  is an unwanted branch and a proposal Craig rejects.
+- **`REVIEW_RUNNER_MODE=dry-run`** — deliberately. Officers log verdicts;
+  nothing is auto-approved unattended on the first night. Read the logged
+  verdicts against the real proposals before flipping it.
+
+### Verified end to end, not just unit-tested
+
+- an agent approving its own proposal → refused, *"separation of duties"*
+- the wrong officer deciding → refused, *"only cfo may decide cfo proposals"*
+- a `payment` proposal → refused even for the right officer, *"never
+  agent-approved — escalate instead"*, then escalated to Craig
+- `git push origin main` in a real checkout → **refused by the hook**
+- `git push origin jarvis/…` → allowed
+- audit trail returns the full chain: `→ proposed → under_review → approved`
 
 ---
 

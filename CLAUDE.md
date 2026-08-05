@@ -805,8 +805,29 @@ scope + review gate, not from an agent's label**. Ordering, most safety first:
 (1) stop writing to `main`, branch+PR only; (2) per-repo credentials replacing
 the single root SSH key; (3) merge authority moves into each platform.
 
-**`FIX_RUNNER_MODE=off` since 2026-08-05** and it stays off until it emits
-PR-backed proposals instead of pushing. Findings keep accumulating safely.
+**Built and running (2026-08-05):** `proposals` + append-only `proposal_audit`
+in memory-server with the gate enforced SERVER-SIDE (`/memory/proposals`,
+`/transition`, `/artifact` — `status` is deliberately not settable via a PATCH,
+or the gate becomes advisory); `src/fix-runner.js` opens a proposal then
+dispatches an agent that may only push `jarvis/fix-<id>`; `src/review-runner.js`
++ `jarvis-review-runner.timer` (every 20 min) spawns the OWNING officer as
+reviewer; a REVIEW panel at the top of the deck's OPS tab where Craig approves
+or rejects (each button arms once — a decision is a real authorisation and this
+is a touchscreen). **`FIX_RUNNER_MODE=live`** (safe: it cannot land anything)
+and **`REVIEW_RUNNER_MODE=dry-run`** (officers log verdicts; nothing
+auto-approves unattended yet).
+
+**`scripts/install-push-guards.sh` — a pre-push hook on all 9 checkouts refusing
+main/master/trunk/release/production.** Because the agent prompt saying "never
+push to main" is a request; this is the boundary. Local only (`.git/hooks` is
+not part of a repo, so nothing is committed to Craig's product repos). Re-run it
+after cloning any new checkout. Verified live: `git push origin main` is
+REFUSED, `git push origin jarvis/…` succeeds.
+**The remaining hole is credential scope** — one key still writes to every repo,
+and a fresh clone or `--no-verify` bypasses the local hook. Server-side branch
+protection is the only control an agent cannot route around, and it is Craig's:
+**docs/CREDENTIAL-SCOPING.md** (branch protection alone is ~10 minutes and buys
+most of the value).
 
 ## KNOWN DEBT (current priorities — fix these, don't work around them)
 
