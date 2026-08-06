@@ -116,6 +116,13 @@ export function situationPrompt(data = {}) {
   lines.push('bold or headers beyond the three words above. Start each bullet with');
   lines.push('"- ". Address him as "you". Be specific — name platforms and numbers.');
   lines.push('Never invent anything not present in the data above.');
+  lines.push('');
+  lines.push('In particular, do NOT state HOW a change landed — whether it was merged,');
+  lines.push('pushed to a branch, deployed, or released. None of that is in the data');
+  lines.push('above and you cannot see it. Say a job completed, or that a proposal is');
+  lines.push('awaiting a decision, and stop there. (Added after a synthesis asserted');
+  lines.push('"all completed on branches, none merged to main" — half of those had in');
+  lines.push('fact been pushed straight to main the day before.)');
   return lines.join('\n');
 }
 

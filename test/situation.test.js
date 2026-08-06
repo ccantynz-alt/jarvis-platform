@@ -118,6 +118,17 @@ test('the prompt forbids invention', () => {
   assert.match(situationPrompt(data()), /Never invent anything not present/);
 });
 
+test('THE FIRST LIVE ERROR: it must not assert how a change landed', () => {
+  // The first real synthesis said "all completed on branches, none merged to
+  // main". Half of those had been pushed straight to main the day before,
+  // pre-governance. Nothing in the data says how anything landed — that was an
+  // inference presented as fact, in the one panel meant to be trusted at a
+  // glance.
+  const p = situationPrompt(data());
+  assert.match(p, /do NOT state HOW a change landed/);
+  assert.match(p, /merged, ?\n?pushed to a branch, deployed, or released/);
+});
+
 test('an empty fleet still produces a usable prompt', () => {
   const p = situationPrompt({});
   assert.match(p, /none/);
