@@ -1220,6 +1220,12 @@ const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
 const SR_LANG = qs.get('lang') || localStorage.getItem('jarvis_lang') || 'en-NZ';
 let voiceMode = (qs.get('voice') === '0' || !SRCls) ? 'off'
   : (['wake', 'live', 'off'].includes(localStorage.getItem('jarvis_voice')) ? localStorage.getItem('jarvis_voice') : 'wake');
+// LIVE never survives a page load (2026-08-07). A persisted 'live' meant a tab
+// reopened days later came back with a hot mic answering the whole room — on
+// 2026-08-06 it transcribed 23 minutes of a private household conversation and
+// spoke a reply to every fragment. Live mode is a deliberate per-session choice:
+// it starts from a tap, and a reload starts you back at wake.
+if (voiceMode === 'live') voiceMode = 'wake';
 let armed = false; // browsers require one user gesture before mic/audio work
 let stream = null, analyser = null, audioData = null; // mic level → listening halo
 let outAnalyser = null, outData = null;               // his own voice → speaking pulse
@@ -1229,6 +1235,8 @@ let srBackoff = 400;   // relisten delay; doubles on errors (cap 5s), resets on 
 let srRestarts = 0, lastSrError = '';
 let awaitingCommand = 0; // bare "Jarvis" → next utterance is the command until this ts
 let wakeHintUntil = 0;   // interim transcript matched the wake word — attentive visuals
+let liveSince = 0;       // when LIVE mode was entered — it expires, see the watchdog
+let followChain = 0;     // consecutive no-wake-word turns via the follow-up window
 
 // Fuzzy on purpose: STT regularly mangles "Jarvis" — every variant here has
 // been seen in the wild or is a near-neighbour. Watch the HEARD line for new
@@ -1519,6 +1527,7 @@ function handleUtterance(said) {
     // could never hold. With closeEar() this branch should now be nearly
     // unreachable; it stays as the backstop for the acoustic tail.
     if (!bm) return showHeard(said, true);
+    followChain = 0; // barge-in by name — a real conversation
     interruptSpeech();
     showHeard(said, false);
     const cmd = bm[1].trim();
@@ -1546,6 +1555,7 @@ function routeUtterance(said) {
   if (voiceMode === 'live') { showHeard(said, false); return sendCommand(said); }
   const m = said.match(WAKE_RE);
   if (m) {
+    followChain = 0; // he said the name — this chain is a real conversation
     showHeard(said, false);
     const cmd = m[1].trim();
     if (cmd) return sendCommand(cmd);
@@ -1556,6 +1566,7 @@ function routeUtterance(said) {
   }
   if (Date.now() < awaitingCommand) {
     awaitingCommand = 0;
+    followChain++; // a turn that never said "Jarvis" — bounded, see FOLLOWUP_CHAIN_MAX
     showHeard(said, false);
     return sendCommand(said);
   }
@@ -1596,14 +1607,47 @@ function scheduleRelisten() {
 // for this long, no wake word needed. handleUtterance consumes the window
 // one-shot; the next reply re-arms it, so a back-and-forth keeps flowing.
 const FOLLOWUP_MS = 25000;
+// The window re-arms after every reply, so with a conversation happening in the
+// room it used to chain FOREVER — one fuzzy wake hit and every ~20s fragment of
+// whoever was talking became a brain turn with a spoken answer (2026-08-06:
+// 23 minutes of family conversation, answered aloud, fragment by fragment).
+// After this many consecutive turns that never said "Jarvis", the ear closes
+// and the wake word is required again. Any wake-word hit, mode tap, or manual
+// interrupt resets the chain — a real back-and-forth with Craig says "Jarvis"
+// often enough that this is never felt; an eavesdrop never says it at all.
+const FOLLOWUP_CHAIN_MAX = 5;
+// Pure — extracted and exercised by test/deck-live-mic.test.js.
+function mayRearmFollowUp(mode, chain) {
+  if (mode === 'off') return false;
+  if (mode === 'wake' && chain >= FOLLOWUP_CHAIN_MAX) return false;
+  return true;
+}
 function openFollowUpWindow() {
-  if (voiceMode === 'off') return;
+  if (!mayRearmFollowUp(voiceMode, followChain)) {
+    if (voiceMode === 'wake') {
+      // Never a silent state change (2026-07-28's lesson): say on screen why
+      // the next utterance will be ignored.
+      addChat('JARVIS', '(that’s a few turns without my name — say “Jarvis” to keep going)', null);
+      updateOrbLabel();
+    }
+    return;
+  }
   awaitingCommand = Date.now() + FOLLOWUP_MS;
   updateOrbLabel();
 }
 
+// LIVE mode expires (2026-08-07). "Everything is a command" is fine while Craig
+// is actively working hands-free; left running it is an open mic answering the
+// whole room. Half an hour, then back to wake — one tap re-enables it.
+const LIVE_MAX_MS = 30 * 60 * 1000;
+
 // Chrome quietly kills long recognizer sessions; the watchdog reopens the ear.
 setInterval(() => {
+  if (voiceMode === 'live' && liveSince && Date.now() - liveSince > LIVE_MAX_MS) {
+    setVoiceMode('wake');
+    updateMicBtn();
+    addChat('JARVIS', '(mic had been live for 30 minutes — back to wake-word mode; tap the mic or say “Jarvis” when you need me)', null);
+  }
   // This one mattered most: it fires every 3s regardless of what else is
   // happening, so without S.thinking it would force the mic open in the middle
   // of the think-then-speak window, every single turn.
@@ -1618,7 +1662,11 @@ function updateMicBtn() {
 }
 function setVoiceMode(mode, persist = true) {
   voiceMode = mode;
-  if (persist) try { localStorage.setItem('jarvis_voice', mode); } catch {}
+  followChain = 0;                                // a tap is deliberate — fresh chain
+  liveSince = mode === 'live' ? Date.now() : 0;   // LIVE expires — see the watchdog
+  // 'live' is deliberately stored as 'wake': a reopened tab must never come
+  // back with a hot mic (see the boot-time mapping above for the incident).
+  if (persist) try { localStorage.setItem('jarvis_voice', mode === 'live' ? 'wake' : mode); } catch {}
   if (mode === 'off') {
     clearTimeout(relistenTimer);
     recGen++; // orphan any in-flight session
@@ -1652,7 +1700,9 @@ function interruptSpeech() {
   // acoustic tail of Jarvis finishing NATURALLY, not a manual cutoff.
   lastSpeechEndAt = 0;
   // Cutting him off IS the start of a turn — whatever Craig says next is meant
-  // for Jarvis, so don't make him prefix it with the wake word.
+  // for Jarvis, so don't make him prefix it with the wake word. A physical
+  // interrupt is also proof there's a human at the deck: reset the chain.
+  followChain = 0;
   openFollowUpWindow();
   if (armed) startListening();
   return true;

@@ -726,6 +726,19 @@ It is gitignored. If `git status` ever shows it staged, stop everything.
   Jarvis's own sentences appear there, it is the mic, not the brain. That one
   command found this in minutes. Tests: `test/deck-echo.test.js`, which now
   carries the two real echoes from the 2026-07-31 transcript as regressions.
+  **The open mic has BOUNDS now (2026-08-07).** A deck tab left in MIC LIVE
+  mode (persisted in localStorage, so it survived reloads for 14+ hours)
+  transcribed 23 minutes of a private household conversation on 2026-08-06 and
+  spoke a reply to every ~20s fragment; "stop it" got "Stopping, sir." and the
+  mic stayed hot. Diagnose with the same KV command above — the tell is user
+  turns with NO wake word reaching the brain (in wake mode they'd be dropped).
+  Three bounds, all pinned by `test/deck-live-mic.test.js`: LIVE never survives
+  a page load (boot maps a stored 'live' to 'wake', and setVoiceMode persists
+  'wake' in its place); LIVE expires after 30 min with an on-screen notice; and
+  the wake-mode follow-up window stops re-arming after FOLLOWUP_CHAIN_MAX
+  consecutive turns that never said "Jarvis" — an eavesdrop never says the
+  name, a real conversation does. The chain resets on any wake-word hit, mode
+  tap, or manual interrupt. Don't widen these without a test in that file.
 - **Alerts reach his DEVICES now, not just open tabs (2026-07-30).** Every
   notification path before this needed something of Craig's to be listening —
   the inbox is a pull, gateway/deck pushes only land in a connected tab, TTS
