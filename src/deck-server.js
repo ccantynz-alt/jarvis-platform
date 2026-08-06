@@ -41,6 +41,8 @@ import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegrad
 import { synthesize, ttsEnabled } from './lib/tts.js';
 import { openTtsStream } from './lib/tts-stream.js';
 import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
+import { spawnClaude } from './lib/spawn-agent.js';
+import { situationFingerprint, situationPrompt, parseSituation, needsAttention } from './lib/situation.js';
 
 const PORT      = 9210;
 const SCHEDULER = 'http://127.0.0.1:9209';
@@ -227,7 +229,10 @@ app.get('/tts', async (req, res) => {
 // the tab would be empty and Rule 2 unverifiable.
 app.get('/api/ops', (req, res) => {
   if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
-  res.json(state.ops || {});
+  // situation rides along: a :9201 virtual-time capture never sees a WS push,
+  // so without this every screenshot of the tab would show an empty SITUATION
+  // panel and Rule 2 could not be satisfied for it.
+  res.json({ ...(state.ops || {}), situation: state.situation || null });
 });
 
 // POST /api/ops/review {id, decision, notes} — Craig decides a proposal.
@@ -344,6 +349,7 @@ const state = {
   recentTs: [],      // ms timestamps of feed+wire traffic for msgRate
   upSamples: new Map(), // platform → {up, total}
   latHist: new Map(),   // platform → [latencyMs…] ring buffer (drives real sparklines)
+  situation: null,      // Jarvis's ranked synthesis of the OPS picture
 };
 
 // Persist rolling history so uptime %s and sparklines survive restarts.
@@ -354,12 +360,16 @@ try {
   state.latHist = new Map(saved.latHist || []);
   state.lastNotifId = saved.lastNotifId || 0;
   state.lastEventTs = saved.lastEventTs || '';
+  state.situation = saved.situation || null;
 } catch { /* first boot */ }
 function saveState() {
   try {
     writeFileSync(STATE_FILE, JSON.stringify({
       upSamples: [...state.upSamples], latHist: [...state.latHist],
       lastNotifId: state.lastNotifId, lastEventTs: state.lastEventTs,
+      // Persisted so a deploy restart does not re-spend a subscription turn
+      // re-deriving a synthesis whose facts have not moved.
+      situation: state.situation,
     }));
   } catch (e) { console.error('[deck] state save failed:', e.message); }
 }
@@ -782,6 +792,65 @@ async function pollOps() {
     })) : prev.jobs ?? null,
   };
   broadcast({ type: 'ops', ...state.ops });
+  refreshSituation().catch(e => console.error('[deck] situation:', e.message));
+}
+
+// ── SITUATION — Jarvis's judgement, not his tables (2026-08-05) ──────────────
+//
+// Craig: "how can we make jarvis command deck seriously more intelligent". The
+// OPS panels show everything at equal weight; this asks the brain what it MEANS
+// and ranks it.
+//
+// Generated ONLY when the underlying facts materially change
+// (lib/situation.js's fingerprint). Every synthesis is a subscription turn from
+// the same window the voice brain and every repair agent draw from, and there
+// is no metered fallback — an unconditional timer would burn ~48 turns a day
+// restating an unchanged picture.
+//
+// spawnClaude, deliberately NOT runAgent: runAgent writes to the shared
+// conversation transcript, and a background synthesis every time a finding
+// lands would pollute the thing Craig is actually talking to.
+let situationBusy = false;
+async function refreshSituation() {
+  if (situationBusy) return;
+  const facts = {
+    findings: state.ops?.findings || [],
+    proposals: state.ops?.proposals || [],
+    platforms: state.platforms || [],
+    jobs: state.ops?.jobs || [],
+  };
+  const fp = situationFingerprint(facts);
+  if (fp === state.situation?.fingerprint) return;   // nothing worth re-thinking
+  // Nothing at all to synthesise yet (first boot, memory unreachable).
+  if (!facts.findings.length && !facts.proposals.length) return;
+
+  situationBusy = true;
+  const t0 = Date.now();
+  try {
+    const out = await spawnClaude({
+      prompt: situationPrompt(facts),
+      cwd: '/opt/jarvis',
+      timeoutMin: 4,
+    });
+    if (out.limitHeld) { console.warn('[deck] situation held — accounts usage-limited'); return; }
+    if (out.code !== 0) { console.warn(`[deck] situation agent exited ${out.code}`); return; }
+    const parsed = parseSituation(out.stdout);
+    state.situation = {
+      fingerprint: fp,
+      ok: parsed.ok,
+      sections: parsed.sections,
+      raw: parsed.ok ? null : parsed.raw,     // shown verbatim rather than dropped
+      error: parsed.error || null,
+      attention: needsAttention(parsed),
+      at: new Date().toISOString(),
+      ms: Date.now() - t0,
+    };
+    saveState();
+    broadcast({ type: 'situation', ...state.situation });
+    console.log(`[deck] situation refreshed in ${state.situation.ms}ms — ${state.situation.attention} item(s) need Craig`);
+  } finally {
+    situationBusy = false;
+  }
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
@@ -840,6 +909,7 @@ wss.on('connection', (ws, req) => {
   if (state.queues.length) send({ type: 'queues', queues: state.queues });
   if (state.platforms.length) send({ type: 'platforms', platforms: state.platforms });
   if (state.ops) send({ type: 'ops', ...state.ops });
+  if (state.situation) send({ type: 'situation', ...state.situation });
   send({ type: 'stats', ...state.stats });
   for (const f of [...state.feedCache].reverse()) send({ type: 'feed', ...f });
   for (const w of [...state.wireCache].reverse()) send({ type: 'wire', ...w });

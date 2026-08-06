@@ -253,6 +253,14 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 
     <!-- OPS VIEW — the work itself: inbox, code findings, agent reports, job queue -->
     <div id="view-ops" class="view hidden" style="overflow:auto;padding:18px">
+      <div id="ops-situation-wrap" class="ops-panel" style="min-width:0;display:none;flex-direction:column;gap:10px;border:1px solid rgba(0,229,255,.25);background:linear-gradient(180deg,rgba(6,20,28,.75),rgba(6,12,20,.6));border-radius:4px;padding:16px 18px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="section-label" style="color:#00e5ff">SITUATION</div>
+          <div class="mono" id="ops-sit-age" style="margin-left:auto;font-size:10px;color:#5f7a8c"></div>
+        </div>
+        <div id="ops-situation" style="display:flex;flex-direction:column;gap:12px"></div>
+      </div>
+
       <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(255,181,71,.3);background:rgba(20,16,10,.6);border-radius:4px;padding:12px;margin-bottom:14px">
         <div style="display:flex;align-items:center;gap:10px">
           <div class="section-label" style="color:#ffb547">REVIEW · <span id="ops-revcount">0</span> AWAITING DECISION</div>
@@ -300,7 +308,7 @@ const qs = new URLSearchParams(location.search);
 // ── State ────────────────────────────────────────────────────────────────────
 const S = {
   view: 'core', link: 'SIM', mic: false, speaking: false,
-  agents: [], queues: [], platforms: [], org: null, ops: null,
+  agents: [], queues: [], platforms: [], org: null, ops: null, situation: null,
   // Real values arrive over the live link; SIM seeds these only under ?sim=1.
   msgRate: 0, queueDepth: 0, tasksDone: 0, uptime: '—',
   bootTs: Date.now(),
@@ -648,6 +656,7 @@ function renderPlatforms() {
 
 // ── OPS — inbox / findings / reports / jobs (all real, no SIM data) ─────────
 const SEV_COLOR = { critical: '#ff4d6a', high: '#ff8f5c', medium: '#ffb547', low: '#7d99aa' };
+const SEV_RANK  = { critical: 0, high: 1, medium: 2, low: 3 };
 const RPT_COLOR = { ok: '#3dffa0', action_needed: '#ffb547', escalate: '#ff4d6a' };
 const JOB_COLOR = { queued: '#7d99aa', claimed: '#00e5ff', running: '#00e5ff', completed: '#3dffa0', failed: '#ff4d6a', timeout: '#ff4d6a', held: '#ffb547' };
 function agoc(iso) {
@@ -658,17 +667,58 @@ function agoc(iso) {
   if (s < 129600) return Math.round(s / 3600) + 'h ago';
   return Math.round(s / 86400) + 'd ago';
 }
-// One row shape for every panel: [dot] main-text [meta right]. All content set
-// via textContent — titles/summaries are agent-written free text.
-function opsRow(dot, main, meta, dim) {
+// One row shape for every panel.
+//
+// Rewritten 2026-08-05 (Craig: "the ops page is very hard to read"). What was
+// wrong, and what each change fixes:
+//  - every row was ONE ellipsized line, so a finding's title was unreadable
+//    past ~60 characters → titles now WRAP to two lines.
+//  - severity was a 7px dot, which does not survive a glance across a room →
+//    it is now a 3px LEFT BORDER, the strongest scannable signal in a list.
+//  - body text was 12px #dcedf6 on a busy gradient with a hairline border under
+//    every row → 13px, brighter, and separated by SPACE instead of rules.
+//  - the meta column competed with the title at the same weight → smaller,
+//    dimmer, and it never wraps.
+// All content is set via textContent — every title here is agent-written text.
+function opsRow(color, main, meta, dim) {
   const el = document.createElement('div');
-  el.style.cssText = 'display:flex;align-items:baseline;gap:8px;font-size:12px;line-height:1.5;padding:3px 2px;border-bottom:1px solid rgba(0,229,255,.05)' + (dim ? ';opacity:.45' : '');
-  el.innerHTML = '<div style="width:7px;height:7px;border-radius:50%;flex:none;align-self:center;background:' + dot + ';box-shadow:0 0 6px ' + dot + '"></div>' +
-    '<div class="om" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dcedf6"></div>' +
-    '<div class="mono ot" style="margin-left:auto;flex:none;font-size:10px;color:#5f7a8c"></div>';
+  el.style.cssText = 'display:flex;align-items:flex-start;gap:10px;font-size:13px;line-height:1.45;'
+    + 'padding:6px 8px;border-left:3px solid ' + color + ';border-radius:0 3px 3px 0;'
+    + 'background:rgba(255,255,255,.015)' + (dim ? ';opacity:.4' : '');
+  el.innerHTML =
+    '<div class="om" style="min-width:0;flex:1;color:#e6f4fa;overflow-wrap:anywhere;'
+      + 'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden"></div>'
+    + '<div class="mono ot" style="flex:none;font-size:10px;color:#6b8a9e;white-space:nowrap;padding-top:2px"></div>';
   el.querySelector('.om').textContent = main;
   el.querySelector('.ot').textContent = meta;
+  el.title = main;   // the full text on hover, since the clamp is visual only
   return el;
+}
+
+// A collapsible group header — turns 60 flat finding rows into 8 scannable
+// platform groups. Collapsed by default except the worst one: the panel should
+// answer "where is the trouble" before it answers "what exactly".
+function opsGroup(label, count, color, open) {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:3px';
+  const head = document.createElement('div');
+  head.setAttribute('role', 'button'); head.tabIndex = 0;
+  head.style.cssText = 'display:flex;align-items:center;gap:8px;cursor:pointer;padding:5px 6px;'
+    + 'border-radius:3px;background:rgba(0,229,255,.05);font-size:12px;letter-spacing:.5px';
+  head.innerHTML = '<span class="oc" style="color:#6b8a9e;font-size:10px;width:9px">' + (open ? '▾' : '▸') + '</span>'
+    + '<span class="ol" style="color:#cfe9f5;font-weight:600"></span>'
+    + '<span class="mono on" style="margin-left:auto;font-size:10px;color:' + color + '"></span>';
+  head.querySelector('.ol').textContent = label;
+  head.querySelector('.on').textContent = count;
+  const body = document.createElement('div');
+  body.style.cssText = 'display:' + (open ? 'flex' : 'none') + ';flex-direction:column;gap:3px;padding:2px 0 6px 6px';
+  head.onclick = () => {
+    const showing = body.style.display !== 'none';
+    body.style.display = showing ? 'none' : 'flex';
+    head.querySelector('.oc').textContent = showing ? '▸' : '▾';
+  };
+  wrap.appendChild(head); wrap.appendChild(body);
+  return { wrap, body };
 }
 const PROP_COLOR = { escalated: '#ff4d6a', proposed: '#ffb547', under_review: '#00e5ff', approved: '#3dffa0' };
 // A decision is irreversible and this is a touchscreen — every button confirms
@@ -740,6 +790,55 @@ function renderReview() {
     box.appendChild(row);
   }
 }
+// SITUATION — Jarvis's ranked judgement of the OPS picture, not another list.
+// Larger type than the panels below it on purpose: this is the one thing on the
+// tab meant to be READ rather than scanned.
+const SIT_STYLE = {
+  'NEEDS YOU': { color: '#ff8f5c', label: 'NEEDS YOU' },
+  'CHANGED':   { color: '#00e5ff', label: 'CHANGED' },
+  'HANDLED':   { color: '#3dffa0', label: 'HANDLED' },
+};
+function renderSituation() {
+  const s = S.situation;
+  const wrap = $('ops-situation-wrap');
+  if (!s) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'flex';
+  const age = s.at ? agoc(s.at) : '';
+  $('ops-sit-age').textContent = (s.attention ? s.attention + ' NEED YOU · ' : '') + (age ? 'assessed ' + age : '');
+  const box = $('ops-situation');
+  box.innerHTML = '';
+
+  // An unparseable synthesis is shown verbatim rather than hidden — a blank
+  // panel reads as "all clear", and silence must never be good news.
+  if (!s.ok) {
+    const p = document.createElement('div');
+    p.style.cssText = 'font-size:13px;line-height:1.6;color:#9fb8c8;white-space:pre-wrap';
+    p.textContent = s.raw || ('Assessment unavailable' + (s.error ? ' — ' + s.error : ''));
+    box.appendChild(p);
+    return;
+  }
+  for (const key of ['NEEDS YOU', 'CHANGED', 'HANDLED']) {
+    const bullets = (s.sections && s.sections[key]) || [];
+    if (!bullets.length) continue;
+    const st = SIT_STYLE[key];
+    const sec = document.createElement('div');
+    sec.style.cssText = 'display:flex;flex-direction:column;gap:5px';
+    const h = document.createElement('div');
+    h.className = 'mono';
+    h.style.cssText = 'font-size:10px;letter-spacing:3px;color:' + st.color;
+    h.textContent = st.label;
+    sec.appendChild(h);
+    for (const b of bullets) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:9px;align-items:flex-start;font-size:14px;line-height:1.55;color:#e6f4fa';
+      row.innerHTML = '<span style="color:' + st.color + ';flex:none">▸</span><span class="sb" style="min-width:0"></span>';
+      row.querySelector('.sb').textContent = b;
+      sec.appendChild(row);
+    }
+    box.appendChild(sec);
+  }
+}
+
 function renderOps() {
   const o = S.ops;
   if (!o) return;
@@ -763,15 +862,39 @@ function renderOps() {
     if (!o.inbox.items.length) box.textContent = 'Inbox zero, sir.';
   }
   if (o.findings) {
-    const counts = (o.findingCounts || []).map(c => c.n + ' ' + c.severity).join(' · ');
+    // Order the count chips worst-first — the raw GROUP BY comes back
+    // alphabetically, which put "low" ahead of "critical".
+    const counts = (o.findingCounts || [])
+      .slice().sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9))
+      .map(c => c.n + ' ' + c.severity).join(' · ');
     $('ops-fcounts').textContent = counts ? counts + ' OPEN' : 'NONE OPEN';
     const box = $('ops-findings'); box.innerHTML = '';
-    for (const f of o.findings) {
-      box.appendChild(opsRow(SEV_COLOR[f.severity] || '#7d99aa',
-        '[' + f.platform + '] ' + f.title + (f.file ? '  — ' + f.file : ''),
-        f.severity + (f.seen > 1 ? ' ·×' + f.seen : '')));
+    if (!o.findings.length) { box.textContent = 'No open findings.'; box.style.fontSize = '13px'; box.style.color = '#5f7a8c'; }
+    else {
+      // Group by platform, worst platform first. A flat list of 60 rows answers
+      // no question; "which platform is in trouble" is the first thing to know.
+      const byPlat = new Map();
+      for (const f of o.findings) {
+        if (!byPlat.has(f.platform)) byPlat.set(f.platform, []);
+        byPlat.get(f.platform).push(f);
+      }
+      const worst = (list) => Math.min(...list.map(x => SEV_RANK[x.severity] ?? 9));
+      const groups = [...byPlat.entries()].sort((a, b) =>
+        worst(a[1]) - worst(b[1]) || b[1].length - a[1].length);
+      groups.forEach(([platform, list], i) => {
+        list.sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9));
+        const top = list[0].severity;
+        const chip = list.filter(x => x.severity === top).length + ' ' + top
+          + (list.length > list.filter(x => x.severity === top).length ? ' +' + (list.length - list.filter(x => x.severity === top).length) : '');
+        const g = opsGroup(platform, chip, SEV_COLOR[top] || '#7d99aa', i === 0);
+        for (const f of list) {
+          g.body.appendChild(opsRow(SEV_COLOR[f.severity] || '#7d99aa',
+            f.title + (f.file ? '  — ' + f.file : ''),
+            f.severity + (f.seen > 1 ? ' ×' + f.seen : '')));
+        }
+        box.appendChild(g.wrap);
+      });
     }
-    if (!o.findings.length) box.textContent = 'No open findings.';
   }
   if (o.reports) {
     const box = $('ops-reports'); box.innerHTML = '';
@@ -799,7 +922,9 @@ $('ops-readall').onclick = () => {
 // is the ONLY data path a :9201 virtual-time capture ever sees (captures miss
 // WS pushes entirely — same reason the ?demo-* hooks exist). WS wins after.
 fetch('/api/ops').then(r => r.json()).then(o => {
-  if (o && (o.inbox || o.findings) && !S.ops) { S.ops = o; renderOps(); }
+  if (!o) return;
+  if (o.situation && !S.situation) { S.situation = o.situation; renderSituation(); }
+  if ((o.inbox || o.findings) && !S.ops) { S.ops = o; renderOps(); }
 }).catch(() => {});
 
 // ── Org chart ────────────────────────────────────────────────────────────────
@@ -2112,6 +2237,7 @@ function handleMsg(m) {
   else if (m.type === 'queues' && Array.isArray(m.queues)) { S.queues = m.queues; renderQueues(); }
   else if (m.type === 'platforms' && Array.isArray(m.platforms)) { S.platforms = m.platforms; renderPlatforms(); }
   else if (m.type === 'ops') { S.ops = m; renderOps(); }
+  else if (m.type === 'situation') { S.situation = m; renderSituation(); }
   else if (m.type === 'org' && Array.isArray(m.tiers)) { S.org = { tiers: m.tiers, total: m.total }; if (S.view === 'org') renderOrg(); renderAgents(); }
   else if (m.type === 'chat_chunk') onChatChunk(m.text);
   else if (m.type === 'chat') onChatFinal(m);
