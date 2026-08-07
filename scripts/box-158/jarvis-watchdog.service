@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch the master Jarvis box from 158 (the off-box watcher)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/jarvis-watchdog.sh
+# Type=oneshot disables the start timeout by default (master box lesson,
+# 2026-07-30). Worst case here is 6 probes x 10s + 4 sleeps x 15s + pushes.
+TimeoutStartSec=300

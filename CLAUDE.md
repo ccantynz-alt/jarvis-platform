@@ -11,6 +11,13 @@ The autonomous agent platform on the Vultr box **66.42.121.161** (`vultr`).
 Not a product — the infrastructure that watches, audits, and repairs Craig
 Canty's (MarcoReid Intelligence Systems) platforms without human intervention.
 
+**Reaching the fleet from Craig's PC: `ssh jarvis` and `ssh vapron` — nothing
+else (2026-08-08).** Both aliases are pinned to TAILNET IPs in the PC's
+`~/.ssh/config`; never type `ssh root@66.42.121.161` again (Craig: "no matter
+how many times i say we have tailscale claude never remembers"). Both boxes
+answer over the tailnet, including 158 — the old "Permission denied
+(publickey) to 158" claim is dead.
+
 The platform registry is `config/platforms.json` (hot-reloaded — edits apply
 instantly). Read it; never trust a list in a doc. Local checkouts of note:
 AlecRae runs ON THIS BOX at `/opt/alecrae` (live co-tenant, bun :4100 / next
@@ -206,6 +213,13 @@ Tailnet-only health (`tailscale serve --https=8443` → ops-agent :9095);
 `jarvis-heartbeat.timer` (standalone script, NOT Jarvis code — estate
 doctrine: no Jarvis code on 158) posts 5-min heartbeats to the gateway on
 scoped `JARVIS_HEARTBEAT_TOKEN_vapron158`; >15 min silence auto-alerts.
+**`jarvis-watchdog.timer` (2026-08-08): 158 watches the master box** —
+`/root/jarvis-watchdog.sh` (standalone, same pattern as heartbeat) probes the
+master's `:9212/health` on BOTH the public IP and the tailnet IP every 5 min,
+3 spaced attempts each; both dead → max-priority ntfy push (topic in
+`/root/.jarvis-watchdog.env`, chmod 600). Alerts on the DOWN transition +
+6-hourly while down + recovery — never per-tick. Log:
+`/var/log/jarvis-watchdog.log` on 158.
 Leftover `/opt/jarvis` clone on 158 (holds a secrets.env) awaits Craig's
 deletion.
 
@@ -331,15 +345,17 @@ auth).
 
 ## KNOWN DEBT (open items only — fix these, don't work around them)
 
-1. **Off-box watchdog: running but UNPROVEN end-to-end.**
-   `.github/workflows/offbox-watchdog.yml` fires ~hourly (GitHub throttles;
-   design for ~1h detection, never 5 min) and probes :9212. Outstanding, both
-   Craig's: set the `NTFY_TOPIC` repo secret, and subscribe devices. **Not
-   cleared until `gh workflow run offbox-watchdog.yml -f test_alert=true`
-   actually buzzes a device.** Better long-term watcher = box 158, blocked on
-   SSH access (`Permission denied (publickey)`). History + the CCR-sandbox
-   egress block (403s ntfy.sh AND *.tailscale.com — confirmed twice):
-   LESSONS + docs/OFF-BOX-WATCHDOG.md.
+1. **Off-box watchdog: the 158 watcher is INSTALLED and proven to the topic
+   (2026-08-08) — one confirmation left.** `jarvis-watchdog.timer` on 158
+   (see SECOND BOX) probes both of the master's paths every 5 min; its
+   `--test-alert` landed in the ntfy topic cache at max priority the day it
+   was installed. **The single remaining step is Craig's: confirm a DEVICE
+   actually buzzed** (subscribe in the ntfy app if not) — then this clears.
+   The GitHub Actions watcher (`offbox-watchdog.yml`, ~hourly, GitHub
+   throttles hard) stays as the second, fully-independent leg; its own push
+   half still wants the `NTFY_TOPIC` repo secret, and its job-failure email
+   works with no secret. History + the CCR-sandbox egress block: LESSONS +
+   docs/OFF-BOX-WATCHDOG.md.
 2. **Orchestrator runs agents as root with `--dangerously-skip-permissions`.**
    Migrate to the Claude Agent SDK with scoped permissions.
 3. **eSIM MVNO not in platforms.json** — intent routing can't target an
