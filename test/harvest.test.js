@@ -37,6 +37,14 @@ test('git SHAs and ordinary prose are NOT redacted', () => {
   assert.equal(redactSecrets(s), s);
 });
 
+test('a token baked into a screenshot FILENAME is caught (first live run, 2026-08-07)', () => {
+  const p = '/root/jarvis-screenshots/127_0_0_1_9208__token_a542e57f09b2bd223d19396ff47ce0f600c343_1783683223321.png';
+  const clean = redactSecrets(p);
+  assert.ok(!clean.includes('a542e57f09b2bd223d19396ff47ce0f600c343'), 'token survived in filename');
+  assert.ok(!redactSecrets('https://x.ts.net/?token=a542e57f09b2bd223d19396ff47ce0f600c343')
+    .includes('a542e57f'), 'token survived in URL');
+});
+
 // ── parsing ────────────────────────────────────────────────────────────────
 
 const jl = (o) => JSON.stringify(o);

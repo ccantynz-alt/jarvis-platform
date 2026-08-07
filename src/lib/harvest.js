@@ -40,6 +40,12 @@ const SECRET_PATTERNS = [
   // NAME=value / NAME: value where the name says it's sensitive. Value must be
   // non-trivial (8+ chars, no spaces) so `PASSWORD=***` or prose doesn't match.
   /\b([A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|AUTH_?KEY|CREDENTIAL)[A-Z0-9_]*)\s*[=:]\s*['"]?[^\s'"]{8,}['"]?/g,
+  // token_<hex> / token=<hex> in URLs and FILENAMES. Found live on the very
+  // first harvest run (2026-08-07): the screenshot service names files after
+  // the URL it captured, and a `?token=` login URL bakes the gateway token
+  // into the png's filename — which then arrived here via files_touched.
+  // Contextual (needs the word "token") so bare git SHAs stay untouched.
+  /\btoken[_=][A-Fa-f0-9]{20,}/g,
 ];
 
 export function redactSecrets(text) {

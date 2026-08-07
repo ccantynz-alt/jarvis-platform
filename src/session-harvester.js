@@ -138,7 +138,9 @@ async function harvestOne(entry, registry, state) {
     user_turns: parsed.userTurns,
     assistant_turns: parsed.assistantTurns,
     tool_calls: parsed.toolCalls,
-    files_touched: parsed.filesTouched.slice(0, 50),
+    // Paths get redacted too: the first live run proved a file NAME can carry
+    // a credential (a screenshot named after its ?token= login URL).
+    files_touched: parsed.filesTouched.slice(0, 50).map(p => redactSecrets(p)),
     outcome: redactSecrets(parsed.lastAssistantText.slice(0, 500)),
     raw_path: entry.path,
     distill_status: trivial ? 'skipped' : 'pending',
