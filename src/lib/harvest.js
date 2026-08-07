@@ -45,7 +45,11 @@ const SECRET_PATTERNS = [
   // the URL it captured, and a `?token=` login URL bakes the gateway token
   // into the png's filename — which then arrived here via files_touched.
   // Contextual (needs the word "token") so bare git SHAs stay untouched.
-  /\btoken[_=][A-Fa-f0-9]{20,}/g,
+  // No \b before "token": the screenshot filename that motivated this is
+  // `9208__token_<hex>` and an underscore IS a word character, so a word
+  // boundary never fires there — the first version of this pattern shipped
+  // failing its own regression test because of exactly that.
+  /token[_=][A-Fa-f0-9]{20,}/gi,
 ];
 
 export function redactSecrets(text) {
