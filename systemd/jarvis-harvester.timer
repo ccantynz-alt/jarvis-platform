@@ -1,0 +1,18 @@
+[Unit]
+Description=Harvest coding-session transcripts into the flywheel every hour
+
+[Timer]
+# Not straight on boot: sessions need QUIET_MIN of stillness to be harvestable
+# anyway, and a restart storm must not become a spawn storm.
+OnBootSec=20min
+# Hourly is deliberate: a session becomes eligible QUIET_MIN after its last
+# write, so worst-case a lesson lands ~70 minutes after the session ends —
+# well inside the flywheel's usefulness, far outside any hot path. The real
+# spend limit is HARVEST_DISTILL_MAX per run, not the cadence.
+OnUnitActiveSec=1h
+AccuracySec=5min
+# Don't line every service's timer up on the hour.
+RandomizedDelaySec=7min
+
+[Install]
+WantedBy=timers.target

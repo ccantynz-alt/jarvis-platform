@@ -6,6 +6,9 @@ import { clampLimit } from './lib/guardrail.js';
 // producer and the store cannot disagree about what counts as the same defect.
 import { fingerprint } from './lib/findings.js';
 import { validateProposal, canTransition, describeDecision } from './lib/proposals.js';
+// Lesson identity is computed server-side, same reasoning as finding
+// fingerprints: the field that decides new-vs-recurring must not be a caller's.
+import { normalizeLesson, lessonFingerprint } from './lib/harvest.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
@@ -197,6 +200,50 @@ db.exec(`
     at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_proposal_audit_proposal ON proposal_audit(proposal_id, id);
+
+  -- The intelligent flywheel (2026-08-07, src/session-harvester.js). A
+  -- coding_session is the INDEX of a CLI transcript (metadata + redacted
+  -- outcome, never the raw text — that stays on disk at raw_path); a lesson is
+  -- what a distillation agent extracted from it. NOT the \`sessions\` table
+  -- above: that one is the manual session-start/end protocol, this one is
+  -- automatic harvest. Lessons dedupe by fingerprint (the code_findings
+  -- argument: the same lesson learned ten times is one row seen 10×).
+  CREATE TABLE IF NOT EXISTS coding_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL UNIQUE,
+    machine TEXT NOT NULL DEFAULT 'vultr',
+    platform TEXT,
+    cwd TEXT,
+    started_at TEXT,
+    ended_at TEXT,
+    user_turns INTEGER DEFAULT 0,
+    assistant_turns INTEGER DEFAULT 0,
+    tool_calls INTEGER DEFAULT 0,
+    files_touched TEXT,
+    outcome TEXT,
+    raw_path TEXT NOT NULL,
+    harvested_at TEXT NOT NULL,
+    distilled_at TEXT,
+    distill_status TEXT NOT NULL DEFAULT 'pending'
+  );
+  CREATE INDEX IF NOT EXISTS idx_coding_sessions_distill ON coding_sessions(distill_status, harvested_at);
+  CREATE INDEX IF NOT EXISTS idx_coding_sessions_platform ON coding_sessions(platform, ended_at);
+
+  CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint TEXT NOT NULL UNIQUE,
+    session_id INTEGER,
+    platform TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'gotcha',
+    lesson TEXT NOT NULL,
+    evidence TEXT,
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'active',
+    seen_count INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_lessons_platform ON lessons(platform, status, seen_count);
 `);
 
 // Additive migrations for columns added after a table first shipped.
@@ -778,6 +825,115 @@ app.get('/memory/findings/summary', (req, res) => {
     WHERE status IN ('open','confirmed') GROUP BY severity
   `).all();
   res.json({ rows, openBySeverity });
+});
+
+// ── The intelligent flywheel: harvested sessions + lessons ─────────────────
+//
+// The harvester (src/session-harvester.js) indexes CLI transcripts and files
+// distilled lessons; session-start.sh and the brain read them back. The server
+// computes the lesson fingerprint the same way it computes finding
+// fingerprints — identity fields stay inside the table's control.
+
+// POST /memory/harvest/session — upsert a harvested session by source_id.
+// UPSERT touching only harvest-owned columns (the platform_state lesson):
+// distill_status/distilled_at survive a re-harvest of a grown file, except
+// that a GROWN session gets re-distilled (more happened since we read it).
+app.post('/memory/harvest/session', (req, res) => {
+  const s = req.body || {};
+  if (!s.source_id || !s.raw_path) {
+    return res.status(400).json({ error: 'source_id and raw_path required' });
+  }
+  const now = new Date().toISOString();
+  const r = db.prepare(`
+    INSERT INTO coding_sessions
+      (source_id, machine, platform, cwd, started_at, ended_at, user_turns,
+       assistant_turns, tool_calls, files_touched, outcome, raw_path,
+       harvested_at, distill_status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(source_id) DO UPDATE SET
+      platform = excluded.platform, cwd = excluded.cwd,
+      started_at = excluded.started_at, ended_at = excluded.ended_at,
+      user_turns = excluded.user_turns, assistant_turns = excluded.assistant_turns,
+      tool_calls = excluded.tool_calls, files_touched = excluded.files_touched,
+      outcome = excluded.outcome, harvested_at = excluded.harvested_at,
+      distill_status = CASE WHEN coding_sessions.tool_calls <> excluded.tool_calls
+                            THEN excluded.distill_status
+                            ELSE coding_sessions.distill_status END
+  `).run(s.source_id, s.machine || 'vultr', s.platform || null, s.cwd || null,
+    s.started_at || null, s.ended_at || null, s.user_turns | 0,
+    s.assistant_turns | 0, s.tool_calls | 0,
+    JSON.stringify(s.files_touched || []), s.outcome || null, s.raw_path,
+    now, s.distill_status || 'pending');
+  const row = db.prepare('SELECT id, distill_status FROM coding_sessions WHERE source_id = ?').get(s.source_id);
+  res.json({ id: row.id, distill_status: row.distill_status, changes: r.changes });
+});
+
+// GET /memory/harvest/pending?limit= — sessions awaiting distillation
+app.get('/memory/harvest/pending', (req, res) => {
+  const limit = clampLimit(req.query.limit, 5, 25);
+  res.json(db.prepare(`
+    SELECT * FROM coding_sessions WHERE distill_status = 'pending'
+    ORDER BY harvested_at ASC LIMIT ?
+  `).all(limit));
+});
+
+// POST /memory/harvest/distilled — record a distillation's outcome + lessons
+app.post('/memory/harvest/distilled', (req, res) => {
+  const { session_id, status, lessons } = req.body || {};
+  const sess = db.prepare('SELECT * FROM coding_sessions WHERE id = ?').get(session_id);
+  if (!sess) return res.status(404).json({ error: 'no such session' });
+  const ok = ['done', 'skipped', 'failed'].includes(status) ? status : 'failed';
+  const now = new Date().toISOString();
+  db.prepare('UPDATE coding_sessions SET distill_status = ?, distilled_at = ? WHERE id = ?')
+    .run(ok, now, session_id);
+
+  const filed = [];
+  for (const raw of Array.isArray(lessons) ? lessons.slice(0, 5) : []) {
+    const l = normalizeLesson(raw, raw.platform || sess.platform);
+    if (!l) continue;
+    const fp = lessonFingerprint(l);
+    const existing = db.prepare('SELECT id, status FROM lessons WHERE fingerprint = ?').get(fp);
+    if (existing) {
+      // A retired lesson stays retired (the dismissed-findings rule): retiring
+      // is a human/officer judgement and re-learning must not undo it.
+      db.prepare('UPDATE lessons SET seen_count = seen_count + 1, last_seen = ? WHERE id = ?')
+        .run(now, existing.id);
+      filed.push({ id: existing.id, created: false });
+    } else {
+      const r = db.prepare(`
+        INSERT INTO lessons (fingerprint, session_id, platform, kind, lesson,
+                             evidence, confidence, created_at, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(fp, session_id, l.platform, l.kind, l.lesson, l.evidence || null,
+        l.confidence, now, now);
+      filed.push({ id: r.lastInsertRowid, created: true });
+    }
+  }
+  res.json({ session_id, distill_status: ok, lessons: filed });
+});
+
+// GET /memory/lessons?platform=&limit=&all= — what future sessions inject.
+// Ordered by how often the lesson has recurred, then recency: a lesson three
+// sessions independently learned outranks one heard once.
+app.get('/memory/lessons', (req, res) => {
+  const limit = clampLimit(req.query.limit, 10, 100);
+  const where = ["status = 'active'"];
+  const vals = [];
+  if (req.query.platform) { where.push('platform = ?'); vals.push(String(req.query.platform).toLowerCase()); }
+  const rows = db.prepare(`
+    SELECT * FROM lessons WHERE ${where.join(' AND ')}
+    ORDER BY seen_count DESC, last_seen DESC LIMIT ?
+  `).all(...vals, limit);
+  res.json(rows);
+});
+
+// PATCH /memory/lessons/:id — retire (or reactivate) a lesson that aged out
+app.patch('/memory/lessons/:id', (req, res) => {
+  const status = ['active', 'retired'].includes(req.body?.status) ? req.body.status : null;
+  if (!status) return res.status(400).json({ error: "status must be 'active' or 'retired'" });
+  const r = db.prepare('UPDATE lessons SET status = ? WHERE id = ?').run(status, req.params.id);
+  if (!r.changes) return res.status(404).json({ error: 'no such lesson' });
+  res.json({ id: Number(req.params.id), status });
 });
 
 // ── Governance: proposals (docs/GOVERNANCE.md) ──────────────────────────────

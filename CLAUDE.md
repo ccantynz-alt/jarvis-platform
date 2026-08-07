@@ -105,7 +105,7 @@ plain `/health` on agents, deck, dashboard, gateway, orchestrator. Slack
 (`slack-bridge.js`, :9203, `/slack/health`) is frozen-legacy but **still
 active** — never delete on the strength of the (wrong) "retired" claim.
 
-## THE SIX TIMERS
+## THE SEVEN TIMERS
 
 Periodic `oneshot` units, not daemons. Count them with
 `systemctl list-timers "jarvis-*"` — trust that, not this table. Any new
@@ -118,6 +118,7 @@ oneshot MUST set `TimeoutStartSec` explicitly (the default is no timeout).
 | jarvis-code-health | 3 h | `src/code-health.js`: the only CODE-defect finder. Least-recently-swept platform × 1 of 9 lenses → one read-only review agent → adversarial verifier on critical/high → `code_findings` by fingerprint (dismissed sticky, severity only escalates, reappeared-fixed = regression). Fixes NOTHING. Requires `hasSource(path)`. Spec docs/CODE-HEALTH.md; logic src/lib/findings.js | **live** |
 | jarvis-fix-runner | 30 min | `src/fix-runner.js`: closes the loop — worst CONFIRMED, pushable, unclaimed findings → opens a proposal → ONE repair agent each (max 1/platform/tick), branch `jarvis/fix-<id>` only. Gates in src/lib/fix-dispatch.js (confirmed-only, git remote required, no dupes, denied platforms, CAUTION_RE — prose beats enum). Never marks findings fixed | **live** |
 | jarvis-review-runner | 20 min | `src/review-runner.js`: spawns the OWNING officer to review open proposals | **dry-run** |
+| jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript under `/root/.claude*/projects/` into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions are excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`. PC + box-158 transcripts not yet harvested (phase 2) | **index** |
 | jarvis-backup / jarvis-vapron-backup | daily 03:30 / 04:17 UTC | SQLite backup; pull + verify off-box copy of box 158's Vapron DB | — |
 
 Guardrail env caps (all via `guardrail()`): self-heal + fix-runner limits in

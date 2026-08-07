@@ -1,0 +1,27 @@
+[Unit]
+Description=Jarvis session harvester — indexes CLI transcripts and distills lessons (the flywheel)
+After=network-online.target jarvis-memory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jarvis
+# harvester.env loads second so its values win any collision with secrets.env
+# (matches every other timer unit here).
+EnvironmentFile=/opt/jarvis/config/secrets.env
+EnvironmentFile=/opt/jarvis/config/harvester.env
+ExecStart=/usr/bin/node src/session-harvester.js
+# Type=oneshot DISABLES the start timeout by default (the 2026-07-30
+# fleet-check lesson — a stalled run leaves the unit 'activating' forever and
+# every later timer activation is skipped in silence). A run is a directory
+# scan plus at most HARVEST_DISTILL_MAX agent turns of HARVEST_DISTILL_MIN
+# minutes each; 30 minutes bounds the worst case with room.
+TimeoutStartSec=1800
+
+# Indexing is I/O; the distillation agents are claude spawns whose memory is
+# their own. This stays small.
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
