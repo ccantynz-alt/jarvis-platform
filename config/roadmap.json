@@ -1,5 +1,5 @@
 {
-  "updated": "2026-07-15",
+  "updated": "2026-08-08",
   "phases": [
     {
       "name": "STABILIZE",
@@ -18,7 +18,7 @@
       "moves": [
         { "id": 6,  "title": "This ledger — every agent reads/updates it", "status": "done" },
         { "id": 7,  "title": "Point all CLAUDE.mds here; enforce Rule 0", "status": "in_progress", "note": "done for jarvis's own CLAUDE.md; other platforms pending" },
-        { "id": 8,  "title": "Fix registry repo mismatches", "status": "pending" },
+        { "id": 8,  "title": "Fix registry repo mismatches", "status": "in_progress", "note": "2026-08-08: gatetest repo+path corrected, GateTest canonical repo confirmed (crclabs-hq/GateTest), every on-box path verified to hold its own source. Remaining: canonical Vapron repo (#15)." },
         { "id": 9,  "title": "Enforce session protocol — auto-log repairs to memory", "status": "in_progress", "note": "manual discipline in place; not yet enforced automatically" }
       ]
     },
@@ -39,8 +39,8 @@
       "name": "CONSOLIDATE",
       "subtitle": "onto Vapron",
       "moves": [
-        { "id": 15, "title": "Confirm canonical Vapron repo; clean 3-checkout mess", "status": "pending" },
-        { "id": 16, "title": "Add Jarvis SSH key to 158", "status": "superseded", "note": "estate model 2026-07-08: never SSH between boxes — replaced by tailnet handoff brief" },
+        { "id": 15, "title": "Confirm canonical Vapron repo; clean 3-checkout mess", "status": "pending", "note": "2026-08-08: /opt/vapron confirmed as the live checkout on 158, but origin is a LOCAL bare repo (/opt/gluecron-repos/ccantynz-alt/Vapron.git), not the GitHub URL in the registry — Craig to confirm canonical GitHub repo." },
+        { "id": 16, "title": "Add Jarvis SSH key to 158", "status": "superseded", "note": "estate model 2026-07-08. 2026-08-08 amendment: tailnet SSH between boxes is now ALLOWED (Tailscale SSH); the master reaches 158 with no key installed. Public-IP SSH still banned." },
         { "id": 17, "title": "Onboard GateTest to Vapron as pilot tenant #1", "status": "in_progress", "note": "VAPRON_BASE_URL wired; awaiting rotated vpk_ key + dispatch secret" },
         { "id": 18, "title": "Migrate off Coolify → Vapron proxy", "status": "pending" },
         { "id": 19, "title": "Roll remaining platforms onto Vapron", "status": "pending" }
@@ -52,6 +52,18 @@
       "moves": [
         { "id": 20, "title": "Jarvis Gateway MVP — private mesh, streaming brain, voice in/out", "status": "in_progress", "note": "Tailscale mesh + gateway-server live and voice-tested; iPad/phone shakedown ongoing" },
         { "id": 21, "title": "Embodied Jarvis — lip-synced live avatar + one custom voice (TTS via Vapron)", "status": "in_progress", "note": "custom-voice half LIVE 2026-07-16: ElevenLabs neural voice on the Command Deck (src/lib/tts.js, GET /tts on :9210, cache+budget+TTS_DISABLED kill switch; awaiting valid ELEVENLABS_API_KEY). Avatar half untouched. Vapron-hosted TTS still the end-state per estate model." }
+      ]
+    },
+    {
+      "name": "ESTATE",
+      "subtitle": "both boxes, all platforms, the flywheel",
+      "moves": [
+        { "id": 24, "title": "Governance layer — propose/review/approve gate", "status": "done", "note": "2026-08-05: PROPOSE→officer REVIEW→approve, append-only audit, server-side gate, pre-push hooks on all 9 checkouts. FIX_RUNNER_MODE=live (branch-only), REVIEW_RUNNER_MODE=dry-run. docs/GOVERNANCE.md." },
+        { "id": 25, "title": "The intelligent flywheel — harvest/distill/inject coding sessions", "status": "done", "note": "2026-08-07 phase 1; 2026-08-08 phase 2 (158 tailnet rsync + Craig's PC via read-only harvest.* verbs), backlog burn 10/hr newest-first. Conversation sessions excluded, all redacted. HARVEST_MODE=live." },
+        { "id": 26, "title": "Vapron enters code review (remote sweep on 158)", "status": "done", "note": "2026-08-08: code-health sweeps vapron REMOTELY over tailnet SSH (spawnClaudeRemote, CODE_HEALTH_REMOTE=vapron); findings home to code_findings. No product source on master, no Jarvis service on 158." },
+        { "id": 27, "title": "Alerting completeness", "status": "in_progress", "note": "158 watchdog live 2026-08-08. Remaining: Telegram two-way lock-screen channel (needs @BotFather token) + Craig confirming the ntfy device-buzz (clears KNOWN DEBT #1)." },
+        { "id": 28, "title": "platform_state per-writer columns + derived status", "status": "pending", "note": "KNOWN DEBT #4. Staged for a session with Craig awake — most-read table on the box; self-heal must move to uptime_status in the same commit." },
+        { "id": 29, "title": "Deck estate view — both boxes, per-writer status", "status": "pending" }
       ]
     }
   ]

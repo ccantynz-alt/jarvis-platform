@@ -39,7 +39,8 @@
       "status": "active",
       "site_url": "https://vapron.ai",
       "public_host": "mail.vapron.ai",
-      "notes": "site_url added 2026-07-24: agents.js probes site_url || public_host, and mail.vapron.ai (the box's mail hostname) 404s on / — the site-medic and social agents were flagging healthy Vapron nightly over it. vapron.ai is the real public site."
+      "health_url": "https://vapron-158.tailbd6217.ts.net:8443/health",
+      "notes": "site_url added 2026-07-24: agents.js probes site_url || public_host, and mail.vapron.ai (the box's mail hostname) 404s on / — the site-medic and social agents were flagging healthy Vapron nightly over it. vapron.ai is the real public site. 2026-08-08: /opt/vapron on 158 confirmed as the live checkout (10G, branch Main) but its git origin is a LOCAL bare repo (/opt/gluecron-repos/ccantynz-alt/Vapron.git), NOT the GitHub URL in this entry's repo field — roadmap move 15 (canonical Vapron repo) is still Craig's to confirm; do not push to this entry's repo value. Master box reaches 158 via tailnet SSH (root@100.89.227.39, Tailscale SSH)."
     },
     "bookaride": {
       "name": "bookaride",
@@ -59,15 +60,16 @@
       "name": "gatetest",
       "display_name": "GateTest",
       "server": "66.42.121.161",
-      "path": "/root/gatetest",
-      "repo": "git@github.com:ccantynz-alt/gatetest.git",
+      "path": "/opt/gatetest",
+      "repo": "git@github.com:crclabs-hq/GateTest.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
       "tech_stack": [
         "TypeScript",
         "Node.js"
       ],
-      "status": "active"
+      "status": "active",
+      "notes": "Registry truth pass 2026-08-08: path corrected /root/gatetest -> /opt/gatetest (the newer checkout, the one deploy-gate uses, per CLAUDE.md). repo corrected to crclabs-hq/GateTest — BOTH on-box checkouts point there; the old ccantynz-alt/gatetest value was the roadmap move-8 mismatch. /root/gatetest is a stale Aug-5 duplicate awaiting Craig's deletion. gatetest.ai is in .ai redemption since 2026-07-29 — registry-level, only Craig can fix."
     },
     "alecrae": {
       "name": "alecrae",

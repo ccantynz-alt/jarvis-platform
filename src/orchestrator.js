@@ -5,7 +5,7 @@ import { randomUUID } from 'crypto';
 import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
-import { spawnClaude, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { spawnClaude, spawnClaudeRemote, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { usageHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
@@ -288,20 +288,15 @@ async function runLocalJob(row) {
 }
 
 async function runRemoteJob(row) {
-  // Escape single quotes in the prompt for shell safety
-  const safePrompt = row.prompt.replace(/'/g, "'\\''");
-  const extraEnvStr = Object.entries(platformEnv(row.platform))
-    .map(([k, v]) => `${k}=${v}`)
-    .join(' ');
-  const sshCmd = `cd ${row.path} && IS_SANDBOX=1 DISABLE_AUTOUPDATER=1 ${extraEnvStr ? extraEnvStr + ' ' : ''}claude --dangerously-skip-permissions --print '${safePrompt}'`;
-
-  const result = await spawnProcess('ssh', [
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'ConnectTimeout=10',
-    '-i', '/opt/jarvis/.ssh/orchestrator',
-    `root@${row.server}`,
-    sshCmd,
-  ], { env: process.env, timeoutMin: row.timeout_min });
+  // One remote-spawn mechanism, shared with code-health's remote sweeps —
+  // see spawnClaudeRemote in lib/spawn-agent.js (2026-08-08).
+  const result = await spawnClaudeRemote({
+    prompt: row.prompt,
+    server: row.server,
+    cwd: row.path,
+    timeoutMin: row.timeout_min,
+    extraEnv: platformEnv(row.platform),
+  });
   await finishJob(row, result);
 }
 

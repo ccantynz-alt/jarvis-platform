@@ -137,6 +137,27 @@ export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMi
   return result;
 }
 
+// Spawn a claude worker ON ANOTHER FLEET BOX over tailnet SSH (2026-08-08,
+// Craig's amended ruling: box-to-box SSH over the TAILNET only). Factored from
+// orchestrator.js's runRemoteJob so code-health's remote sweeps and the
+// orchestrator share ONE remote-spawn mechanism. Differences from spawnClaude:
+// no two-account failover (the remote box has its own login; a usage-limit
+// there is visible in stderr and must be logged distinctly by the caller), and
+// the env is the remote root's, not workerEnv().
+export function spawnClaudeRemote({ prompt, server, cwd, timeoutMin = 30, extraEnv = {} }) {
+  const safePrompt = prompt.replace(/'/g, "'\\''");
+  const envStr = Object.entries({ IS_SANDBOX: '1', DISABLE_AUTOUPDATER: '1', ...extraEnv })
+    .map(([k, v]) => `${k}=${v}`).join(' ');
+  const sshCmd = `cd ${cwd} && ${envStr} claude --dangerously-skip-permissions --print '${safePrompt}'`;
+  return spawnProcess('ssh', [
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'ConnectTimeout=10',
+    '-i', '/opt/jarvis/.ssh/orchestrator',
+    `root@${server}`,
+    sshCmd,
+  ], { env: process.env, timeoutMin });
+}
+
 export function claudeVersion() {
   if (versionCache.value && Date.now() - versionCache.at < VERSION_CACHE_MS) {
     return Promise.resolve(versionCache.value);

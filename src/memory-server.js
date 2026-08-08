@@ -868,12 +868,16 @@ app.post('/memory/harvest/session', (req, res) => {
   res.json({ id: row.id, distill_status: row.distill_status, changes: r.changes });
 });
 
-// GET /memory/harvest/pending?limit= — sessions awaiting distillation
+// GET /memory/harvest/pending?limit= — sessions awaiting distillation.
+// Newest session FIRST (by ended_at): current knowledge is worth more than a
+// month-old backlog session, and while burning the backlog (2026-08-08) this
+// means the most relevant lessons land first. Falls back to harvested_at for
+// rows with no ended_at.
 app.get('/memory/harvest/pending', (req, res) => {
   const limit = clampLimit(req.query.limit, 5, 25);
   res.json(db.prepare(`
     SELECT * FROM coding_sessions WHERE distill_status = 'pending'
-    ORDER BY harvested_at ASC LIMIT ?
+    ORDER BY COALESCE(ended_at, harvested_at) DESC LIMIT ?
   `).all(limit));
 });
 

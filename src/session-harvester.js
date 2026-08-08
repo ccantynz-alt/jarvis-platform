@@ -30,6 +30,8 @@
  */
 
 import { readdirSync, readFileSync, statSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from 'fs';
+import { spawnSync } from 'child_process';
+import { gunzipSync } from 'zlib';
 import { join, basename } from 'path';
 import { loadPlatforms } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
@@ -51,6 +53,8 @@ const MAX_FILES        = g('HARVEST_MAX_FILES', 40);       // indexed per run
 const DISTILL_MAX      = g('HARVEST_DISTILL_MAX', 3);      // agent turns per run
 const DISTILL_TIMEOUT  = g('HARVEST_DISTILL_MIN', 6);      // minutes per distillation
 
+const ORCH = 'http://127.0.0.1:9205';
+const PC_ENABLED = (process.env.HARVEST_PC || '1') !== '0';   // pull Craig's PC transcripts
 const STATE_DIR = '/var/lib/jarvis/harvester';
 const STATE_FILE = join(STATE_DIR, 'state.json');
 const LOG = '/var/log/jarvis-harvester.log';
@@ -67,6 +71,34 @@ function transcriptRoots() {
     }
   }
   return roots.filter(existsSync);
+}
+
+// Other fleet boxes whose transcripts join the flywheel (phase 2, 2026-08-08 —
+// Craig's amended ruling allows tailnet SSH between boxes). Pull, don't push:
+// redaction and classification stay in the ONE tested path on this box, and
+// nothing new runs on the remote (estate doctrine). Transcripts are Jarvis
+// exhaust, not product source — mirroring them here is not the checkout
+// anti-pattern. Format: machine:tailnetIp, comma-separated.
+const REMOTE_SOURCES = (process.env.HARVEST_REMOTE || 'vapron-158:100.89.227.39')
+  .split(',').map(s => s.trim()).filter(Boolean)
+  .map(s => { const [machine, server] = s.split(':'); return { machine, server }; })
+  .filter(r => r.machine && r.server);
+const REMOTE_DIR = '/var/lib/jarvis/harvester/remote';
+
+function pullRemote({ machine, server }) {
+  const dest = join(REMOTE_DIR, machine);
+  mkdirSync(dest, { recursive: true });
+  const r = spawnSync('rsync', [
+    '-az', '--timeout=60',
+    '-e', 'ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no -i /opt/jarvis/.ssh/orchestrator',
+    "--include=*/", '--include=*.jsonl', '--exclude=*',
+    `root@${server}:/root/.claude/projects/`, dest + '/',
+  ], { encoding: 'utf8', timeout: 120_000 });
+  if (r.status !== 0) {
+    log(`remote pull ${machine} FAILED (rsync ${r.status}): ${String(r.stderr || r.error || '').slice(0, 200)}`);
+    return false;
+  }
+  return true;
 }
 
 // The harvester's own distillation spawns live under this slug — never scan it.
@@ -87,24 +119,94 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state));
 }
 
-function listTranscripts() {
-  const out = [];
-  for (const root of transcriptRoots()) {
-    for (const slug of readdirSync(root)) {
-      if (slug === SELF_SLUG) continue;
-      const dir = join(root, slug);
-      let files;
-      try { files = readdirSync(dir).filter(f => f.endsWith('.jsonl')); } catch { continue; }
-      for (const f of files) {
-        const path = join(dir, f);
-        try {
-          const st = statSync(path);
-          out.push({ path, size: st.size, mtimeMs: st.mtimeMs });
-        } catch { /* file vanished mid-scan */ }
-      }
+function scanRoot(root, machine, out) {
+  for (const slug of readdirSync(root)) {
+    if (slug === SELF_SLUG) continue;
+    const dir = join(root, slug);
+    let files;
+    try { files = readdirSync(dir).filter(f => f.endsWith('.jsonl')); } catch { continue; }
+    for (const f of files) {
+      const path = join(dir, f);
+      try {
+        const st = statSync(path);
+        out.push({ path, size: st.size, mtimeMs: st.mtimeMs, machine });
+      } catch { /* file vanished mid-scan */ }
     }
   }
+}
+
+function listTranscripts() {
+  const out = [];
+  for (const root of transcriptRoots()) scanRoot(root, MACHINE, out);
+  // Remote mirrors: same scan, their own machine label. rsync preserves mtimes
+  // (-a), so the quiet-file rule judges the ORIGINAL session's stillness, not
+  // the pull's timestamp.
+  for (const { machine } of REMOTE_SOURCES) {
+    const dir = join(REMOTE_DIR, machine);
+    if (existsSync(dir)) scanRoot(dir, machine, out);
+  }
+  if (PC_ENABLED) {
+    const dir = join(REMOTE_DIR, 'craig-pc');
+    if (existsSync(dir)) scanRoot(dir, 'craig-pc', out);
+  }
   return out;
+}
+
+// Pull Craig's PC transcripts through the existing PC-worker action path
+// (2026-08-08). No inbound path to the PC exists, so the harvester DISPATCHES
+// two read-only verbs (harvest.list, harvest.get) via the orchestrator and
+// reads their results — same jobs/runtime:'action' channel used for service
+// control. If the PC is asleep the list call returns pending and we skip; the
+// cursor only advances on files actually pulled.
+async function pcAction(verb, args, waitSeconds) {
+  const r = await fetch(`${ORCH}/pc/action`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verb, args, wait_seconds: waitSeconds, enqueued_by: 'harvester' }),
+  });
+  if (!r.ok) throw new Error(`/pc/action ${verb} → ${r.status}`);
+  return r.json();
+}
+
+async function pullPC() {
+  const dest = join(REMOTE_DIR, 'craig-pc');
+  mkdirSync(dest, { recursive: true });
+  const cursorKey = 'harvest-pc-cursor';
+  let since = '1970-01-01T00:00:00Z';
+  try {
+    const kv = await fetch(`${MEMORY}/memory/kv/${cursorKey}`).then(r => r.ok ? r.json() : null);
+    if (kv?.value) since = kv.value;
+  } catch { /* first run — full history */ }
+
+  const listed = await pcAction('harvest.list', { since }, 60).catch(e => ({ error: e.message }));
+  if (listed.status !== 'completed') {
+    log(`PC harvest: worker ${listed.status || 'unreachable'} — skipping this run`);
+    return 0;
+  }
+  const lines = String(listed.output || '').trim().split('\n').filter(l => l.includes('|'));
+  if (!lines.length || listed.output?.includes('NO-ROOT')) { log('PC harvest: nothing new'); return 0; }
+
+  let pulled = 0, newest = since;
+  for (const line of lines.slice(0, 40)) {
+    const [path, , mtime] = line.split('|');
+    const got = await pcAction('harvest.get', { path }, 60).catch(e => ({ error: e.message }));
+    if (got.status !== 'completed' || !got.output) { log(`PC harvest: fetch failed for ${path}`); continue; }
+    try {
+      const jsonl = gunzipSync(Buffer.from(got.output.trim(), 'base64')).toString('utf8');
+      // Flatten the Windows path to a single safe filename under craig-pc/.
+      const safe = path.replace(/[\\/:]/g, '_').replace(/^_+/, '');
+      writeFileSync(join(dest, safe), jsonl);
+      pulled++;
+      if (mtime > newest) newest = mtime;
+    } catch (e) { log(`PC harvest: could not decode ${path}: ${e.message}`); }
+  }
+  if (pulled) {
+    await fetch(`${MEMORY}/memory/kv`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: cursorKey, value: newest }),
+    }).catch(() => {});
+  }
+  log(`PC harvest: pulled ${pulled} transcript(s), cursor → ${newest}`);
+  return pulled;
 }
 
 async function post(url, body) {
@@ -129,8 +231,8 @@ async function harvestOne(entry, registry, state) {
 
   const trivial = isTrivialSession(parsed);
   await post('/memory/harvest/session', {
-    source_id: `${MACHINE}:${basename(entry.path, '.jsonl')}`,
-    machine: MACHINE,
+    source_id: `${entry.machine || MACHINE}:${basename(entry.path, '.jsonl')}`,
+    machine: entry.machine || MACHINE,
     platform: platformFromCwd(parsed.cwd, registry),
     cwd: parsed.cwd,
     started_at: parsed.firstTs,
@@ -180,6 +282,10 @@ async function main() {
 
   const registry = loadPlatforms();
   const state = loadState();
+  for (const src of REMOTE_SOURCES) {
+    if (pullRemote(src)) log(`pulled ${src.machine} transcripts over tailnet`);
+  }
+  if (PC_ENABLED) await pullPC().catch(e => log(`PC harvest failed: ${e.message}`));
   const all = listTranscripts();
   const eligible = eligibleFiles(all, state, Date.now(), { quietMs: QUIET_MIN * 60_000 })
     .sort((a, b) => a.mtimeMs - b.mtimeMs)

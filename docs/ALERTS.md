@@ -181,14 +181,17 @@ not a risk while this repo is worked on daily.
 
 ### 3. Still-missing pieces (do these next, in this order)
 
-1. **A watcher on box 158.** The best off-box watcher is the other box Craig
-   already owns: always on, on the tailnet, 5-minute timer, and it can check far
-   more than a liveness port. `jarvis-heartbeat.timer` on 158 already posts
-   *into* the gateway, so the pattern (a standalone script, not Jarvis code — the
-   estate doctrine) is established and accepted. **Blocked:** as of 2026-07-30
-   neither Craig's PC nor the master box can SSH to 158 (`Permission denied
-   (publickey)`, including with `.ssh/orchestrator`). Needs a key installed
-   before anyone can build this.
+1. ~~**A watcher on box 158.**~~ **DONE 2026-08-08.** The "blocked, can't SSH to
+   158" note was stale: that failure was 158's PUBLIC IP refusing — the tailnet
+   path (Tailscale SSH) always worked. `jarvis-watchdog.timer` on 158 now probes
+   the master's `:9212/health` over BOTH the public and tailnet IPs every 5 min
+   (3 spaced attempts each), and pushes max-priority ntfy on the down-transition
+   (topic in `/root/.jarvis-watchdog.env`, chmod 600), with a 6-hourly re-alert
+   while down and a recovery message — never per-tick. Standalone script, estate
+   doctrine (`scripts/box-158/jarvis-watchdog.sh`, log
+   `/var/log/jarvis-watchdog.log`). Its `--test-alert` was verified in the ntfy
+   topic cache at priority 5. **One human step left:** Craig confirming a device
+   actually buzzed — until then KNOWN DEBT #1 stays open.
 2. ~~**The PC worker as a fast local watcher.**~~ **DONE 2026-07-30** — and it
    became the *primary* fast detector once the Actions cadence turned out to be
    hourly. `src/pc-worker.js` already polls the gateway every 10s from Craig's

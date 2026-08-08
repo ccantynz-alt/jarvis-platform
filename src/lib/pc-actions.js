@@ -159,6 +159,51 @@ export const VERBS = {
     },
   },
 
+  // ── The flywheel's PC leg (2026-08-08) ────────────────────────────────────
+  // Craig's own coding sessions write transcripts under %USERPROFILE%\.claude\
+  // projects — the richest lessons in the estate (his corrections, his
+  // preferences, in his words). Two read-only verbs let the harvester pull
+  // them: list what's new, then fetch one file at a time, gzipped. BOTH are
+  // pinned inside the transcript root — a fetch verb that took any path would
+  // be an arbitrary-file exfiltration tool wearing a flywheel's name.
+  'harvest.list': {
+    mutates: false, needsAdmin: false,
+    describe: (a) => `list coding-session transcripts newer than ${a.since || 'the beginning'}`,
+    build: (a) => {
+      const since = String(a.since || '1970-01-01T00:00:00Z');
+      if (!/^\d{4}-\d{2}-\d{2}T[\d:.]+Z?$/.test(since)) throw new Error('since must be an ISO timestamp');
+      return `
+      $root = Join-Path $env:USERPROFILE '.claude\\projects'
+      if (-not (Test-Path $root)) { "NO-ROOT"; exit 0 }
+      $since = [DateTime]::Parse(${psQuote(since)}).ToUniversalTime()
+      Get-ChildItem $root -Recurse -Filter *.jsonl -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTimeUtc -gt $since } |
+        Sort-Object LastWriteTimeUtc |
+        Select-Object -First 40 |
+        ForEach-Object { "$($_.FullName)|$($_.Length)|$($_.LastWriteTimeUtc.ToString('o'))" }`;
+    },
+  },
+
+  'harvest.get': {
+    mutates: false, needsAdmin: false,
+    describe: (a) => `fetch one transcript for the flywheel: ${String(a.path || '').slice(-60)}`,
+    build: (a) => {
+      const p = String(a.path || '');
+      if (!p || p.length > 500) throw new Error('path required');
+      return `
+      $root = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE '.claude\\projects'))
+      $full = [IO.Path]::GetFullPath(${psQuote(p)})
+      if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw 'path is outside the transcript root' }
+      if (-not $full.EndsWith('.jsonl', [StringComparison]::OrdinalIgnoreCase)) { throw 'not a transcript file' }
+      $bytes = [IO.File]::ReadAllBytes($full)
+      if ($bytes.Length -gt 8MB) { throw "transcript too large ($($bytes.Length) bytes)" }
+      $ms = New-Object IO.MemoryStream
+      $gz = New-Object IO.Compression.GZipStream($ms, [IO.Compression.CompressionMode]::Compress)
+      $gz.Write($bytes, 0, $bytes.Length); $gz.Close()
+      [Convert]::ToBase64String($ms.ToArray())`;
+    },
+  },
+
   // ── Mutating: staged behind the confirmation gate ─────────────────────────
   'service.restart': {
     mutates: true, needsAdmin: true,

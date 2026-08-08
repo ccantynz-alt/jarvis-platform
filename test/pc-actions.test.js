@@ -125,6 +125,30 @@ test('process.kill requires a real pid when one is given', () => {
   assert.doesNotThrow(() => planAction('process.kill', { pid: 4242 }));
 });
 
+// ── Flywheel harvest verbs (2026-08-08) ─────────────────────────────────────
+
+test('harvest verbs are read-only — they must never hit the confirmation gate', () => {
+  assert.equal(planAction('harvest.list', {}).mutates, false);
+  assert.equal(planAction('harvest.get', { path: 'C:\\x\\.claude\\projects\\a.jsonl' }).mutates, false);
+});
+
+test('harvest.list validates the since timestamp', () => {
+  assert.throws(() => planAction('harvest.list', { since: 'yesterday' }), /ISO timestamp/);
+  assert.doesNotThrow(() => planAction('harvest.list', { since: '2026-08-01T00:00:00Z' }));
+  // default (no since) is allowed — full history on first run
+  assert.doesNotThrow(() => planAction('harvest.list', {}));
+});
+
+test('harvest.get pins the path to the transcript root, in the SCRIPT not just JS', () => {
+  // The path guard runs on the PC (StartsWith $root), so the built script must
+  // carry it — a JS-side check would be bypassed by a crafted job row.
+  const s = planAction('harvest.get', { path: 'C:\\evil\\secrets.txt' }).script;
+  assert.match(s, /StartsWith\(\$root/);
+  assert.match(s, /EndsWith\('\.jsonl'/);
+  assert.throws(() => planAction('harvest.get', { path: '' }), /path required/);
+  assert.throws(() => planAction('harvest.get', { path: 'x'.repeat(501) }), /path required/);
+});
+
 // ── Job round-trip ──────────────────────────────────────────────────────────
 
 test('an action survives the trip through a job row', () => {

@@ -3,7 +3,7 @@
 > Lean by design (restructured 2026-08-07): this file holds CURRENT truth and
 > rules; every incident narrative behind a rule lives in **docs/LESSONS.md** —
 > read the entry there before relaxing any constraint. Rule 0 covers both.
-> Last verified against the box: 2026-08-07.
+> Last verified against the box: 2026-08-08.
 
 ## WHAT JARVIS IS
 
@@ -125,7 +125,7 @@ oneshot MUST set `TimeoutStartSec` explicitly (the default is no timeout).
 | jarvis-code-health | 3 h | `src/code-health.js`: the only CODE-defect finder. Least-recently-swept platform × 1 of 9 lenses → one read-only review agent → adversarial verifier on critical/high → `code_findings` by fingerprint (dismissed sticky, severity only escalates, reappeared-fixed = regression). Fixes NOTHING. Requires `hasSource(path)`. Spec docs/CODE-HEALTH.md; logic src/lib/findings.js | **live** |
 | jarvis-fix-runner | 30 min | `src/fix-runner.js`: closes the loop — worst CONFIRMED, pushable, unclaimed findings → opens a proposal → ONE repair agent each (max 1/platform/tick), branch `jarvis/fix-<id>` only. Gates in src/lib/fix-dispatch.js (confirmed-only, git remote required, no dupes, denied platforms, CAUTION_RE — prose beats enum). Never marks findings fixed | **live** |
 | jarvis-review-runner | 20 min | `src/review-runner.js`: spawns the OWNING officer to review open proposals | **dry-run** |
-| jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript under `/root/.claude*/projects/` into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions are excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`. PC + box-158 transcripts not yet harvested (phase 2) | **live** |
+| jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. **Phase 2 (2026-08-08):** also pulls 158 transcripts (tailnet rsync, `HARVEST_REMOTE`) and Craig's PC (read-only `harvest.list`/`harvest.get` PC verbs, cursor in KV `harvest-pc-cursor`); backlog burn at `HARVEST_DISTILL_MAX=10` newest-first until the ~458-session backlog clears, then RESTORE to 3. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`, `test/pc-actions.test.js` | **live** |
 | jarvis-backup / jarvis-vapron-backup | daily 03:30 / 04:17 UTC | SQLite backup; pull + verify off-box copy of box 158's Vapron DB | — |
 
 Guardrail env caps (all via `guardrail()`): self-heal + fix-runner limits in
@@ -207,7 +207,30 @@ switches: KV `pc-worker-enabled`, `%ProgramData%\jarvis\KILL`, revoke token.
 Excluded from the daily audit sprint. Brain tools: `pc_control`,
 `get_pc_status`.
 
-## SECOND BOX — 158 (Vapron, 149.28.119.158)
+## SECOND BOX — 158 (Vapron, 149.28.119.158 / tailnet 100.89.227.39)
+
+**Access (2026-08-08, amended estate ruling):** the master reaches 158 over
+the TAILNET via `root@100.89.227.39` (Tailscale SSH — 158 has `RunSSH:true`,
+no OpenSSH key needed; public-IP SSH refuses, by design). This is what lets
+the master spawn agents there. `orchestrator.js` (`runRemoteJob`) and
+`code-health.js` (remote sweeps) share ONE remote spawner: `spawnClaudeRemote`
+in `src/lib/spawn-agent.js`. 158 has its own `claude` CLI + subscription login
+(`/root/.claude`), so remote spawns bill Craig's subscription, not metered API
+— but they bypass the two-account failover, so a usage-limit there is logged,
+not retried.
+
+**Vapron's code is reviewed REMOTELY, never mirrored here.** `CODE_HEALTH_REMOTE=vapron`
+sweeps `/opt/vapron` on 158 over tailnet SSH; findings come home to
+`code_findings` over the same channel. No product source lands on the master
+(governance), no Jarvis service runs on 158 (estate doctrine). `/opt/vapron`'s
+git origin is a LOCAL bare repo, not GitHub — canonical repo is roadmap #15,
+still Craig's to confirm; don't push to the registry's `repo` value for vapron.
+
+**Runs on 158** (for reference; not managed from this repo): the Vapron stack,
+Postgres, Redis, Caddy, litestream, AlecRae + DavenRoe API copies, and an
+undocumented `jarvis-metrics.service` (predates current doctrine — awaiting
+Craig's ruling to bless or remove). Three plaintext secret files sit in `/root`
+and a June `/opt/jarvis` clone lingers — both flagged for Craig's cleanup.
 
 Tailnet-only health (`tailscale serve --https=8443` → ops-agent :9095);
 `jarvis-heartbeat.timer` (standalone script, NOT Jarvis code — estate
@@ -337,7 +360,10 @@ auth).
   via the `jarvis-conversation` KV first.
 - Drop-ins beat unit files; oneshot units need explicit `TimeoutStartSec`.
 - A registry path is a claim about WHOSE code lives there — verify before
-  adding a platform.
+  adding a platform (over ssh for a remote one).
+- Box-to-box is `root@100.89.227.39` over the TAILNET (Tailscale SSH, no key);
+  158's public IP refuses by design. Remote agent spawns bypass two-account
+  failover — a usage-limit there is logged, not retried.
 - Prose beats enum in verifier verdicts (`CAUTION_RE`).
 - Lint on the box (`npm run lint`), not in `npm test`; `no-empty` stays off.
 - `gluecron-update.timer` and the cups snap stay disabled.

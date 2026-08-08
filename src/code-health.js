@@ -40,7 +40,7 @@ import { loadPlatforms } from './lib/conversation.js';
 import { hasSource } from './lib/checkout.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
-import { spawnClaude, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
 import {
   normalizeFinding, parseFindings, needsVerification, pickTarget, severityRank, lensFor, LENSES,
   extractJsonObject, boolish,
@@ -70,10 +70,59 @@ const WORK_DIR = '/tmp/jarvis-code-health';
 //   craig-pc            — a worker node, not a codebase
 //   screenshot-to-code  — a third-party fork; findings there are upstream's, and
 //                         audit-runner already refuses to auto-fix it
-//   vapron              — lives on box 158, which nothing on this box can SSH to
-//                         as of 2026-07-30 (see docs/ALERTS.md)
-const DEFAULT_SKIP = ['craig-pc', 'screenshot-to-code', 'vapron'];
+// vapron came OFF this list 2026-08-08: the "can't SSH to 158" reason died when
+// tailnet SSH was proven (Craig amended the no-box-to-box-SSH ruling the same
+// day) — vapron now sweeps REMOTELY, see CODE_HEALTH_REMOTE below.
+const DEFAULT_SKIP = ['craig-pc', 'screenshot-to-code'];
 const SKIP = new Set((process.env.CODE_HEALTH_SKIP || DEFAULT_SKIP.join(',')).split(',').map(s => s.trim()).filter(Boolean));
+
+// Platforms swept ON THEIR OWN BOX over tailnet SSH (2026-08-08). Explicit
+// allowlist, not inference from server IPs — a full-permission spawn on the
+// wrong machine is the fix-runner lesson one hop over. The remote box needs its
+// own claude CLI + subscription login (158 has both, verified 2.1.223).
+// Remote spawns bypass claude-auth's two-account failover; a usage-limit exit
+// is logged distinctly below rather than flipped-and-retried.
+const REMOTE_OK = new Set((process.env.CODE_HEALTH_REMOTE || 'vapron').split(',').map(s => s.trim()).filter(Boolean));
+
+// Read-only remote shell — BatchMode so a broken tailnet fails fast and
+// visibly instead of hanging a sweep on an interactive prompt.
+function sshRun(server, cmd) {
+  return execFileSync('ssh', [
+    '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=no',
+    '-i', '/opt/jarvis/.ssh/orchestrator', `root@${server}`, cmd,
+  ], { encoding: 'utf8', timeout: 30_000 }).trim();
+}
+
+// Which server a platform's sweep should run on, or null for local.
+export function remoteFor(platform, entry, { ownIp = OWN_IP, allow = REMOTE_OK } = {}) {
+  if (!allow.has(platform)) return null;
+  const s = entry?.server;
+  if (!s || s === ownIp || !/^\d+\.\d+\.\d+\.\d+$/.test(s)) return null;
+  return s;
+}
+
+// hasSource, over ssh — mirrors lib/checkout.js's SOURCE_RE question ("is
+// there code to READ") without pulling any product source onto this box.
+function remoteHasSource(server, path) {
+  try {
+    const out = sshRun(server,
+      `test -d ${path} && find ${path} -maxdepth 2 ` +
+      `\\( -name node_modules -o -name .git -o -name venv -o -name dist -o -name .next \\) -prune -o ` +
+      `-type f \\( -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.py' -o -name '*.rs' -o -name '*.go' -o -name '*.rb' -o -name '*.sh' -o -name '*.sql' \\) -print 2>/dev/null | head -1`);
+    return out.length > 0;
+  } catch { return false; }
+}
+
+function checkoutInfoRemote(server, cwd) {
+  try {
+    const sha = sshRun(server, `git -C ${cwd} -c safe.directory=${cwd} rev-parse --short HEAD`);
+    const iso = sshRun(server, `git -C ${cwd} -c safe.directory=${cwd} log -1 --format=%cI`);
+    const ageDays = Math.round((Date.now() - new Date(iso).getTime()) / 86_400_000);
+    return { sha, iso, ageDays };
+  } catch {
+    return { sha: null, iso: null, ageDays: null };
+  }
+}
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] ${msg}\n`;
@@ -104,11 +153,19 @@ function saveState(state) {
  * was the whole of the test. Exactly the mistake the audit runner made with
  * /var/www, in a second place, found the same day.
  */
-export function eligiblePlatforms(registry, { ownIp = OWN_IP, skip = SKIP, exists = existsSync, source = hasSource } = {}) {
+export function eligiblePlatforms(registry, { ownIp = OWN_IP, skip = SKIP, exists = existsSync, source = hasSource, remoteSource = remoteHasSource, allowRemote = REMOTE_OK } = {}) {
   return Object.entries(registry)
     .filter(([name, e]) => e && e.status === 'active' && !skip.has(name) && e.executor !== 'pc')
-    .filter(([, e]) => e.server === ownIp && e.path && exists(e.path))
     .filter(([name, e]) => {
+      // Remote platform (2026-08-08): swept on its own box over tailnet SSH.
+      // The source check runs there too — "a path is a claim", on any machine.
+      const remote = remoteFor(name, e, { ownIp, allow: allowRemote });
+      if (remote) {
+        if (e.path && remoteSource(remote, e.path)) return true;
+        log(`skipping ${name}: remote ${remote}:${e.path || '(no path)'} unreachable or holds no source`);
+        return false;
+      }
+      if (!(e.server === ownIp && e.path && exists(e.path))) return false;
       if (source(e.path)) return true;
       log(`skipping ${name}: ${e.path} exists but contains no source — nothing to review`);
       return false;
@@ -301,7 +358,13 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
   const { platform, lensIndex } = target;
   let { lens } = target;
   const cwd = registry[platform].path;
-  const checkout = checkoutInfo(cwd);
+  // Remote sweep (2026-08-08): agents spawn ON the platform's own box over
+  // tailnet SSH; git info and the findings file travel over the same channel.
+  const remoteServer = remoteFor(platform, registry[platform]);
+  const spawnAgent = (opts) => remoteServer
+    ? spawnClaudeRemote({ ...opts, server: remoteServer })
+    : spawnClaude(opts);
+  const checkout = remoteServer ? checkoutInfoRemote(remoteServer, cwd) : checkoutInfo(cwd);
 
   // The recent-changes lens is entirely `git log -20 --stat`, so on a directory
   // with no version control it spends a full review agent discovering there is no
@@ -313,26 +376,39 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     lens = next;
   }
 
-  log(`sweep start: ${platform} [${lens.key}] in ${cwd} (mode=${MODE})` +
+  log(`sweep start: ${platform} [${lens.key}] in ${remoteServer ? `${remoteServer}:` : ''}${cwd} (mode=${MODE})` +
     (checkout.sha ? ` at ${checkout.sha}, HEAD is ${checkout.ageDays}d old` : ' — NOT a git checkout, no commit recorded'));
 
   // A stale claude binary takes the whole fleet down quietly — the same gate the
-  // orchestrator uses before it spends a job.
-  const canary = await ensureClaudeVerified();
-  if (!canary.ok) {
-    log(`claude canary failed — holding: ${canary.detail}`);
-    await notify({ source: 'code-health', level: 'warn', title: 'Code-health sweep held', body: `The claude CLI canary failed, so no review ran: ${canary.detail}`, speech: 'I held the code review — the claude binary needs checking.' });
-    return { skipped: 'canary' };
+  // orchestrator uses before it spends a job. The canary gates the LOCAL binary;
+  // a remote sweep runs the remote box's own binary, whose model-rejection shows
+  // up as a nonzero exit below rather than being pre-gated here.
+  if (!remoteServer) {
+    const canary = await ensureClaudeVerified();
+    if (!canary.ok) {
+      log(`claude canary failed — holding: ${canary.detail}`);
+      await notify({ source: 'code-health', level: 'warn', title: 'Code-health sweep held', body: `The claude CLI canary failed, so no review ran: ${canary.detail}`, speech: 'I held the code review — the claude binary needs checking.' });
+      return { skipped: 'canary' };
+    }
   }
 
   if (!existsSync(WORK_DIR)) mkdirSync(WORK_DIR, { recursive: true });
-  const outFile = join(WORK_DIR, `${platform}-${lens.key}-${Date.now()}.json`);
+  // A remote agent cannot write to this box's WORK_DIR — its findings file
+  // lives on ITS box and comes home over ssh after the run.
+  const outFile = remoteServer
+    ? `/tmp/jarvis-code-health-${platform}-${lens.key}-${Date.now()}.json`
+    : join(WORK_DIR, `${platform}-${lens.key}-${Date.now()}.json`);
 
-  const review = await spawnClaude({
+  const review = await spawnAgent({
     prompt: reviewPrompt(platform, lens, outFile),
     cwd,
     timeoutMin: REVIEW_TIMEOUT_MIN,
   });
+  // Remote spawns bypass two-account failover — name a usage-limit for what it
+  // is instead of letting it wear a generic failure's clothes.
+  if (remoteServer && review.code !== 0 && /usage limit|rate.?limit/i.test(review.stdout + review.stderr)) {
+    log(`remote ${remoteServer} claude login is usage-limited — sweep failed there, not here`);
+  }
 
   if (review.limitHeld) {
     log('both subscription accounts are usage-limited — holding this sweep for the next tick');
@@ -349,8 +425,12 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
 
   // The agent writes to a file rather than stdout because spawnClaude keeps only
   // the LAST 4000 characters of stdout — enough for a marker, not for findings.
+  // Remote: the file is on the other box; fetch it over the same ssh channel.
   let rawText = '';
-  if (existsSync(outFile)) rawText = readFileSync(outFile, 'utf8');
+  if (remoteServer) {
+    try { rawText = sshRun(remoteServer, `cat ${outFile}`); }
+    catch { log('remote agent wrote no findings file — falling back to stdout'); rawText = review.stdout; }
+  } else if (existsSync(outFile)) rawText = readFileSync(outFile, 'utf8');
   else { log('agent printed a result but wrote no file — falling back to stdout'); rawText = review.stdout; }
 
   const { findings: rawFindings, error: parseError } = parseFindings(rawText);
@@ -373,7 +453,8 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     // were thrown away — the live sweep would then move on to a different lens
     // and this one would look done. Proving mode must not spend real coverage.
     log('DRY-RUN — rotation state NOT advanced, so a live sweep still owes this platform+lens');
-    try { rmSync(outFile, { force: true }); } catch {}
+    if (remoteServer) { try { sshRun(remoteServer, `rm -f ${outFile}`); } catch { /* remote /tmp clears itself */ } }
+    else { try { rmSync(outFile, { force: true }); } catch {} }
     return { platform, lens: lens.key, dryRun: true, findings: normalized };
   }
 
@@ -466,7 +547,7 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     // finding never comes back round to be argued about again.
     if (res.created && needsVerification(f) && verifications < MAX_VERIFICATIONS) {
       verifications++;
-      const v = await spawnClaude({ prompt: verifyPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
+      const v = await spawnAgent({ prompt: verifyPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
       // extractJsonObject, not a greedy brace regex. See its comment in
       // lib/findings.js: the regex it replaces lost THREE of four verdicts on the
       // 2026-07-30 jarvis sweep, and a lost verdict silently becomes "unproven".
@@ -492,11 +573,12 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
   }
 
   // ── close the loop: has anything already been fixed? ──
-  const closed = await recheckOldFindings(platform, cwd);
+  const closed = await recheckOldFindings(platform, cwd, spawnAgent);
 
   state[platform] = { lastSweep: Date.now(), lensIndex: lensIndex + 1 };
   saveState(state);
-  try { rmSync(outFile, { force: true }); } catch {}
+  if (remoteServer) { try { sshRun(remoteServer, `rm -f ${outFile}`); } catch { /* remote temp file — next boot clears /tmp */ } }
+  else { try { rmSync(outFile, { force: true }); } catch {} }
 
   await report(platform, lens, filed, checkout, closed);
   return { platform, lens: lens.key, findings: filed, closed };
@@ -514,7 +596,7 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
  * Bounded to CODE_HEALTH_MAX_RECHECK agents per sweep, and only for the platform
  * being swept, so the cost per sweep stays flat however large the table grows.
  */
-async function recheckOldFindings(platform, cwd) {
+async function recheckOldFindings(platform, cwd, spawnAgent = spawnClaude) {
   const closed = [];
   if (MAX_RECHECK < 1) return closed;
   let rows = [];
@@ -541,7 +623,7 @@ async function recheckOldFindings(platform, cwd) {
   if (!staleFirst.length) { log('recheck: nothing old enough to be worth re-checking'); return closed; }
 
   for (const f of staleFirst) {
-    const v = await spawnClaude({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
+    const v = await spawnAgent({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
     if (v.limitHeld) { log('recheck: usage-limited, stopping re-checks for this sweep'); break; }
     const verdict = extractJsonObject(v.stdout, ['still_present']);
     const stillPresent = verdict ? boolish(verdict.still_present) : null;
