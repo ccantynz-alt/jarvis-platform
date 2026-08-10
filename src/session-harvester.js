@@ -167,9 +167,27 @@ async function pcAction(verb, args, waitSeconds) {
   return r.json();
 }
 
+const STALE_WORKER_KEY = 'harvest-pc-stale-worker-day';
+const kvGet = (key) => fetch(`${MEMORY}/memory/kv/${key}`).then(r => r.ok ? r.json() : null).catch(() => null);
+const kvSet = (key, value) => fetch(`${MEMORY}/memory/kv`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ key, value }),
+}).catch(() => {});
+const dayStamp = () => new Date().toISOString().slice(0, 10);
+
 async function pullPC() {
   const dest = join(REMOTE_DIR, 'craig-pc');
   mkdirSync(dest, { recursive: true });
+  // Already established today that the worker is too old for these verbs? Then
+  // don't dispatch again — the DISPATCH is what manufactures a failed job every
+  // hour, so rate-limiting only the log message would have left the real cost in
+  // place. Once a day is the right cadence for a condition only a human at the
+  // PC can clear (the same shape as self-heal's daily notices).
+  const stale = await kvGet(STALE_WORKER_KEY);
+  if (stale?.value === dayStamp()) {
+    log('PC harvest: skipped — worker known stale today (restart JarvisPcWorker to re-enable)');
+    return 0;
+  }
   const cursorKey = 'harvest-pc-cursor';
   let since = '1970-01-01T00:00:00Z';
   try {
@@ -179,6 +197,20 @@ async function pullPC() {
 
   const listed = await pcAction('harvest.list', { since }, 60).catch(e => ({ error: e.message }));
   if (listed.status !== 'completed') {
+    // A worker running OLDER code refuses these verbs outright — it re-validates
+    // against its own table by design (pc-actions.js), which is correct, but it
+    // means shipping a verb here does not ship it THERE. Retrying hourly then
+    // manufactures a failed job every hour forever; on 2026-08-08 that fed
+    // craig-pc `status:'error'` and produced 235 alert-level phone pushes before
+    // anyone traced the flood to its source. Recognise the case, say the
+    // sentence that fixes it, and back off to daily until the worker is updated.
+    if (/unknown PC action/i.test(String(listed.error || ''))) {
+      await kvSet(STALE_WORKER_KEY, dayStamp());   // guard at the top of this fn skips the rest of today
+      log('PC harvest: the PC worker is running older code and does not know the harvest verbs. ' +
+        'Restart the JarvisPcWorker scheduled task on the PC (it loads src/lib/pc-actions.js at start) — ' +
+        'until then the PC leg of the flywheel stays idle. Retrying once a day, not hourly.');
+      return 0;
+    }
     log(`PC harvest: worker ${listed.status || 'unreachable'} — skipping this run`);
     return 0;
   }

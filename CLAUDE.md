@@ -353,6 +353,12 @@ auth).
   test.js` runs on the box only.
 - Repeat-identical audits go QUIET (info/digest) past 2 repeats — but break
   DIFFERENTLY and they're loud again. Nothing is ever dropped.
+- **An alert about something the monitor cannot fix needs a HUMAN's rate limit,
+  not a monitor's.** `alert` is exempt from push dedupe AND the hourly cap, so a
+  `notify()` inside a 5-minute timer loop is 288 buzzes a day (2026-08-10: 235
+  of them, for a PC that was fine). Use a once-a-day marker, cleared on
+  recovery. And only a job actually working ON a platform may write its health —
+  `jobWritesPlatformHealth()`, not role-agent jobs, not typed PC actions.
 - The confirmation gate: a false "yes" launches a production agent — test
   both directions before touching the vocabulary.
 - Transcript saves merge; `agent_context` is the KV table — never "clean" it.

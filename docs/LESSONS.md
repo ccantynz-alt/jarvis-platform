@@ -270,6 +270,35 @@ broken differently". `audit_repeat` is NOT `consecutive_critical` (which
 would suppress a platform failing differently each day). Logic + tests:
 `src/lib/audit-noise.js`, `test/audit-noise.test.js`.
 
+**235 phone pushes for a machine that was fine (2026-08-10).** Craig: *"why am
+I getting so many Jarvis alerts"*. Two defects compounded, and the trigger was
+a change made two days earlier:
+1. **A refused PC verb marked the whole machine down.** The flywheel's hourly
+   `harvest.list` reached a PC worker running OLDER code, which correctly
+   refused an unknown verb (`pc-actions.js` re-validates against its own table
+   — shipping a verb server-side does not ship it to the worker). Each refusal
+   went through orchestrator's `finishJob`, whose only exemption was role-AGENT
+   jobs, so it wrote craig-pc `status:'error'` — a failed *verb* impersonating
+   a dead *machine*. Fixed by `jobWritesPlatformHealth()` in
+   `lib/health-status.js` (the third writer's rule now lives with the other
+   two), tested in `test/health-status.test.js`.
+2. **self-heal's not-repairable branch alerted every single tick.** `alert`
+   level is exempt from BOTH push dedupe and the hourly cap, and the timer runs
+   every 5 minutes → 288 buzzes/day, forever, for a condition only a human can
+   clear. The file already carried this exact lesson twice (the dry-run notify
+   was moved below the guardrails for it; the nxdomain notice got its own daily
+   marker) — this branch was simply never revisited, because until craig-pc went
+   `error` nothing unreachable had ever been DOWN. It now uses the same
+   once-a-day marker (`manualNoticeDay`), cleared on recovery so a
+   recover-then-fail-again is still heard.
+**The general rule: an alert about something the monitor cannot fix needs a
+HUMAN's rate limit, not a monitor's.** And when adding a `notify()` inside a
+loop that runs on a timer, the question is never "is this worth saying" but
+"is this worth saying 288 times a day".
+*Third-order note:* the harvester also now backs off to daily when the worker
+refuses its verbs — retrying hourly manufactured the failed job that fed the
+whole chain. Rate-limiting the LOG line is not the fix; the DISPATCH is.
+
 **NotifyCenter basics:** critical = immediate, bypasses quiet hours/mute;
 warning = immediate, deduped + rate-limited; info = digest. Hourly immediate
 cap, overflow demotes. Quiet hours 22:00–07:00 NZ. Craig controls from Slack:
