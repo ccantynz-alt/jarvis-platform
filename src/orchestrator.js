@@ -5,11 +5,11 @@ import { randomUUID } from 'crypto';
 import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
-import { spawnClaude, spawnClaudeRemote, spawnProcess, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { usageHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
-import { planAction, encodeActionJob } from './lib/pc-actions.js';
+import { planAction, encodeActionJob, workerKnowsVerb } from './lib/pc-actions.js';
 import { jobWritesPlatformHealth } from './lib/health-status.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
@@ -709,9 +709,15 @@ app.post('/worker/heartbeat', async (req, res) => {
   // Jarvis can say "I can't restart services, the worker isn't elevated"
   // BEFORE promising a restart, instead of discovering it in a failed job.
   if (elevated !== undefined) {
+    // `verbs` (2026-08-10): which typed actions the worker's own copy of
+    // pc-actions.js knows. Absent from an older worker's heartbeat — that is
+    // itself information (workerKnowsVerb gives it the benefit of the doubt).
+    const verbs = Array.isArray(req.body?.verbs)
+      ? req.body.verbs.slice(0, 64).map(v => String(v).slice(0, 60))
+      : undefined;
     await dbPost('/memory/kv', {
       key: 'pc-worker-capability',
-      value: JSON.stringify({ worker_id: worker_id || 'unknown', host: host || null, elevated: !!elevated, at: new Date().toISOString() }),
+      value: JSON.stringify({ worker_id: worker_id || 'unknown', host: host || null, elevated: !!elevated, verbs, at: new Date().toISOString() }),
     }).catch(() => {});
   }
   // job_ids (plural) because the worker can hold an agent job and a fast-lane
@@ -750,6 +756,19 @@ app.post('/pc/action', async (req, res) => {
   }
 
   const capability = await pcWorkerCapability();
+  // A verb the connected worker's own table doesn't have is a PERMANENT
+  // refusal — it re-validates every job against that table by design, so
+  // enqueuing would only manufacture a failed job (41 of them, 2026-08-08→10,
+  // before the harvester learned to back off). Refuse up front, remedy
+  // included. The error deliberately carries the worker's phrase "unknown PC
+  // action" so callers' stale-worker detection fires on this path too.
+  if (!workerKnowsVerb(capability, plan.verb)) {
+    return res.status(409).json({
+      error: `unknown PC action "${plan.verb}" on the connected worker — it is running older code without this verb`,
+      remedy: 'restart the JarvisPcWorker scheduled task on the PC so it reloads src/lib/pc-actions.js',
+      capability,
+    });
+  }
   if (plan.needsAdmin && capability && capability.elevated === false) {
     return res.status(409).json({
       error: 'the PC worker is not running elevated, so it cannot control services',

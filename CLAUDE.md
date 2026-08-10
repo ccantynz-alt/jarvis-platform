@@ -125,7 +125,7 @@ oneshot MUST set `TimeoutStartSec` explicitly (the default is no timeout).
 | jarvis-code-health | 3 h | `src/code-health.js`: the only CODE-defect finder. Least-recently-swept platform × 1 of 9 lenses → one read-only review agent → adversarial verifier on critical/high → `code_findings` by fingerprint (dismissed sticky, severity only escalates, reappeared-fixed = regression). Fixes NOTHING. Requires `hasSource(path)`. Spec docs/CODE-HEALTH.md; logic src/lib/findings.js | **live** |
 | jarvis-fix-runner | 30 min | `src/fix-runner.js`: closes the loop — worst CONFIRMED, pushable, unclaimed findings → opens a proposal → ONE repair agent each (max 1/platform/tick), branch `jarvis/fix-<id>` only. Gates in src/lib/fix-dispatch.js (confirmed-only, git remote required, no dupes, denied platforms, CAUTION_RE — prose beats enum). Never marks findings fixed | **live** |
 | jarvis-review-runner | 20 min | `src/review-runner.js`: spawns the OWNING officer to review open proposals | **dry-run** |
-| jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. **Phase 2 (2026-08-08):** also pulls 158 transcripts (tailnet rsync, `HARVEST_REMOTE`) and Craig's PC (read-only `harvest.list`/`harvest.get` PC verbs, cursor in KV `harvest-pc-cursor`); backlog burn at `HARVEST_DISTILL_MAX=10` newest-first until the ~458-session backlog clears, then RESTORE to 3. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`, `test/pc-actions.test.js` | **live** |
+| jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. **Phase 2 (2026-08-08):** also pulls 158 transcripts (tailnet rsync, `HARVEST_REMOTE`) and Craig's PC (read-only `harvest.list`/`harvest.get` PC verbs, cursor in KV `harvest-pc-cursor`). PC dispatch is single-flight with fate tracking (2026-08-10): a queued/running harvester PC job blocks new dispatch, and a permanent refusal — even one landing after the wait window (KV `harvest-pc-last-list-job`) — trips the daily stale-worker back-off (KV `harvest-pc-stale-worker-day`; `pcListPlan()` in lib/harvest.js). Backlog burn at `HARVEST_DISTILL_MAX=10` newest-first until the ~458-session backlog clears, then RESTORE to 3. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`, `test/pc-actions.test.js` | **live** |
 | jarvis-backup / jarvis-vapron-backup | daily 03:30 / 04:17 UTC | SQLite backup; pull + verify off-box copy of box 158's Vapron DB | — |
 
 Guardrail env caps (all via `guardrail()`): self-heal + fix-runner limits in
@@ -198,7 +198,11 @@ NOTHING and exits 0; never interpolation — `psQuote()` only). Read-only verbs
 run instantly; **anything mutating goes through the SAME dispatch confirmation
 gate as a fleet job** (`mutates` defaults TRUE for undeclared verbs). Rides
 the jobs table on the `runtime` column (`'action'` vs `'claude'`). Elevation
-is measured and shipped in heartbeats (KV `pc-worker-capability`); the live
+is measured and shipped in heartbeats (KV `pc-worker-capability`), along with
+the worker's VERB LIST (2026-08-10): `/pc/action` refuses a verb the connected
+worker hasn't got (409 + remedy, `workerKnowsVerb()`) instead of manufacturing
+a job it will permanently refuse — a worker too old to report verbs gets the
+benefit of the doubt. The live
 task is still `RunLevel: Limited` until Craig re-runs
 `scripts/install-pc-worker.ps1` from an ADMIN PowerShell — until then service
 control correctly refuses. `JarvisPcWorkerWatchdog` (SYSTEM, 5 min) restarts a

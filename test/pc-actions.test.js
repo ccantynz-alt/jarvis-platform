@@ -11,7 +11,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  psQuote, planAction, VERBS, isKnownVerb,
+  psQuote, planAction, VERBS, isKnownVerb, workerKnowsVerb,
   encodeActionJob, decodeActionJob, ACTION_RUNTIME,
 } from '../src/lib/pc-actions.js';
 
@@ -188,4 +188,36 @@ test('descriptions are human-readable — they become the confirmation preview',
   assert.equal(planAction('service.restart', { name: 'JarvisPcWorker' }).description,
     'RESTART the "JarvisPcWorker" service');
   assert.match(planAction('eventlog.errors', { hours: 24 }).description, /last 24h/);
+});
+
+// ── Worker capability: the verb-table deployment gap (2026-08-10) ───────────
+// Shipping a verb in this repo does not ship it to the PC — the worker
+// re-validates against its OWN copy of the table (correct: the job row is not
+// a trust boundary). A worker that was never restarted refused harvest.list
+// on every hourly dispatch for two days: 41 failed jobs manufactured for a
+// condition only a human restart could clear. The worker now reports its verb
+// list in heartbeats; workerKnowsVerb lets /pc/action refuse UP FRONT, with
+// the remedy in the error, instead of enqueuing a job that can never succeed.
+
+test('a worker that reports its verbs pins dispatch to them', () => {
+  // The exact table the stale worker was running when it refused harvest.list:
+  const staleWorker = { elevated: false, verbs: [
+    'service.status', 'service.list', 'process.list', 'system.info', 'eventlog.errors',
+    'service.restart', 'service.start', 'service.stop', 'process.kill', 'shell',
+  ] };
+  assert.equal(workerKnowsVerb(staleWorker, 'harvest.list'), false);
+  assert.equal(workerKnowsVerb(staleWorker, 'system.info'), true);
+  // A current worker reports the full table and everything dispatches:
+  const current = { elevated: false, verbs: Object.keys(VERBS) };
+  for (const verb of Object.keys(VERBS)) {
+    assert.equal(workerKnowsVerb(current, verb), true, verb);
+  }
+});
+
+test('an older worker that reports no verb list gets the benefit of the doubt', () => {
+  // Default-denying on missing data would turn this fix into an outage for
+  // every un-updated worker; the worker-side refusal still backstops it.
+  assert.equal(workerKnowsVerb(null, 'harvest.list'), true);
+  assert.equal(workerKnowsVerb({ elevated: true }, 'harvest.list'), true);
+  assert.equal(workerKnowsVerb({ verbs: 'not-an-array' }, 'harvest.list'), true);
 });

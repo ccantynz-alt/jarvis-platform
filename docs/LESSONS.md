@@ -299,6 +299,43 @@ loop that runs on a timer, the question is never "is this worth saying" but
 refuses its verbs — retrying hourly manufactured the failed job that fed the
 whole chain. Rate-limiting the LOG line is not the fix; the DISPATCH is.
 
+**The back-off had a blind spot, and jobs stacked while the PC slept
+(2026-08-10, same incident, closed the same day).** The daily back-off above
+only saw a refusal that landed inside `pcAction`'s 60-second wait window. The
+03:05 refusal happened to land at +3s; a worker on its 5-minute error back-off
+polling cadence — or a PC waking later — fails the job where nobody is
+looking, and the next hourly run dispatched again as if nothing had happened
+(41 failed `harvest.list` jobs, 2026-08-08→10). And while the PC slept, every
+hourly run left ANOTHER queued job behind (three were stacked when this was
+found). Three structural closes, all tested:
+1. **Read the fate of the last dispatch before making another.** The
+   harvester remembers its list job's id (KV `harvest-pc-last-list-job`) and
+   `pcListPlan()` (lib/harvest.js) checks it next run — a permanent refusal
+   (`refused:` / "unknown PC action", `isPermanentRefusal()`) trips the daily
+   stale-worker marker no matter WHEN it landed. Transient failures (lost
+   lease, timeout) still retry hourly.
+2. **Single-flight:** a harvester PC job still queued or running means this
+   run dispatches nothing. A pull-based worker with a sleeping PC needs at
+   most one job waiting, ever.
+3. **Refuse doomed dispatches up front:** the worker's heartbeat now reports
+   its verb list into KV `pc-worker-capability`; `/pc/action` 409s (with the
+   restart remedy) on a verb the connected worker doesn't have —
+   `workerKnowsVerb()`, benefit of the doubt for older workers that don't
+   report verbs. Zero failed jobs manufactured, and the 409 carries the same
+   "unknown PC action" phrase so caller-side detection fires on it too.
+The general rule: **a permanently-refused dispatch must change the CALLER's
+behaviour, not just fail the job** — the job table records the refusal, but
+only the dispatcher can stop manufacturing the next one.
+*Separate finding, same dig (OPEN):* every `harvest.get` on 2026-08-10
+06:05–06:07 "completed" but decoded to garbage ("incorrect header check", 0
+of 40 transcripts pulled). The worker truncates action stdout to its LAST
+8000 chars (`powershell()` in pc-worker.js: `stdout.slice(-8000)`), which
+beheads the base64 gzip stream of any transcript whose encoding exceeds it.
+A real fix needs a chunked fetch protocol (offset/length args on
+`harvest.get`) — the gateway proxy's JSON body limit means simply raising the
+cap is not enough. Until then the PC leg lists but cannot pull large
+transcripts, and the cursor correctly refuses to advance.
+
 **NotifyCenter basics:** critical = immediate, bypasses quiet hours/mute;
 warning = immediate, deduped + rate-limited; info = digest. Hourly immediate
 cap, overflow demotes. Quiet hours 22:00–07:00 NZ. Craig controls from Slack:

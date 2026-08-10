@@ -287,6 +287,26 @@ export const VERBS = {
 export const isKnownVerb = (verb) => Object.prototype.hasOwnProperty.call(VERBS, verb);
 
 /**
+ * Does the CONNECTED worker know this verb? The worker re-validates every job
+ * against its own copy of this table (decodeActionJob — the job row is not a
+ * trust boundary), which means shipping a verb in this repo does not ship it
+ * to the PC: a worker running older code refuses it, permanently, on every
+ * dispatch. 2026-08-08→10 that manufactured 41 failed harvest.list jobs.
+ *
+ * The worker now reports its verb list in every heartbeat (stored in KV
+ * `pc-worker-capability`), so the orchestrator can refuse the dispatch UP
+ * FRONT with the remedy in the error — zero doomed jobs — instead of
+ * manufacturing one for the worker to refuse. An older worker that doesn't
+ * report verbs gets the benefit of the doubt: the refusal path still works,
+ * and default-denying dispatch on missing data would have turned this fix
+ * into an outage for every un-updated worker.
+ */
+export function workerKnowsVerb(capability, verb) {
+  if (!capability || !Array.isArray(capability.verbs)) return true;
+  return capability.verbs.includes(verb);
+}
+
+/**
  * How a script actually reaches powershell.exe — and this is NOT a detail.
  *
  * The obvious transport, and the one used elsewhere in this repo for the
