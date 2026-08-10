@@ -25,6 +25,37 @@
  */
 
 /**
+ * The THIRD writer: orchestrator's per-job outcome (2026-08-10).
+ *
+ * A job finishing writes 'healthy'/'error' for its platform, which is only
+ * meaningful when the job was actually working ON that platform. Two kinds of
+ * job are not:
+ *
+ *   - role-agent jobs (`agent` set) — a social-media draft succeeding says
+ *     nothing about whether the platform is up. Guarded since the agent-org
+ *     shipped.
+ *   - typed PC ACTIONS (`runtime: 'action'`) — "list the services", "fetch a
+ *     transcript". Whether a verb succeeds is not whether the machine is alive,
+ *     and conflating them cost 235 alert-level phone pushes in 48 hours: the
+ *     harvester's hourly `harvest.list` hit a PC worker running older code, was
+ *     refused as an unknown verb, and each refusal wrote craig-pc
+ *     `status:'error'` — which self-heal then alerted on every 5 minutes, about
+ *     a machine that was fine the whole time.
+ *
+ * Liveness for the PC has its own honest signal (`/pc/status`, from the
+ * worker's heartbeat). This predicate keeps a failed verb from impersonating it.
+ *
+ * @param {{agent?: string|null, runtime?: string|null}} row  the job row
+ * @returns {boolean} may this job's outcome write platform_state.status?
+ */
+export function jobWritesPlatformHealth(row) {
+  if (!row) return false;
+  if (row.agent) return false;
+  if (row.runtime === 'action') return false;
+  return true;
+}
+
+/**
  * @param {object} args
  * @param {string|null} args.existingStatus  what the row says now (fleet-check's view)
  * @param {string} args.reportStatus         what this audit concluded

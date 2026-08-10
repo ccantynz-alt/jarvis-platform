@@ -254,7 +254,9 @@ export async function runOnce() {
       // added later was silently dropped on every healthy tick — dnsNoticeDay
       // would have been the first casualty. Clearing it here is deliberate: the
       // platform resolves again, so the registrar reminder has served its purpose.
-      saveState(name, { ...s, firstDown: null, dnsNoticeDay: null });
+      // manualNoticeDay clears for the same reason: a platform that recovered and
+      // then failed AGAIN today is a new outage and deserves to be heard.
+      saveState(name, { ...s, firstDown: null, dnsNoticeDay: null, manualNoticeDay: null });
     }
   }
 
@@ -301,7 +303,24 @@ export async function runOnce() {
     if (downMin < DOWN_MINUTES) { log(`${name}: DOWN ${downMin}m (< ${DOWN_MINUTES}m debounce) — wait`); saveState(name, s); continue; }
     if (!reachable) {
       log(`${name}: DOWN but not SSH-repairable (server=${entry.server}) — notify only`);
-      await notify({ source: 'self-heal', level: 'alert', title: `🔴 ${name} is down (manual)`, body: `${url || name} HTTP ${code}, ${downMin}m. Not auto-repairable (${entry.server}).`, speech: `${name} is down and needs manual attention.` });
+      // ONCE A DAY, the same shape as the nxdomain branch below — and for the
+      // same reason (2026-08-10). This branch alerted on EVERY 5-minute tick,
+      // at `alert` level, which lib/push.js exempts from both dedupe and the
+      // hourly cap. So one platform that cannot be auto-repaired = 288 phone
+      // buzzes a day, forever. It fired 235 times in 48 hours for craig-pc
+      // before anyone connected the flood to its cause, and Craig asked why he
+      // was getting so many alerts.
+      //
+      // Note this file already carries that lesson twice (the dry-run notify
+      // was moved below the guardrails for it, and the nxdomain notice got its
+      // own daily marker) — this branch was simply never revisited, because
+      // until craig-pc went 'error' nothing unreachable had ever been DOWN.
+      // A condition only a human can clear needs a human's rate limit, not a
+      // monitor's.
+      if (s.manualNoticeDay !== today()) {
+        s.manualNoticeDay = today();
+        await notify({ source: 'self-heal', level: 'alert', title: `🔴 ${name} is down (manual)`, body: `${url || name} HTTP ${code}, ${downMin}m. Not auto-repairable (${entry.server}) — nothing on this box can fix it. I'll remind you once a day while it stays down.`, speech: `${name} is down and needs manual attention.` });
+      }
       saveState(name, s); continue;
     }
     // ---- is this even a SERVER problem? (2026-07-30) ----
@@ -368,7 +387,7 @@ export async function runOnce() {
         const live = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
         if (live.ok || (live.status >= 300 && live.status < 400)) {
           log(`${name}: memory says error but LIVE probe returned ${live.status} — false alarm, clearing state`);
-          saveState(name, { ...s, firstDown: null, dnsNoticeDay: null });   // spread — see the recovered loop above
+          saveState(name, { ...s, firstDown: null, dnsNoticeDay: null, manualNoticeDay: null });   // spread — see the recovered loop above
           continue;
         }
       } catch { /* live probe also failed — genuinely down, proceed */ }

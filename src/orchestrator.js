@@ -10,6 +10,7 @@ import { usageHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
 import { planAction, encodeActionJob } from './lib/pc-actions.js';
+import { jobWritesPlatformHealth } from './lib/health-status.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -222,9 +223,10 @@ async function finishJob(row, result) {
   console.log(`[orchestrator] job ${row.id} (${row.platform}) finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
   logEvent(success ? 'JOB' : 'ERR',
     `Agent ${success ? 'completed' : 'failed'} — ${row.id.slice(0, 8)} on ${row.platform} (exit ${result.code}${result.timedOut ? ', timeout' : ''})`);
-  // Role-agent jobs must not flip platform health state — a social-media
-  // draft succeeding says nothing about the platform being healthy.
-  if (!row.agent) {
+  // Which job outcomes may write platform health lives in lib/health-status.js
+  // with the other two writers' rules — role-agent jobs and typed PC actions
+  // are both excluded, and the 2026-08-10 alert flood is documented there.
+  if (jobWritesPlatformHealth(row)) {
     logToMemory({
       platform: row.platform,
       status: success ? 'healthy' : 'error',

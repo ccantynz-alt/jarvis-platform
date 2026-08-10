@@ -11,7 +11,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveAuditStatus } from '../src/lib/health-status.js';
+import { resolveAuditStatus, jobWritesPlatformHealth } from '../src/lib/health-status.js';
 
 const up = [{ url: 'https://x', status: 200, ok: true }];
 const down = [{ url: 'https://x', status: 503, ok: false }];
@@ -70,4 +70,33 @@ test('malformed probe rows cannot fake proof of health', () => {
     const r = resolveAuditStatus({ existingStatus: 'error', reportStatus: 'healthy', http });
     assert.equal(r.status, 'error', JSON.stringify(http));
   }
+});
+
+// ── The third writer: orchestrator's per-job outcome (2026-08-10) ───────────
+//
+// A refused PC verb marked the whole machine down. The harvester's hourly
+// harvest.list hit a PC worker running older code, was refused as an unknown
+// verb, and each refusal wrote craig-pc status:'error' — which self-heal then
+// alerted on every 5 minutes at `alert` level (exempt from push dedupe AND the
+// hourly cap). 235 phone pushes in 48 hours, about a machine that was fine.
+
+test('a real platform job may write health', () => {
+  assert.equal(jobWritesPlatformHealth({ platform: 'gluecron', runtime: 'claude' }), true);
+  assert.equal(jobWritesPlatformHealth({ platform: 'gluecron' }), true, 'runtime defaults to a claude job');
+});
+
+test('a typed PC action NEVER writes health — the 2026-08-10 flood', () => {
+  assert.equal(jobWritesPlatformHealth({ platform: 'craig-pc', runtime: 'action' }), false);
+  // the exact row that caused it: a refused harvest verb
+  assert.equal(jobWritesPlatformHealth({ platform: 'craig-pc', runtime: 'action', status: 'failed' }), false);
+});
+
+test('a role-agent job never writes health (a draft post is not uptime)', () => {
+  assert.equal(jobWritesPlatformHealth({ platform: 'davenroe', agent: 'social-media-davenroe' }), false);
+  assert.equal(jobWritesPlatformHealth({ platform: 'davenroe', agent: 'site-medic-davenroe', runtime: 'claude' }), false);
+});
+
+test('a missing row cannot write health', () => {
+  assert.equal(jobWritesPlatformHealth(null), false);
+  assert.equal(jobWritesPlatformHealth(undefined), false);
 });
