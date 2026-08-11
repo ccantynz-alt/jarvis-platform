@@ -34,7 +34,8 @@ import { parseCookies } from './lib/cookies.js';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual, randomBytes } from 'crypto';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, createReadStream } from 'fs';
+import { basename, join } from 'path';
 import { execSync } from 'child_process';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
@@ -152,6 +153,57 @@ try {
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'jarvis-deck', build: BUILD, clients: wss?.clients?.size ?? 0, link: 'ready', tts: ttsEnabled() });
+});
+
+// ── SHOW ME (2026-08-11) ────────────────────────────────────────────────────
+// Craig, twice in different words: "pull up websites for me to view" and "it
+// automatically pops up on my screen". Until now Marco could read the web and
+// DESCRIBE it — search, fetch, render — but had no way to put anything in front
+// of him. He narrated; he never showed.
+//
+// Deliberately ONE primitive rather than a feature per thing worth showing: a
+// capture (already produced by browser-service's guarded Playwright render) is
+// served here and pushed to every connected deck. That makes it work on the
+// iPad and phone too, needs no browser on the box, and needs nothing running on
+// Craig's PC — the three ways a "show me" built the obvious way would fail him.
+//
+// Screenshot rather than an iframe on purpose: X-Frame-Options/CSP block most
+// real sites from being framed, and a blank panel is a worse answer than a
+// picture. The panel carries the live URL so he can open it properly when he
+// wants to interact.
+const SHOT_DIR = '/opt/jarvis/screenshots';
+
+// GET /shot/:name — serve one capture. Same auth as the rest of the deck.
+app.get('/shot/:name', (req, res) => {
+  if (!isLocalDirect(req) && !isAuthed(req)) return res.status(403).json({ error: 'forbidden' });
+  // basename() first, then an allowlist pattern, then a prefix assertion: this
+  // serves files from a directory by NAME, which is the classic traversal
+  // shape, so it is closed three independent ways rather than cleverly once.
+  const name = basename(String(req.params.name || ''));
+  if (!/^[\w.-]+\.png$/i.test(name)) return res.status(400).json({ error: 'png captures only' });
+  const file = join(SHOT_DIR, name);
+  if (!file.startsWith(SHOT_DIR + '/')) return res.status(400).json({ error: 'bad path' });
+  if (!existsSync(file)) return res.status(404).json({ error: 'no such capture' });
+  res.type('png');
+  res.set('Cache-Control', 'private, max-age=600');
+  createReadStream(file).pipe(res);
+});
+
+// POST /internal/show { url?, screenshot?, title?, note? } — put it on screen.
+app.post('/internal/show', (req, res) => {
+  if (!isLocalDirect(req) && !isAuthed(req)) return res.status(403).json({ error: 'forbidden' });
+  const { url = null, screenshot = null, title = null, note = null } = req.body || {};
+  if (!url && !screenshot) return res.status(400).json({ error: 'url or screenshot required' });
+  // Only the FILENAME crosses to the client — never the box path. The browser
+  // fetches it back through /shot/:name, so the deck never learns the layout of
+  // the filesystem and a caller cannot point the panel at an arbitrary file.
+  const shot = screenshot ? basename(String(screenshot)) : null;
+  if (shot && !/^[\w.-]+\.png$/i.test(shot)) return res.status(400).json({ error: 'bad capture name' });
+  broadcast({ type: 'show', url, shot, title, note, ts: new Date().toISOString() });
+  const clients = wss?.clients?.size ?? 0;
+  // Honest about reach: nothing is "shown" if no deck is open, and Marco must
+  // be able to say so rather than claiming it landed.
+  res.json({ ok: true, clients, shown: clients > 0 });
 });
 
 // POST /internal/notify — instant push, mirrors gateway-server.js's own

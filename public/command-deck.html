@@ -133,6 +133,15 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 #briefing{position:absolute;inset:0;z-index:30;display:none;align-items:center;justify-content:center;
   background:rgba(2,4,8,.55);backdrop-filter:blur(3px)}
 #briefing.open{display:flex}
+/* SHOW ME — same overlay language as the briefing, sized for a page capture. */
+#showpanel{position:absolute;inset:0;z-index:31;display:none;align-items:center;justify-content:center;
+  background:rgba(2,4,8,.72);backdrop-filter:blur(3px)}
+#showpanel.open{display:flex}
+.show-card{width:min(1100px,94vw);max-height:90%;display:flex;flex-direction:column;
+  border:1px solid rgba(0,229,255,.3);background:rgba(6,12,20,.97);border-radius:6px;
+  padding:16px 18px;box-shadow:0 0 60px rgba(0,229,255,.12);animation:riseIn .3s ease both}
+.show-img{width:100%;max-height:72vh;object-fit:contain;object-position:top;border:1px solid rgba(0,229,255,.16);
+  border-radius:4px;background:#04070c}
 .brief-card{width:min(680px,92vw);max-height:82%;overflow-y:auto;border:1px solid rgba(0,229,255,.3);
   background:rgba(6,12,20,.96);border-radius:6px;padding:22px 26px;box-shadow:0 0 60px rgba(0,229,255,.12);
   animation:riseIn .3s ease both}
@@ -180,6 +189,8 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   <div style="overflow:hidden;position:relative">
     <div id="alerts" aria-live="assertive"></div>
     <div id="briefing" role="dialog" aria-label="Morning briefing"></div>
+    <!-- SHOW ME (2026-08-11): whatever Marco is putting in front of Craig. -->
+    <div id="showpanel" role="dialog" aria-label="Shown by Marco"></div>
 
     <!-- CORE VIEW — the JARVIS brain, full screen (default) -->
     <div id="view-core" class="view" style="display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden">
@@ -2341,6 +2352,7 @@ function handleMsg(m) {
   else if (m.type === 'audio_ctl') v2AudioCtl(m.ev);
   else if (m.type === 'notify') showAlert(m.level, m.title, m.speech);
   else if (m.type === 'briefing' && m.data) showBriefing(m.data);
+  else if (m.type === 'show') showThing(m);
 }
 
 // ── Voice v2 client (docs/VOICE-V2.md): MediaSource streaming player ─────────
@@ -2399,6 +2411,50 @@ function v2AudioChunk(buf) {
 }
 
 // ── Morning-briefing panel ({type:'briefing'} from the server) ──────────────
+// SHOW ME (2026-08-11). Marco pushes {type:'show'} and this puts it up.
+//
+// Escape everything: the title and note are model-written and the URL comes
+// from whatever he was asked to look at, so all three are untrusted strings
+// heading for innerHTML. The capture is referenced by FILENAME only and fetched
+// back through the deck's own /shot/:name — the client is never told a path on
+// the box.
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function showThing(m) {
+  const box = $('showpanel');
+  if (!box) return;
+  // Only http(s) may become a clickable link — never javascript:/data:, which
+  // an untrusted string could otherwise smuggle into an href.
+  const safeUrl = /^https?:\/\//i.test(String(m.url || '')) ? String(m.url) : null;
+  const heading = esc(m.title || (safeUrl ? new URL(safeUrl).hostname : 'On screen'));
+  let html = '<div class="show-card"><div class="brief-h">' +
+    '<div style="font-family:\'Michroma\',sans-serif;font-size:13px;letter-spacing:4px;color:#eaffff">' + heading + '</div>' +
+    '<div id="show-close" role="button" tabindex="0" style="margin-left:auto;cursor:pointer;color:#6b8a9e;font-size:20px;padding:0 6px">✕</div></div>';
+  if (m.shot) html += '<img class="show-img" alt="' + heading + '" src="/shot/' + encodeURIComponent(m.shot) + '">';
+  if (m.note) html += '<div style="margin-top:10px;font-size:13px;color:#9fb8c8">' + esc(m.note) + '</div>';
+  if (safeUrl) {
+    // A capture is a photograph, not the page. The link is how he interacts.
+    html += '<a href="' + esc(safeUrl) + '" target="_blank" rel="noopener noreferrer" ' +
+      'style="margin-top:10px;font-family:\'IBM Plex Mono\',monospace;font-size:12px;color:#00e5ff;text-decoration:none">' +
+      'OPEN IT PROPERLY ↗ <span style="color:#6b8a9e">' + esc(safeUrl.slice(0, 90)) + '</span></a>';
+  }
+  html += '</div>';
+  box.innerHTML = html;
+  box.classList.add('open');
+  const close = () => box.classList.remove('open');
+  $('show-close').onclick = close;
+  box.onclick = (e) => { if (e.target === box) close(); };   // click the backdrop to dismiss
+}
+// Escape closes what is on top: the show panel before anything else, and only
+// then fall through to interrupting speech.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const box = $('showpanel');
+  if (box && box.classList.contains('open')) { box.classList.remove('open'); e.stopImmediatePropagation(); }
+}, true);
+
 function showBriefing(d) {
   const box = $('briefing');
   const row = (dot, name, extra, extraColor) =>
