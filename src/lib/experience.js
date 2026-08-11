@@ -205,6 +205,33 @@ export function checkAlertRate({ lastHour, threshold = 12 }) {
   return result('alerts', true, { detail: `${n} notification(s) in the last hour` });
 }
 
+/**
+ * The PC worker. Craig, 2026-08-11: "we could ask marco to look up my computer
+ * specs before, now we cant." It had been dead 26 HOURS — his machine sat at
+ * 96% memory and the worker was squeezed out — and the watchdog that exists to
+ * revive it turned out never to have been installed, because that half of
+ * install-pc-worker.ps1 only runs elevated and the elevated run never happened.
+ * So the documented safety net was itself dead, silently, and he found out by
+ * asking Marco a question it could no longer answer.
+ *
+ * Deliberately generous: his PC legitimately sleeps overnight, and a sleeping
+ * machine is not a fault. This catches "gone for hours while he is using it",
+ * not "not right this second".
+ */
+export function checkPcWorker({ secondsSinceSeen, staleAfter = 4 * 3600 }) {
+  if (secondsSinceSeen == null) {
+    return result('pc_worker', false, { severity: 'warn', incident: '2026-08-11', detail: 'the PC worker has never checked in' });
+  }
+  if (secondsSinceSeen > staleAfter) {
+    const hours = Math.round(secondsSinceSeen / 3600);
+    return result('pc_worker', false, {
+      severity: 'warn', incident: '2026-08-11',
+      detail: `the PC worker has not checked in for ${hours}h — anything Marco does on the PC (specs, services, transcripts) is unavailable`,
+    });
+  }
+  return result('pc_worker', true, { detail: `PC worker seen ${Math.round(secondsSinceSeen / 60)}m ago` });
+}
+
 /** show_me depends on the guarded render path; a dead browser service kills it silently. */
 export function checkShowMe({ browserOk }) {
   return browserOk

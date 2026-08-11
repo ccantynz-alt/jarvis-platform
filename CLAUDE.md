@@ -217,8 +217,21 @@ a job it will permanently refuse — a worker too old to report verbs gets the
 benefit of the doubt. The live
 task is still `RunLevel: Limited` until Craig re-runs
 `scripts/install-pc-worker.ps1` from an ADMIN PowerShell — until then service
-control correctly refuses. `JarvisPcWorkerWatchdog` (SYSTEM, 5 min) restarts a
-dead worker — deliberately one inline command, no repo dependency. Kill
+control correctly refuses. **Watchdogs — and the one this file claimed for eleven days that did not exist
+(corrected 2026-08-11).** `JarvisPcWorkerWatchdog` (SYSTEM, 5 min) is created
+ONLY by the elevated half of `scripts/install-pc-worker.ps1`, and that elevated
+run has never happened — so it was never on the machine, while this file
+described it as live. The worker then died at 96% memory pressure and stayed
+dead for 26 HOURS; Craig found out by asking Marco for his PC specs and getting
+nothing. **`JarvisPcWorkerWatchdogUser` now exists** —
+`scripts/install-pc-watchdog-user.ps1`, same 5-minute check, registered under
+Craig's own account so it needs no admin; it covers machine-on-and-logged-in,
+which is the case that bit. The SYSTEM one is still worth installing for
+logged-out cover. Detection must match `node.exe` **AND** the command line: the
+command line alone matches any shell merely mentioning `pc-worker.js` (the first
+version reported the worker healthy while it was dead), and `node.exe` alone
+matches Claude Code. `jarvis-experience.timer` now also flags a worker silent
+for >4h, so this cannot hide again. Kill
 switches: KV `pc-worker-enabled`, `%ProgramData%\jarvis\KILL`, revoke token.
 Excluded from the daily audit sprint. Brain tools: `pc_control`,
 `get_pc_status`.

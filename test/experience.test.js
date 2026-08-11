@@ -12,7 +12,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe,
+  checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe, checkPcWorker,
   fingerprint, announcement, summarize, speech, worstSeverity, result,
 } from '../src/lib/experience.js';
 
@@ -63,6 +63,19 @@ test('alerts: a flood is caught, a busy afternoon is not (2026-08-10)', () => {
   assert.equal(checkAlertRate({ lastHour: 60 }).ok, false);   // the 235-in-48h shape
   assert.equal(checkAlertRate({ lastHour: 12 }).ok, true);    // at the threshold, not over
   assert.equal(checkAlertRate({ lastHour: 0 }).ok, true);
+});
+
+test('pc worker: the 26-hour silence Craig found by asking (2026-08-11)', () => {
+  const r = checkPcWorker({ secondsSinceSeen: 95876 });   // the real number that day
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /27h|26h/);
+  assert.match(r.detail, /specs|services|transcripts/, 'must say what he LOSES, not just that a process died');
+});
+
+test('pc worker: a sleeping PC is not a fault, a never-seen one is', () => {
+  assert.equal(checkPcWorker({ secondsSinceSeen: 120 }).ok, true);
+  assert.equal(checkPcWorker({ secondsSinceSeen: 3 * 3600 }).ok, true, 'overnight sleep must not page him');
+  assert.equal(checkPcWorker({ secondsSinceSeen: null }).ok, false);
 });
 
 test('show_me: a dead browser service is caught', () => {

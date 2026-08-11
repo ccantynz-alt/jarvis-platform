@@ -29,7 +29,7 @@ import { appendFileSync } from 'fs';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import {
-  checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe,
+  checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe, checkPcWorker,
   fingerprint, announcement, summarize, speech,
 } from './lib/experience.js';
 
@@ -121,8 +121,10 @@ const saveState = (state) => fetch(`${MEMORY}/memory/kv`, {
 async function main() {
   if (MODE === 'off') { log('EXPERIENCE_MODE=off — exiting'); return; }
 
-  const [voice, brain, lastHour, browser] = await Promise.all([
-    voiceState(), brainState(), alertRate(), jget(`${BROWSER}/browser/health`),
+  const [voice, brain, lastHour, browser, pc] = await Promise.all([
+    voiceState(), brainState(), alertRate(),
+    jget(`${BROWSER}/browser/health`),
+    jget('http://127.0.0.1:9205/pc/status'),
   ]);
   const git = gitState();
 
@@ -131,6 +133,7 @@ async function main() {
     checkVoice(voice),
     checkBrain(brain),
     checkAlertRate({ lastHour, threshold: ALERT_THRESHOLD }),
+    checkPcWorker({ secondsSinceSeen: pc ? pc.seconds_since_seen : null }),
     checkShowMe({ browserOk: !!browser }),
   ];
 
