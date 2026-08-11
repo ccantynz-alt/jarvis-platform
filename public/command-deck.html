@@ -2536,6 +2536,15 @@ if (forceCore) {
   if (forceCore !== 'idle') $('orb-label').textContent = forceCore.toUpperCase();
 }
 if (qs.get('demo-alert')) showAlert('alert', '⬢ SAMPLE ALERT — vapron.ai DOWN 3 min, self-heal dispatched', '');
+// ?demo-show=<capture.png> renders the SHOW ME panel against a real capture —
+// the live path is WS {type:'show'}, which a virtual-time capture can never
+// witness, and Rule 2 says a panel is only proven by looking at it.
+if (qs.get('demo-show')) showThing({
+  shot: qs.get('demo-show'),
+  url: qs.get('demo-show-url') || 'https://www.davenroe.com',
+  title: qs.get('demo-show-title') || 'DavenRoe',
+  note: 'Shown by Marco — say “show me” and any page lands here.',
+});
 if (qs.get('demo-briefing')) showBriefing({
   date: new Date().toISOString(),
   healthy: [{ name: 'zoobicon', score: 95 }, { name: 'gatetest', score: 92 }, { name: 'alecrae', score: 100 }],
