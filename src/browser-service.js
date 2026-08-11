@@ -44,6 +44,14 @@ function resolveChrome() {
 }
 const CHROME = resolveChrome();
 const NAV_TIMEOUT = 15000;
+// How long to let a page SETTLE before photographing it (2026-08-11). A
+// client-rendered app has painted nothing at `domcontentloaded` — the first
+// real capture show_me put on Craig's screen was DavenRoe's "Loading…"
+// spinner. networkidle is the right signal, but it is bounded because a page
+// that polls or holds a websocket open never reaches it at all, and a picture
+// arriving late is a worse failure than a picture arriving slightly early.
+const SETTLE_TIMEOUT = 6000;
+const SETTLE_MS = 900;
 const FETCH_TIMEOUT = 12000;
 const MAX_TEXT = 6000;           // chars of page text handed back to the brain
 const MAX_LINKS = 40;
@@ -197,7 +205,11 @@ app.post('/browser/render', async (req, res) => {
       return route.continue();
     });
     const resp = await page.goto(url, { timeout: NAV_TIMEOUT, waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(600); // let the above-the-fold settle
+    // See SETTLE_* above: wait for the network to go quiet so a client-rendered
+    // page has actually painted, then a short settle for fonts/images. Both are
+    // best-effort — a timeout here means "photograph it as it is", never fail.
+    await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT }).catch(() => {});
+    await page.waitForTimeout(SETTLE_MS);
     const title = await page.title().catch(() => null);
     const text = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
     const links = await page.evaluate((max) => Array.from(document.querySelectorAll('a[href]')).slice(0, max)
