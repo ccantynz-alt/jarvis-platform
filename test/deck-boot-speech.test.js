@@ -27,7 +27,12 @@ const script = html.slice(html.indexOf('<script'), html.lastIndexOf('</script>')
 const bootSection = script.slice(script.indexOf('// ── Boot ─'));
 
 test('the boot greeting is text-only', () => {
-  const calls = [...bootSection.matchAll(/addChat\((['"])JARVIS\1\s*,([\s\S]*?)\);/g)];
+  // Label-agnostic on purpose (2026-08-11). This matched a literal 'JARVIS'
+  // and broke the day the assistant was renamed to MARCO — correctly, since
+  // `calls.length > 0` made it FAIL rather than quietly find nothing and pass.
+  // A safety check that silently matches zero call sites is worse than no
+  // check, so match whatever the speaker label currently is.
+  const calls = [...bootSection.matchAll(/addChat\((['"])[A-Z]+\1\s*,([\s\S]*?)\);/g)];
   assert.ok(calls.length > 0, 'expected at least one boot addChat — did the boot section move?');
   for (const c of calls) {
     assert.match(
