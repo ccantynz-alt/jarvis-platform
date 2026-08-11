@@ -112,7 +112,7 @@ plain `/health` on agents, deck, dashboard, gateway, orchestrator. Slack
 (`slack-bridge.js`, :9203, `/slack/health`) is frozen-legacy but **still
 active** — never delete on the strength of the (wrong) "retired" claim.
 
-## THE SEVEN TIMERS
+## THE EIGHT TIMERS
 
 Periodic `oneshot` units, not daemons. Count them with
 `systemctl list-timers "jarvis-*"` — trust that, not this table. Any new
@@ -126,6 +126,7 @@ oneshot MUST set `TimeoutStartSec` explicitly (the default is no timeout).
 | jarvis-fix-runner | 30 min | `src/fix-runner.js`: closes the loop — worst CONFIRMED, pushable, unclaimed findings → opens a proposal → ONE repair agent each (max 1/platform/tick), branch `jarvis/fix-<id>` only. Gates in src/lib/fix-dispatch.js (confirmed-only, git remote required, no dupes, denied platforms, CAUTION_RE — prose beats enum). Never marks findings fixed | **live** |
 | jarvis-review-runner | 20 min | `src/review-runner.js`: spawns the OWNING officer to review open proposals | **dry-run** |
 | jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. **Phase 2 (2026-08-08):** also pulls 158 transcripts (tailnet rsync, `HARVEST_REMOTE`) and Craig's PC (read-only `harvest.list`/`harvest.get` PC verbs, cursor in KV `harvest-pc-cursor`). PC dispatch is single-flight with fate tracking (2026-08-10): a queued/running harvester PC job blocks new dispatch, and a permanent refusal — even one landing after the wait window (KV `harvest-pc-last-list-job`) — trips the daily stale-worker back-off (KV `harvest-pc-stale-worker-day`; `pcListPlan()` in lib/harvest.js). Backlog burn at `HARVEST_DISTILL_MAX=10` newest-first until the ~458-session backlog clears, then RESTORE to 3. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`, `test/pc-actions.test.js` | **live** |
+| jarvis-experience | 30 min | `src/experience-check.js`: **the only thing watching what CRAIG notices**, as opposed to what the machine notices (2026-08-11, from "how do we keep improving" — for a week every real fault was found by him while 12 services stayed green). Five checks, each citing the incident that earned it: deploy drift (production ran two days on an agent branch while pulls said "up to date"), voice honesty (`/health` said `tts:true` for a day while every synthesis 503'd), brain on a SUBSCRIPTION provider (2026-07-25 silent metered billing), notification flood rate (235 pushes in 48h), and the `show_me` capture path. **Announces on CHANGE, once daily while unchanged, once on recovery — never at `alert` level**, because a timer that can reach push.js's alert exemption IS the flood. Read-only; repairs nothing. Logic + tests: `src/lib/experience.js`, `test/experience.test.js` | **live** |
 | jarvis-backup / jarvis-vapron-backup | daily 03:30 / 04:17 UTC | SQLite backup; pull + verify off-box copy of box 158's Vapron DB | — |
 
 Guardrail env caps (all via `guardrail()`): self-heal + fix-runner limits in

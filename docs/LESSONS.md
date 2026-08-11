@@ -350,6 +350,23 @@ A real fix needs a chunked fetch protocol (offset/length args on
 cap is not enough. Until then the PC leg lists but cannot pull large
 transcripts, and the cursor correctly refuses to advance.
 
+**The week that produced the experience check (2026-08-11).** Craig asked "how
+do we keep improving", and the honest answer was in the incident list: the open
+mic transcribing his household, 235 alerts about a healthy PC, the voice
+silently on the backup, production parked on an agent branch — **every one found
+by him, while twelve services stayed green.** The fleet monitored the MACHINE
+well and the EXPERIENCE not at all, and every fault shared one shape: nothing
+errored, things quietly became wrong. `src/experience-check.js` turns each of
+those into a check the box runs every 30 minutes. Two rules keep it honest:
+**every check must cite a real incident** (no plausible-sounding monitoring),
+and **a check passes only on positive evidence** — something answered — never
+because nothing threw. Its own noise discipline is structural, not optional: it
+announces on CHANGE, once daily while unchanged, once on recovery, and can
+never emit `alert` (which push.js exempts from dedupe AND the hourly cap) —
+otherwise the thing watching for floods becomes one. Verified by causing a real
+failure: stopping jarvis-browser produced a detection, a repeat run stayed
+quiet, and restarting it produced exactly one recovery notice.
+
 **NotifyCenter basics:** critical = immediate, bypasses quiet hours/mute;
 warning = immediate, deduped + rate-limited; info = digest. Hourly immediate
 cap, overflow demotes. Quiet hours 22:00–07:00 NZ. Craig controls from Slack:
