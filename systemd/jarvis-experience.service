@@ -1,0 +1,23 @@
+[Unit]
+Description=Marco experience self-check — the things Craig notices before the box does
+After=network-online.target jarvis-memory.service jarvis-deck.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jarvis
+EnvironmentFile=/opt/jarvis/config/secrets.env
+EnvironmentFile=/opt/jarvis/config/experience.env
+ExecStart=/usr/bin/node src/experience-check.js
+# Type=oneshot DISABLES the start timeout by default (the 2026-07-30
+# fleet-check lesson: a stalled run sits in 'activating' forever and systemd
+# then skips every later timer activation, silently). A run is a git fetch plus
+# a handful of bounded HTTP probes; 3 minutes is generous.
+TimeoutStartSec=180
+
+# Read-only probing. It reports; it repairs nothing.
+MemoryMax=192M
+CPUQuota=30%
+
+[Install]
+WantedBy=multi-user.target

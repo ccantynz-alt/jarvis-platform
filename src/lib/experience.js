@@ -1,0 +1,213 @@
+/**
+ * experience.js — pure logic for the experience self-check (2026-08-11).
+ *
+ * Craig: "how do we keep improving." The honest answer from the week that
+ * prompted it: every fault that actually reached him was found by HIM, not by
+ * the box. The open mic answering his household, 235 phone alerts about a
+ * healthy PC, the voice silently dropping to the browser fallback, production
+ * sitting on an agent's branch while deploys quietly no-op'd — twelve services
+ * were green through all of it.
+ *
+ * The fleet watches ITSELF well. Nothing watched the EXPERIENCE. So every check
+ * here is a thing Craig had to notice once, turned into something the box
+ * notices instead. A check that does not cite a real incident does not belong
+ * here — this is not a place to add plausible-sounding monitoring.
+ *
+ * The failure mode being defended against is SILENT DEGRADATION, which is
+ * exactly what those incidents had in common: nothing errored, things just
+ * quietly became wrong. So a check "passes" only on positive evidence, never on
+ * the absence of an error.
+ *
+ * NOISE DISCIPLINE IS PART OF THE DESIGN, not a garnish. A checker that shouts
+ * every hour would be the 2026-08-10 flood wearing a nicer coat — 235 pushes
+ * about a machine that was fine. So: announce when the SET of failures CHANGES,
+ * once a day while unchanged, and once on recovery. Never per tick.
+ */
+
+import { createHash } from 'crypto';
+
+export const SEVERITIES = ['critical', 'warn', 'info'];
+
+/**
+ * One check's outcome. `ok:false` needs `detail` — a failure nobody can act on
+ * is a failure nobody will act on.
+ */
+export function result(id, ok, { detail = '', severity = 'warn', incident = '' } = {}) {
+  return {
+    id,
+    ok: !!ok,
+    severity: SEVERITIES.includes(severity) ? severity : 'warn',
+    detail: String(detail || '').slice(0, 300),
+    incident: String(incident || '').slice(0, 120),
+  };
+}
+
+/**
+ * The identity of a RESULT SET — used to decide whether anything actually
+ * changed since the last run. Deliberately covers the failing ids AND their
+ * severities, but NOT the detail text: a detail that carries a count ("3 in the
+ * last hour") would change every tick and make every run look new, which is
+ * precisely how NotifyCenter's per-key dedupe failed to catch the daily audit
+ * repeat (docs/LESSONS.md).
+ */
+export function fingerprint(results) {
+  const failing = results.filter(r => !r.ok)
+    .map(r => `${r.id}:${r.severity}`)
+    .sort();
+  if (!failing.length) return 'clean';
+  return createHash('sha256').update(failing.join('|')).digest('hex').slice(0, 16);
+}
+
+export const worstSeverity = (results) => {
+  const failing = results.filter(r => !r.ok);
+  if (!failing.length) return null;
+  return SEVERITIES.find(s => failing.some(r => r.severity === s)) || 'warn';
+};
+
+/**
+ * Should this run say anything out loud, and at what level?
+ *
+ * @param {object} prev   last run's stored state { fingerprint, day, announcedDay }
+ * @param {Array}  results
+ * @param {string} today  YYYY-MM-DD
+ * @returns {{announce: boolean, kind: 'changed'|'daily'|'recovered'|null, level: string}}
+ *
+ * `recovered` fires only when the PREVIOUS run was actually dirty — a first
+ * run on a clean box must not announce that nothing is wrong, which would be a
+ * notification whose entire content is "no news".
+ */
+export function announcement(prev, results, today) {
+  const fp = fingerprint(results);
+  const wasDirty = !!prev?.fingerprint && prev.fingerprint !== 'clean';
+
+  if (fp === 'clean') {
+    return wasDirty
+      ? { announce: true, kind: 'recovered', level: 'info' }
+      : { announce: false, kind: null, level: 'info' };
+  }
+
+  const worst = worstSeverity(results);
+  // critical maps to warn, NOT alert: lib/push.js exempts `alert` from both
+  // dedupe and the hourly cap, and this runs on a timer. Nothing on a timer
+  // should be able to reach that exemption (the 2026-08-10 lesson).
+  const level = worst === 'critical' ? 'warn' : 'info';
+
+  if (fp !== prev?.fingerprint) return { announce: true, kind: 'changed', level };
+  if (prev?.announcedDay !== today) return { announce: true, kind: 'daily', level };
+  return { announce: false, kind: null, level };
+}
+
+/** One line per failure, worst first — what Craig actually reads. */
+export function summarize(results, kind) {
+  const failing = results.filter(r => !r.ok)
+    .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity));
+  if (!failing.length) {
+    return 'Everything Craig would notice is behaving: voice, alerts, deploys and the brain all check out.';
+  }
+  const head = kind === 'daily'
+    ? `${failing.length} thing(s) still not right (unchanged since yesterday):`
+    : `${failing.length} thing(s) Craig would notice:`;
+  return [head, ...failing.map(r =>
+    `• [${r.severity}] ${r.detail}${r.incident ? `  (last seen: ${r.incident})` : ''}`)].join('\n');
+}
+
+/** The spoken line: short, and it never reads out a list. */
+export function speech(results) {
+  const failing = results.filter(r => !r.ok);
+  if (!failing.length) return null;               // never speak good news on a timer
+  const worst = worstSeverity(results);
+  if (worst === 'critical') {
+    return `Sir, something you would notice has broken — ${failing[0].detail.slice(0, 90)}`;
+  }
+  return `Sir, ${failing.length} small thing${failing.length === 1 ? '' : 's'} worth a look when convenient.`;
+}
+
+// ── individual check predicates (pure; the probes live in the service) ───────
+
+/**
+ * Deploy drift. Production ran for two days on `jarvis/fix-pc-harvest-dispatch`
+ * while `git pull` reported "Already up to date" and every deploy silently
+ * no-op'd (2026-08-11). Nothing noticed; a rename failing to appear did.
+ */
+export function checkDeploy({ branch, localSha, originSha }) {
+  if (!branch || !localSha) {
+    return result('deploy', false, { severity: 'warn', detail: 'could not read the box\'s git state', incident: '2026-08-11' });
+  }
+  if (branch !== 'main') {
+    return result('deploy', false, {
+      severity: 'critical', incident: '2026-08-11',
+      detail: `production is on branch "${branch}", not main — deploys to main will silently do nothing`,
+    });
+  }
+  if (originSha && localSha !== originSha) {
+    return result('deploy', false, {
+      severity: 'warn', incident: '2026-08-11',
+      detail: `box is at ${localSha} but origin/main is ${originSha} — a deploy did not land`,
+    });
+  }
+  return result('deploy', true, { detail: `on main at ${localSha}` });
+}
+
+/**
+ * Health honesty. /health reported `tts: true` for over a day while every
+ * synthesis 503'd on an exhausted ElevenLabs quota (2026-08-10). A health
+ * signal that lies is worse than none, because it is checked instead of the
+ * thing itself.
+ */
+export function checkVoice({ healthSaysTts, ttsStatus, ttsDisabled }) {
+  if (ttsDisabled) {
+    return healthSaysTts
+      ? result('voice', false, { severity: 'warn', incident: '2026-08-10', detail: 'TTS is disabled but /health still advertises it' })
+      : result('voice', true, { detail: 'custom voice off by choice; browser voice in use' });
+  }
+  if (healthSaysTts && ttsStatus !== 200) {
+    return result('voice', false, {
+      severity: 'critical', incident: '2026-08-10',
+      detail: `/health says the custom voice is on, but synthesis returns ${ttsStatus} — he is silently on the backup voice`,
+    });
+  }
+  return result('voice', true, { detail: 'voice synthesis answering' });
+}
+
+/**
+ * The brain must be on a SUBSCRIPTION provider. On 2026-07-25 a total outage
+ * failed over to metered `anthropic`, persisted that choice to KV, and billed
+ * per-token with no ongoing signal.
+ */
+export const SUBSCRIPTION_PROVIDERS = ['claude'];
+export function checkBrain({ provider, degraded }) {
+  if (!provider) return result('brain', false, { severity: 'warn', detail: 'could not read the brain provider', incident: '2026-07-25' });
+  if (!SUBSCRIPTION_PROVIDERS.includes(provider)) {
+    return result('brain', false, {
+      severity: 'critical', incident: '2026-07-25',
+      detail: `the brain is on "${provider}" — a metered provider, not the subscription`,
+    });
+  }
+  if (degraded) {
+    return result('brain', false, { severity: 'warn', incident: '2026-07-28', detail: 'the brain is flagged degraded — replies are falling back to keyword intent' });
+  }
+  return result('brain', true, { detail: `on ${provider}` });
+}
+
+/**
+ * Alert volume. 235 alert-level pushes in 48 hours about a healthy PC
+ * (2026-08-10). The threshold is per hour and deliberately generous — this
+ * catches a FLOOD, not a busy afternoon.
+ */
+export function checkAlertRate({ lastHour, threshold = 12 }) {
+  const n = Number(lastHour) || 0;
+  if (n > threshold) {
+    return result('alerts', false, {
+      severity: 'critical', incident: '2026-08-10',
+      detail: `${n} notifications in the last hour (threshold ${threshold}) — something is flooding him`,
+    });
+  }
+  return result('alerts', true, { detail: `${n} notification(s) in the last hour` });
+}
+
+/** show_me depends on the guarded render path; a dead browser service kills it silently. */
+export function checkShowMe({ browserOk }) {
+  return browserOk
+    ? result('show_me', true, { detail: 'capture path healthy' })
+    : result('show_me', false, { severity: 'warn', incident: '2026-08-11', detail: 'the browser service is down — "show me" cannot capture anything' });
+}

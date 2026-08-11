@@ -1,0 +1,16 @@
+[Unit]
+Description=Check the things Craig notices, every 30 minutes
+
+[Timer]
+# Give the fleet time to settle after a reboot before judging its experience.
+OnBootSec=8min
+# 30 minutes is a detection window, not a notification cadence — the check is
+# quiet unless the SET of failures changes (see lib/experience.js). Running it
+# often costs nothing and means a silent degradation is caught in half an hour
+# rather than whenever Craig happens to notice.
+OnUnitActiveSec=30min
+AccuracySec=1min
+RandomizedDelaySec=3min
+
+[Install]
+WantedBy=timers.target
