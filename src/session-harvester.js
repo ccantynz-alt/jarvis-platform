@@ -41,6 +41,7 @@ import { extractJsonObject } from './lib/findings.js';
 import {
   redactSecrets, parseSessionJsonl, isConversationSession, isTrivialSession,
   platformFromCwd, buildExcerpt, distillPrompt, eligibleFiles,
+  PC_VERBS, isStaleWorkerRefusal, pcListPlan,
 } from './lib/harvest.js';
 
 const MEMORY = 'http://127.0.0.1:9200';
@@ -163,11 +164,15 @@ async function pcAction(verb, args, waitSeconds) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ verb, args, wait_seconds: waitSeconds, enqueued_by: 'harvester' }),
   });
-  if (!r.ok) throw new Error(`/pc/action ${verb} → ${r.status}`);
+  // Carry the body into the error: the orchestrator's 409 for a verb the
+  // worker doesn't know says "unknown PC action", and the stale-worker
+  // detection below must be able to see that phrase.
+  if (!r.ok) throw new Error(`/pc/action ${verb} → ${r.status}: ${(await r.text()).slice(0, 300)}`);
   return r.json();
 }
 
 const STALE_WORKER_KEY = 'harvest-pc-stale-worker-day';
+const LAST_LIST_JOB_KEY = 'harvest-pc-last-list-job';
 const kvGet = (key) => fetch(`${MEMORY}/memory/kv/${key}`).then(r => r.ok ? r.json() : null).catch(() => null);
 const kvSet = (key, value) => fetch(`${MEMORY}/memory/kv`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -175,19 +180,50 @@ const kvSet = (key, value) => fetch(`${MEMORY}/memory/kv`, {
 }).catch(() => {});
 const dayStamp = () => new Date().toISOString().slice(0, 10);
 
+// The one sentence that fixes the stale-worker condition — said once a day,
+// not hourly. On 2026-08-08→10 the hourly retry manufactured 41 failed jobs
+// and (before health writes were fixed) 235 alert-level phone pushes.
+async function markWorkerStale(why) {
+  await kvSet(STALE_WORKER_KEY, dayStamp());
+  log('PC harvest: the PC worker is running older code and does not know the harvest verbs ' +
+    `(${why}). Restart the JarvisPcWorker scheduled task on the PC (it loads src/lib/pc-actions.js ` +
+    'at start) — until then the PC leg of the flywheel stays idle. Retrying once a day, not hourly.');
+}
+
+// Any harvester-owned PC job still queued or running. While the PC sleeps,
+// dispatching hourly just stacks identical jobs for it to churn through on
+// wake — one in flight at a time is the whole point of a pull-based worker.
+async function harvesterOpenPcJobs() {
+  const open = [];
+  for (const status of ['queued', 'running']) {
+    const rows = await fetch(`${MEMORY}/memory/jobs?status=${status}&executor=pc&limit=50`)
+      .then(r => r.ok ? r.json() : []).catch(() => []);
+    open.push(...rows.filter(r => r.enqueued_by === 'harvester'));
+  }
+  return open;
+}
+
 async function pullPC() {
   const dest = join(REMOTE_DIR, 'craig-pc');
   mkdirSync(dest, { recursive: true });
-  // Already established today that the worker is too old for these verbs? Then
-  // don't dispatch again — the DISPATCH is what manufactures a failed job every
-  // hour, so rate-limiting only the log message would have left the real cost in
-  // place. Once a day is the right cadence for a condition only a human at the
-  // PC can clear (the same shape as self-heal's daily notices).
-  const stale = await kvGet(STALE_WORKER_KEY);
-  if (stale?.value === dayStamp()) {
-    log('PC harvest: skipped — worker known stale today (restart JarvisPcWorker to re-enable)');
-    return 0;
-  }
+  // Decide BEFORE dispatching — the dispatch is what manufactures a failed job,
+  // so the daily back-off has to gate the dispatch itself, not the log line.
+  // pcListPlan (lib/harvest.js, tested) folds in the three ways this loop has
+  // actually failed: worker already known stale today; jobs stacking while the
+  // PC sleeps; and a permanent refusal that landed AFTER the wait window below,
+  // where the in-flight check can't see it — that last one is why the fate of
+  // the previous list job is read back here.
+  const [stale, lastListId] = await Promise.all([kvGet(STALE_WORKER_KEY), kvGet(LAST_LIST_JOB_KEY)]);
+  const lastJob = lastListId?.value
+    ? await fetch(`${MEMORY}/memory/jobs/${lastListId.value}`).then(r => r.ok ? r.json() : null).catch(() => null)
+    : null;
+  const plan = pcListPlan({
+    staleDay: stale?.value, today: dayStamp(),
+    openJobs: await harvesterOpenPcJobs(), lastJob,
+  });
+  if (plan.action === 'mark-stale') { await markWorkerStale(plan.reason); return 0; }
+  if (plan.action === 'skip') { log(`PC harvest: skipped — ${plan.reason}`); return 0; }
+
   const cursorKey = 'harvest-pc-cursor';
   let since = '1970-01-01T00:00:00Z';
   try {
@@ -195,20 +231,18 @@ async function pullPC() {
     if (kv?.value) since = kv.value;
   } catch { /* first run — full history */ }
 
-  const listed = await pcAction('harvest.list', { since }, 60).catch(e => ({ error: e.message }));
+  const listed = await pcAction(PC_VERBS.list, { since }, 60).catch(e => ({ error: e.message }));
+  // Remember which job carries this run's list so the NEXT run can read its
+  // fate — a refusal after the wait window used to vanish unobserved.
+  if (listed.jobId) await kvSet(LAST_LIST_JOB_KEY, listed.jobId);
   if (listed.status !== 'completed') {
     // A worker running OLDER code refuses these verbs outright — it re-validates
     // against its own table by design (pc-actions.js), which is correct, but it
-    // means shipping a verb here does not ship it THERE. Retrying hourly then
-    // manufactures a failed job every hour forever; on 2026-08-08 that fed
-    // craig-pc `status:'error'` and produced 235 alert-level phone pushes before
-    // anyone traced the flood to its source. Recognise the case, say the
-    // sentence that fixes it, and back off to daily until the worker is updated.
-    if (/unknown PC action/i.test(String(listed.error || ''))) {
-      await kvSet(STALE_WORKER_KEY, dayStamp());   // guard at the top of this fn skips the rest of today
-      log('PC harvest: the PC worker is running older code and does not know the harvest verbs. ' +
-        'Restart the JarvisPcWorker scheduled task on the PC (it loads src/lib/pc-actions.js at start) — ' +
-        'until then the PC leg of the flywheel stays idle. Retrying once a day, not hourly.');
+    // means shipping a verb here does not ship it THERE. The orchestrator's
+    // /pc/action now also refuses up front when the worker's heartbeat says the
+    // verb is missing; both paths carry the phrase matched here.
+    if (isStaleWorkerRefusal(listed.error)) {
+      await markWorkerStale('refused this run');
       return 0;
     }
     log(`PC harvest: worker ${listed.status || 'unreachable'} — skipping this run`);
@@ -220,7 +254,7 @@ async function pullPC() {
   let pulled = 0, newest = since;
   for (const line of lines.slice(0, 40)) {
     const [path, , mtime] = line.split('|');
-    const got = await pcAction('harvest.get', { path }, 60).catch(e => ({ error: e.message }));
+    const got = await pcAction(PC_VERBS.get, { path }, 60).catch(e => ({ error: e.message }));
     if (got.status !== 'completed' || !got.output) { log(`PC harvest: fetch failed for ${path}`); continue; }
     try {
       const jsonl = gunzipSync(Buffer.from(got.output.trim(), 'base64')).toString('utf8');

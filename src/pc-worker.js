@@ -24,7 +24,7 @@ import { existsSync, readFileSync, statSync, readdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
-import { decodeActionJob, buildPowerShellArgs, cleanStderr } from './lib/pc-actions.js';
+import { decodeActionJob, buildPowerShellArgs, cleanStderr, VERBS } from './lib/pc-actions.js';
 
 function loadEnvFile(p) {
   if (!existsSync(p)) return {};
@@ -147,6 +147,12 @@ function startHeartbeat() {
       job_ids: [currentJobId, currentActionId].filter(Boolean),
       elevated: isElevated,
       host: os.hostname(),
+      // The verbs THIS worker's copy of the table actually knows. The server
+      // uses this to refuse a dispatch up front (with the remedy in the error)
+      // instead of manufacturing a job this worker will permanently refuse —
+      // the 2026-08-08→10 harvest.list loop, 41 failed jobs from one missing
+      // worker restart.
+      verbs: Object.keys(VERBS),
     }).catch(e => log(`heartbeat failed: ${e.message}`));
   }, HEARTBEAT_MS);
   heartbeatTimer.unref?.();

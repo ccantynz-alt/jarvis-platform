@@ -204,6 +204,64 @@ export function lessonFingerprint(l) {
   return createHash('sha256').update(norm).digest('hex').slice(0, 24);
 }
 
+// ── the PC leg's dispatch discipline (2026-08-10) ───────────────────────────
+// The verbs the harvester dispatches to Craig's PC, declared ONCE so the
+// regression test can hold them against the verb table in pc-actions.js. The
+// incident: harvest.list shipped here on 2026-08-08 but the PC worker
+// re-validates against ITS OWN copy of the table (correct — the job row is not
+// a trust boundary), so a worker running older code refused it, and the hourly
+// timer manufactured 41 failed jobs over two days before anyone looked.
+export const PC_VERBS = { list: 'harvest.list', get: 'harvest.get' };
+
+// The worker's "I don't have that verb" sentence — pc-actions.js planAction().
+// Matching the PHRASE, not an exact string: the message carries the worker's
+// own verb list, which differs by exactly the verbs it is missing.
+export function isStaleWorkerRefusal(error) {
+  return /unknown PC action/i.test(String(error || ''));
+}
+
+// A refusal the worker will repeat on every future attempt with the same
+// inputs: unknown verb, bad arguments, missing elevation, path outside the
+// workspace. The worker prefixes ALL of these with "refused:" (pc-worker.js
+// runAction/runJob) precisely so callers can tell "retry won't help" from a
+// transient failure (timeout, lost lease, network).
+export function isPermanentRefusal(error) {
+  const e = String(error || '');
+  return /^\s*refused:/i.test(e) || isStaleWorkerRefusal(e);
+}
+
+/**
+ * Should this run dispatch a new harvest.list job? Pure, so the whole decision
+ * is testable. Two holes this closes (2026-08-10, the 41-failed-jobs loop):
+ *
+ *   1. The in-window back-off (f671ff9) only saw a refusal that landed inside
+ *      pcAction's wait window. A worker that claims the job AFTER the window
+ *      (slow poll, waking PC) fails it where nobody is looking — so the next
+ *      run must read the FATE of the last dispatched job before making another.
+ *   2. While the PC sleeps, every hourly run left another queued job behind.
+ *      A queued or running harvester PC job means this run dispatches nothing.
+ *
+ * Returns { action: 'skip' | 'mark-stale' | 'dispatch', reason }.
+ * 'mark-stale' = the caller should set the daily stale-worker marker AND skip;
+ * only a human restarting the worker clears the condition, so retrying more
+ * than daily just manufactures failed jobs (docs/LESSONS.md, the alert flood).
+ */
+export function pcListPlan({ staleDay, today, openJobs = [], lastJob = null }) {
+  if (staleDay === today) {
+    return { action: 'skip', reason: 'worker known stale today (restart JarvisPcWorker on the PC to re-enable)' };
+  }
+  if (openJobs.length) {
+    return { action: 'skip', reason: `${openJobs.length} harvester PC job(s) still queued or running — not stacking another` };
+  }
+  if (lastJob && lastJob.status === 'failed' && isPermanentRefusal(lastJob.error)) {
+    return {
+      action: 'mark-stale',
+      reason: `the last dispatch was permanently refused after the wait window: ${String(lastJob.error || '').slice(0, 140)}`,
+    };
+  }
+  return { action: 'dispatch', reason: 'no open job, no unhandled refusal' };
+}
+
 // ── file eligibility ────────────────────────────────────────────────────────
 // A session file is harvestable when it has gone QUIET (no writes for quietMs —
 // reading a live session would index half a conversation) and is NEW or has

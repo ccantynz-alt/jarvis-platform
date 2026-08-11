@@ -11,7 +11,9 @@ import assert from 'node:assert/strict';
 import {
   redactSecrets, parseSessionJsonl, isConversationSession, isTrivialSession,
   platformFromCwd, buildExcerpt, normalizeLesson, lessonFingerprint, eligibleFiles,
+  PC_VERBS, isPermanentRefusal, isStaleWorkerRefusal, pcListPlan,
 } from '../src/lib/harvest.js';
+import { VERBS, isKnownVerb, planAction } from '../src/lib/pc-actions.js';
 
 // ── redaction ──────────────────────────────────────────────────────────────
 
@@ -155,4 +157,79 @@ test('live files wait, quiet new/grown files harvest, unchanged files skip', () 
   ];
   const state = { 'c.jsonl': { size: 100 }, 'd.jsonl': { size: 300 } };
   assert.deepEqual(eligibleFiles(entries, state, now).map(e => e.path), ['b.jsonl', 'c.jsonl']);
+});
+
+// ── the PC leg's dispatch discipline (2026-08-10) ──────────────────────────
+// The incident these carry: harvest.list shipped in pc-actions.js on
+// 2026-08-08, but the PC worker re-validates against its own copy of the verb
+// table, so a worker that was never restarted refused it — and the hourly
+// timer manufactured 41 failed jobs over two days. The in-window back-off
+// (f671ff9) closed most of it; these lock in the rest.
+
+test('every verb the harvester dispatches exists in the PC verb table with mutates DECLARED false', () => {
+  // Reconciliation is a test, not a convention: a verb emitted here that the
+  // table doesn't know is a job the worker will permanently refuse. And an
+  // UNDECLARED mutates flag is treated as mutating (default-deny), which would
+  // route these read-only pulls through the confirmation gate every hour.
+  for (const verb of Object.values(PC_VERBS)) {
+    assert.ok(isKnownVerb(verb), `${verb} is not in the pc-actions verb table`);
+    assert.equal(VERBS[verb].mutates, false, `${verb} must explicitly declare mutates:false`);
+  }
+  // And the args the harvester actually sends must build without throwing.
+  assert.equal(planAction(PC_VERBS.list, { since: '1970-01-01T00:00:00Z' }).mutates, false);
+  assert.equal(planAction(PC_VERBS.get,
+    { path: 'C:\\Users\\someone\\.claude\\projects\\slug\\session.jsonl' }).mutates, false);
+});
+
+test('a permanent refusal is recognised in every shape it has actually arrived in', () => {
+  // The worker's own sentence (job error field, post-2026-07-31 wording):
+  assert.ok(isPermanentRefusal('refused: unknown PC action "harvest.list" — known: service.status, service.list'));
+  assert.ok(isStaleWorkerRefusal('refused: unknown PC action "harvest.list" — known: service.status'));
+  // The orchestrator's up-front 409, seen through pcAction's thrown error:
+  assert.ok(isStaleWorkerRefusal('/pc/action harvest.list → 409: {"error":"unknown PC action \\"harvest.list\\" on the connected worker"}'));
+  // Other permanent refusals (elevation, workspace jail) — retry cannot fix these:
+  assert.ok(isPermanentRefusal('refused: this needs an elevated worker and JarvisPcWorker is running as a standard user.'));
+  // Transient failures are NOT permanent — these must keep retrying hourly:
+  assert.ok(!isPermanentRefusal('PC worker lost the job lease and attempts are exhausted'));
+  assert.ok(!isPermanentRefusal('timed out after 5 min'));
+  assert.ok(!isPermanentRefusal(''));
+  assert.ok(!isPermanentRefusal(null));
+});
+
+test('pcListPlan: a refusal that landed AFTER the wait window still trips the daily back-off', () => {
+  // The hole the in-window check couldn't see: the PC claims the job minutes
+  // after pcAction stopped waiting, fails it where nobody is looking, and the
+  // next hourly run used to dispatch again as if nothing happened.
+  const plan = pcListPlan({
+    staleDay: 'cleared', today: '2026-08-10', openJobs: [],
+    lastJob: { status: 'failed', error: 'refused: unknown PC action "harvest.list" — known: service.status' },
+  });
+  assert.equal(plan.action, 'mark-stale');
+});
+
+test('pcListPlan: queued jobs do not stack while the PC sleeps', () => {
+  const plan = pcListPlan({
+    staleDay: null, today: '2026-08-10',
+    openJobs: [{ id: 'x', status: 'queued', enqueued_by: 'harvester' }],
+    lastJob: null,
+  });
+  assert.equal(plan.action, 'skip');
+});
+
+test('pcListPlan: stale marker gates TODAY only — a cleared or yesterday marker re-enables', () => {
+  assert.equal(pcListPlan({ staleDay: '2026-08-10', today: '2026-08-10' }).action, 'skip');
+  assert.equal(pcListPlan({ staleDay: '2026-08-09', today: '2026-08-10' }).action, 'dispatch');
+  // Craig's manual re-enable writes 'cleared' (observed live, 2026-08-10 03:57):
+  assert.equal(pcListPlan({ staleDay: 'cleared', today: '2026-08-10' }).action, 'dispatch');
+});
+
+test('pcListPlan: a transient failure or a success re-dispatches normally', () => {
+  assert.equal(pcListPlan({
+    staleDay: null, today: '2026-08-10', openJobs: [],
+    lastJob: { status: 'failed', error: 'PC worker lost the job lease and attempts are exhausted' },
+  }).action, 'dispatch');
+  assert.equal(pcListPlan({
+    staleDay: null, today: '2026-08-10', openJobs: [],
+    lastJob: { status: 'completed', error: null },
+  }).action, 'dispatch');
 });
