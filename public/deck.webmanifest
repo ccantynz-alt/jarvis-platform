@@ -1,7 +1,7 @@
 {
-  "name": "JARVIS Command Deck",
-  "short_name": "JARVIS",
-  "description": "Multi-agent command deck — talk to Jarvis, watch the fleet.",
+  "name": "MARCO Command Deck",
+  "short_name": "MARCO",
+  "description": "Multi-agent command deck — talk to Marco, watch the fleet.",
   "start_url": "/",
   "display": "standalone",
   "orientation": "any",

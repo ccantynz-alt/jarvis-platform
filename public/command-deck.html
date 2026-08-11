@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>JARVIS Command Deck</title>
+<title>MARCO Command Deck</title>
 <link rel="manifest" href="/deck.webmanifest">
 <link rel="apple-touch-icon" href="/icons/deck-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="JARVIS">
+<meta name="apple-mobile-web-app-title" content="MARCO">
 <meta name="theme-color" content="#04060c">
 <!--
   JARVIS Command Deck — implemented from Craig's Claude Design handoff
@@ -164,7 +164,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   <div class="topbar">
     <div style="display:flex;align-items:center;gap:10px">
       <div class="brand-dot"></div>
-      <div style="font-family:'Michroma',sans-serif;font-size:16px;letter-spacing:5px;color:#eaffff">JARVIS</div>
+      <div style="font-family:'Michroma',sans-serif;font-size:16px;letter-spacing:5px;color:#eaffff">MARCO</div>
       <div class="mono" style="font-size:11px;color:#6b8a9e;letter-spacing:2px;padding-top:2px">COMMAND&nbsp;DECK&nbsp;v2.2</div>
     </div>
     <div id="tabs" role="tablist" aria-label="Deck views" style="display:flex;gap:2px;flex:1;justify-content:center;flex-wrap:wrap"></div>
@@ -201,7 +201,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
             <div id="btn-demo" class="btn" role="button" tabindex="0" aria-label="Run briefing">▶ RUN BRIEFING</div>
             <div id="btn-history" class="btn" role="button" tabindex="0" aria-label="Toggle conversation history">☰ HISTORY</div>
           </div>
-          <div id="chat" class="collapsed" aria-live="polite" aria-label="Conversation with JARVIS" style="flex:1;width:100%;max-width:720px;overflow-y:auto;flex-direction:column;gap:8px;padding:6px 4px;min-height:120px"></div>
+          <div id="chat" class="collapsed" aria-live="polite" aria-label="Conversation with MARCO" style="flex:1;width:100%;max-width:720px;overflow-y:auto;flex-direction:column;gap:8px;padding:6px 4px;min-height:120px"></div>
         </div>
       </div>
     </div>
@@ -229,7 +229,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
     <div id="view-org" class="view hidden" style="overflow:auto;padding:20px;flex-direction:column;gap:6px;align-items:center">
       <div id="org-tiers" style="display:flex;flex-direction:column;gap:6px;align-items:center;width:100%"></div>
       <div style="max-width:760px;margin:0 auto;text-align:center;font-size:13px;color:#5f7a8c;padding:10px 0 24px">
-        Strict chain of command — workers never talk to the CEO. Results flow up through Directors and QA before JARVIS reports to you.</div>
+        Strict chain of command — workers never talk to the CEO. Results flow up through Directors and QA before MARCO reports to you.</div>
     </div>
 
     <!-- FLOW VIEW -->
@@ -248,7 +248,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
     <div id="view-plat" class="view hidden" style="overflow:auto;padding:18px">
       <div class="section-label" style="margin-bottom:12px">PLATFORM FLEET · <span id="plat-count">0</span> PROPERTIES UNDER MANAGEMENT</div>
       <div id="platforms" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px"></div>
-      <div style="margin-top:14px;font-size:13px;color:#5f7a8c">Fleet is adaptive — new platforms register themselves with JARVIS and inherit a full agent squad automatically.</div>
+      <div style="margin-top:14px;font-size:13px;color:#5f7a8c">Fleet is adaptive — new platforms register themselves with MARCO and inherit a full agent squad automatically.</div>
     </div>
 
     <!-- OPS VIEW — the work itself: inbox, code findings, agent reports, job queue -->
@@ -442,8 +442,8 @@ function addChat(who, text, speechText) {
   box.appendChild(el);
   while (box.children.length > 50) box.firstChild.remove();
   box.scrollTop = box.scrollHeight;
-  if (who === 'JARVIS') $('latest-reply').textContent = text;
-  if (who === 'JARVIS' && speechText !== null) speak(speechText || text);
+  if (who === 'MARCO') $('latest-reply').textContent = text;
+  if (who === 'MARCO' && speechText !== null) speak(speechText || text);
   return t;
 }
 
@@ -483,7 +483,7 @@ function speakCompletedSentences() {
 }
 function onChatChunk(chunk) {
   S.thinking = false;
-  if (!streamEl) { streamEl = addChat('JARVIS', '', null); streamSpokenLen = 0; }
+  if (!streamEl) { streamEl = addChat('MARCO', '', null); streamSpokenLen = 0; }
   streamEl.textContent += chunk;
   $('latest-reply').textContent = streamEl.textContent; // reply forms live under the core
   $('chat').scrollTop = $('chat').scrollHeight;
@@ -512,9 +512,9 @@ function onChatFinal(m) {
       speak(remaining);
     }
   } else if (discardReply) {
-    addChat('JARVIS', m.text, null); // interrupted: show the text, stay silent
+    addChat('MARCO', m.text, null); // interrupted: show the text, stay silent
   } else {
-    addChat('JARVIS', m.text, m.speech);
+    addChat('MARCO', m.text, m.speech);
   }
   updateOrbLabel();
 }
@@ -931,7 +931,7 @@ fetch('/api/ops').then(r => r.json()).then(o => {
 function defaultTiers() {
   return [
     { label: 'CEO · ORCHESTRATOR', color: '#00e5ff', border: 'rgba(0,229,255,.5)', line: true,
-      nodes: [{ name: 'JARVIS CORE', role: 'Routes objectives · never executes', dot: '#00e5ff', state: 'ORCHESTRATING' }] },
+      nodes: [{ name: 'MARCO CORE', role: 'Routes objectives · never executes', dot: '#00e5ff', state: 'ORCHESTRATING' }] },
     { label: 'C-SUITE · DOMAIN MANAGERS', color: '#9feaff', border: 'rgba(0,229,255,.25)', line: true,
       nodes: S.agents.map(a => ({ name: a.name, role: (a.role || '').split('·')[1] || a.role, dot: a.dot || dotFor(a.state), state: a.state })) },
     { label: 'QA · AUDITORS', color: '#ffb547', border: 'rgba(255,181,71,.3)', line: false,
@@ -1165,7 +1165,7 @@ function updateOrbLabel() {
     : S.thinking ? 'THINKING'
     : (voiceMode !== 'off' && !armed) ? ''
     : (voiceMode === 'live' && listening) ? 'LISTENING'
-    : (voiceMode === 'wake' && listening) ? (Date.now() < awaitingCommand ? 'LISTENING' : 'SAY “JARVIS…”')
+    : (voiceMode === 'wake' && listening) ? (Date.now() < awaitingCommand ? 'LISTENING' : 'SAY “MARCO…”')
     : 'STANDBY';
   $('arm-overlay').classList.toggle('hidden', !(voiceMode !== 'off' && !armed));
   updateMicBtn();
@@ -1206,7 +1206,7 @@ function sendCommand(c) {
     // green". Indistinguishable from a real answer apart from a 10px pill in
     // the corner. Confident fabrication in a system Craig makes business
     // decisions from is far worse than an honest silence.
-    addChat('JARVIS', 'I have lost the link to the box, sir — I can\'t reach my brain or any real data until it reconnects. Nothing I said would be true, so I\'d rather say nothing.');
+    addChat('MARCO', 'I have lost the link to the box, sir — I can\'t reach my brain or any real data until it reconnects. Nothing I said would be true, so I\'d rather say nothing.');
   }
 }
 
@@ -1238,10 +1238,21 @@ let wakeHintUntil = 0;   // interim transcript matched the wake word — attenti
 let liveSince = 0;       // when LIVE mode was entered — it expires, see the watchdog
 let followChain = 0;     // consecutive no-wake-word turns via the follow-up window
 
-// Fuzzy on purpose: STT regularly mangles "Jarvis" — every variant here has
+// Fuzzy on purpose: STT regularly mangles a wake word — every variant here has
 // been seen in the wild or is a near-neighbour. Watch the HEARD line for new
 // mishears and add them.
-const WAKE_RE = /^(?:(?:hey|hi|ok|okay|oi)\s+)?(?:wake\s*up[,]?\s+)?(?:jarvis|javas?|jarvas|jarvi|jarvish?|jarves|jervis|gervais|harvis|drivers|davis)\b[,.!?]?\s*(.*)$/i;
+//
+// Renamed to MARCO 2026-08-11 (Craig: "change the name to Marco to align with
+// future developments" — MarcoReid Intelligence Systems). The old jarvis
+// variants are KEPT as a transition alias on purpose: he has said "Jarvis" a
+// thousand times, muscle memory outlasts a rename, and a wake word that stops
+// answering to the name you actually say is indistinguishable from a broken
+// assistant. Drop them only when he stops using it.
+//
+// "mark"/"marc" are deliberately included despite being ordinary words — the
+// regex is start-anchored, so they only match at the head of an utterance, and
+// a false wake in WAKE mode costs one turn shown on screen, not an action.
+const WAKE_RE = /^(?:(?:hey|hi|ok|okay|oi)\s+)?(?:wake\s*up[,]?\s+)?(?:marco|marko|marcos|marcus|margo|marge|macro|mako|marc|mark|narco|barco|jarvis|javas?|jarvas|jarvi|jarvish?|jarves|jervis|gervais|harvis|drivers|davis)\b[,.!?]?\s*(.*)$/i;
 
 function armVoice() {
   if (armed || voiceMode === 'off') return;
@@ -1395,10 +1406,10 @@ function startListening() {
     lastSrError = e.error || 'unknown';
     srBackoff = Math.min(5000, srBackoff * 2);
     if (e.error === 'not-allowed') {
-      addChat('JARVIS', 'Microphone permission is blocked, sir — allow it for this site in browser settings, then tap the voice button.');
+      addChat('MARCO', 'Microphone permission is blocked, sir — allow it for this site in browser settings, then tap the voice button.');
       setVoiceMode('off');
     } else if (e.error === 'service-not-allowed') {
-      addChat('JARVIS', IS_IOS
+      addChat('MARCO', IS_IOS
         ? 'Speech recognition is unavailable, sir — enable Siri & Dictation in the iPhone Settings, then reopen the deck.'
         : 'The speech service refused, sir — I will keep retrying.');
     } else if (e.error === 'network') {
@@ -1533,7 +1544,7 @@ function handleUtterance(said) {
     const cmd = bm[1].trim();
     if (cmd) return sendCommand(cmd);
     awaitingCommand = Date.now() + 15000;
-    addChat('JARVIS', 'Sir?', null); // interrupted: acknowledge silently on screen, ear open
+    addChat('MARCO', 'Sir?', null); // interrupted: acknowledge silently on screen, ear open
     return;
   }
   // Just FINISHED talking. This is where the loop actually got in: the 25s
@@ -1561,7 +1572,7 @@ function routeUtterance(said) {
     if (cmd) return sendCommand(cmd);
     awaitingCommand = Date.now() + 15000;
     updateOrbLabel();
-    addChat('JARVIS', 'Sir?');
+    addChat('MARCO', 'Sir?');
     return;
   }
   if (Date.now() < awaitingCommand) {
@@ -1627,7 +1638,7 @@ function openFollowUpWindow() {
     if (voiceMode === 'wake') {
       // Never a silent state change (2026-07-28's lesson): say on screen why
       // the next utterance will be ignored.
-      addChat('JARVIS', '(that’s a few turns without my name — say “Jarvis” to keep going)', null);
+      addChat('MARCO', '(that’s a few turns without my name — say “Marco” to keep going)', null);
       updateOrbLabel();
     }
     return;
@@ -1646,7 +1657,7 @@ setInterval(() => {
   if (voiceMode === 'live' && liveSince && Date.now() - liveSince > LIVE_MAX_MS) {
     setVoiceMode('wake');
     updateMicBtn();
-    addChat('JARVIS', '(mic had been live for 30 minutes — back to wake-word mode; tap the mic or say “Jarvis” when you need me)', null);
+    addChat('MARCO', '(mic had been live for 30 minutes — back to wake-word mode; tap the mic or say “Marco” when you need me)', null);
   }
   // This one mattered most: it fires every 3s regardless of what else is
   // happening, so without S.thinking it would force the mic open in the middle
@@ -1655,7 +1666,7 @@ setInterval(() => {
   if (armed && voiceMode !== 'off' && !listening && !busy && !document.hidden) startListening();
 }, 3000);
 
-const MODE_LABEL = { wake: '👂 WAKE: “JARVIS…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };
+const MODE_LABEL = { wake: '👂 WAKE: “MARCO…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };
 function updateMicBtn() {
   $('btn-mic').classList.toggle('live', voiceMode === 'live');
   $('btn-mic').textContent = (voiceMode !== 'off' && !armed) ? '👂 TAP TO ARM VOICE' : MODE_LABEL[voiceMode];
@@ -1746,7 +1757,7 @@ $('btn-mic').onclick = () => {
   // WAKE → LIVE → OFF as before.
   if (interruptSpeech()) return;
   if (!SRCls) {
-    return addChat('JARVIS', location.protocol === 'https:'
+    return addChat('MARCO', location.protocol === 'https:'
       ? 'This browser has no speech recognition, sir — Safari or Chrome will hear you. You can always type below.'
       : 'Voice needs the secure https address, sir — open the deck via the tailnet URL.');
   }
@@ -1781,17 +1792,17 @@ $('btn-demo').onclick = () => {
   // "420 dollars" — spoken aloud, unlabelled. Demo only, never on a real
   // deck that has simply lost its link.
   if (!SIM_MODE) {
-    addChat('JARVIS', 'I can\'t give you a briefing right now, sir — the link to the box is down, so I have no real figures to brief you from.');
+    addChat('MARCO', 'I can\'t give you a briefing right now, sir — the link to the box is down, so I have no real figures to brief you from.');
     return;
   }
   if (demoRunning) return; demoRunning = true;
   const seq = [
     ['YOU', 'Jarvis, give me the morning briefing.', 0],
-    ['JARVIS', 'Certainly, sir. Overnight: zoobicon build 413 passed all tests and is ready to deploy. The CFO matched 96 percent of June invoices. One legal flag — clause 14 in the vendor MSA. And gatetest.ai launch posts are queued.', 1200],
+    ['MARCO', 'Certainly, sir. Overnight: zoobicon build 413 passed all tests and is ready to deploy. The CFO matched 96 percent of June invoices. One legal flag — clause 14 in the vendor MSA. And gatetest.ai launch posts are queued.', 1200],
     ['YOU', 'Deploy zoobicon and approve the marketing budget.', 9000],
-    ['JARVIS', 'Deploying build 413 via canary now. Marketing budget of 420 dollars approved and logged with the CFO. Anything else, sir?', 10800],
+    ['MARCO', 'Deploying build 413 via canary now. Marketing budget of 420 dollars approved and logged with the CFO. Anything else, sir?', 10800],
     ['YOU', 'No, that will be all.', 16500],
-    ['JARVIS', 'Very good, sir. I shall keep watch.', 17600],
+    ['MARCO', 'Very good, sir. I shall keep watch.', 17600],
   ];
   seq.forEach(([who, text, d]) => setTimeout(() => addChat(who, text), d));
   setTimeout(() => { demoRunning = false; }, 20000);
@@ -2207,7 +2218,7 @@ function simReply(cmd) {
   else if (/approve/.test(c)) r = 'Approved and logged, sir. The CFO has released the funds and the audit trail is recorded in ledger reference 8812.';
   else if (/hello|hi|hey|jarvis/.test(c)) r = 'At your service, sir. Always.';
   else r = 'Acknowledged. I have decomposed that into objectives and delegated to the appropriate department heads. QA will verify before anything reaches your desk — I will report back shortly.';
-  setTimeout(() => addChat('JARVIS', r), 700);
+  setTimeout(() => addChat('MARCO', r), 700);
 }
 
 // ── Live link ────────────────────────────────────────────────────────────────
@@ -2244,7 +2255,7 @@ function connectWS() {
     lastMsgAt = Date.now();
     markStale(false);
     setLink('LIVE');
-    addChat('JARVIS', 'Live link established, sir. You are seeing real telemetry.');
+    addChat('MARCO', 'Live link established, sir. You are seeing real telemetry.');
   };
   ws.onmessage = (ev) => {
     lastMsgAt = Date.now();
@@ -2448,7 +2459,7 @@ if (qs.get('demo-briefing')) showBriefing({
 // down his own microphone. Craig's deck said it out loud: "that's the boot
 // chime bleeding back through again... I'm already up and we're
 // mid-conversation." A boot status line has no business being spoken late.
-addChat('JARVIS', 'Good evening, sir. Command Deck online. Establishing live link…', null);
+addChat('MARCO', 'Good evening, sir. Command Deck online. Establishing live link…', null);
 if (SIM_MODE) startSim();
 renderStats();
 connectWS();

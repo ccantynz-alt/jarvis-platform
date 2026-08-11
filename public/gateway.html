@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Jarvis">
+<meta name="apple-mobile-web-app-title" content="Marco">
 <meta name="theme-color" content="#06090f">
 <link rel="apple-touch-icon" href="/icon-180.png">
-<title>JARVIS</title>
+<title>MARCO</title>
 <style>
   :root {
     --bg: #06090f; --panel: #0b1220; --panel2: #101a2e; --line: #1b2a45;
@@ -130,7 +130,7 @@
 <body data-jstate="idle">
 <header>
   <span class="dot" id="connDot"></span>
-  <span class="logo">JARVIS</span>
+  <span class="logo">MARCO</span>
   <span class="spacer"></span>
   <button class="hbtn" id="muteBtn" title="Toggle speech">🔊</button>
   <button class="hbtn" id="convBtn" title="Hands-free conversation">💬</button>
@@ -143,7 +143,7 @@
 <footer>
   <div class="inputrow">
     <button id="micBtn" title="Push to talk">🎙</button>
-    <input id="textIn" type="text" placeholder="Talk or type to Jarvis…" autocomplete="off">
+    <input id="textIn" type="text" placeholder="Talk or type to Marco…" autocomplete="off">
     <button id="sendBtn">Send</button>
   </div>
   <div id="hint"></div>
@@ -161,7 +161,7 @@
 
 <div id="roadmap" class="drawer-overlay">
   <div id="roadmapPanel">
-    <h2>JARVIS ROADMAP <span class="spacer"></span>
+    <h2>MARCO ROADMAP <span class="spacer"></span>
       <button class="hbtn" id="closeRoadmap">✕</button>
     </h2>
     <div id="roadmapBody">
@@ -190,7 +190,7 @@
   muteBtn.onclick = () => {
     muted = !muted; localStorage.setItem('jarvis_muted', muted ? '1' : '0'); renderMute();
     if (muted) { bargeCancel = true; speechSynthesis.cancel(); document.body.dataset.jstate = 'idle'; }
-    else { ttsPrimed = true; speak('Jarvis voice is on.'); } // in-gesture speech: unlocks iOS audio + audible device test
+    else { ttsPrimed = true; speak('Marco voice is on.'); } // in-gesture speech: unlocks iOS audio + audible device test
   };
 
   // iOS quirk: getVoices() is empty until voiceschanged fires — cache when ready.
