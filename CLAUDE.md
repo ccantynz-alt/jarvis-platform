@@ -160,6 +160,17 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
 - `ANTHROPIC_API_KEY` powers the ~300ms Haiku intent classifier fast-path
   (conversation.js, slack-bridge.js) — NOT brain fallback; don't delete it.
 - Tools + persona: src/lib/brain-tools.js — ONE surface for every provider.
+- **`show_me` puts a page ON CRAIG'S SCREEN (2026-08-11)** — the deck, so it
+  works on iPad and phone too, needs nothing running on his PC. Capture goes
+  through browser-service's SSRF-guarded `/browser/render` (never the raw
+  screenshot service — the URL comes from a model reading untrusted pages),
+  the deck serves it via `GET /shot/:name` (basename + `.png` allowlist +
+  prefix assertion) and broadcasts `{type:'show'}` from `POST /internal/show`.
+  Only the FILENAME crosses to the client, never a box path. It reports
+  `shown:false` when no deck is open rather than claiming it landed. Screenshot
+  not iframe, because X-Frame-Options blocks most real sites; the panel carries
+  the live URL so he can open it properly. QA: `?demo-show=<capture.png>`.
+  Tests: `test/deck-show.test.js`.
 - Evidence of what the brain actually did:
   `/root/.claude/projects/-opt-jarvis/*.jsonl`, not service logs.
 

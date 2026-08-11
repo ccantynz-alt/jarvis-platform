@@ -60,6 +60,20 @@ stay silent.
 
 ---
 
+**A capture is only as good as what had painted (2026-08-11).** The first real
+`show_me` put DavenRoe's **"Loading…" spinner** on Craig's screen: the render
+path waited for `domcontentloaded` + 600ms, and a client-rendered app has
+painted nothing at that point. Half the web is SPAs, so a "show me" that
+photographs spinners is worthless. Now: `waitForLoadState('networkidle')`,
+BOUNDED (a page that polls or holds a websocket never reaches networkidle at
+all) plus a short settle — both best-effort, because a picture arriving late is
+a worse failure than one arriving slightly early. The same fix improves
+`render_page`, which had been reading half-built pages all along.
+*Second thing that capture taught:* the panel's fixed `max-height` on the image
+pushed the "open it properly" link off the bottom — the one control that turns a
+photograph back into a usable page. The image now shrinks and the footer never
+does. Both were found by LOOKING at the screenshot (Rule 2), not by testing.
+
 ## The brain
 
 **Subscription-only (Craig's ruling 2026-07-26).** On 2026-07-25 a total
