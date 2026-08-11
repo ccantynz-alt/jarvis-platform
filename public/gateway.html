@@ -257,11 +257,20 @@
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 1.0; u.pitch = 0.85; u.volume = 1; // measured, slightly deep — closest browser TTS gets to a Jarvis timbre
-    // Prefer iOS's British male voices (Daniel is the classic butler voice); enhanced variants win when installed
-    const prefer = ['daniel', 'arthur', 'oliver', 'jamie'];
-    u.voice = prefer.map(n => voiceCache.find(v => v.name.toLowerCase().includes(n) && /premium|enhanced/i.test(v.name)))
+    // Free British male voices, best-first across the platforms Craig uses:
+    // Chrome desktop ("Google UK English Male" — the one he asked for by
+    // memory), Windows/Edge (Ryan/George/Thomas), then Apple's British males
+    // (Daniel is the classic butler voice on iPad). Enhanced/premium/natural
+    // variants win when installed. Kept in step with command-deck.html's
+    // pickBritishMaleVoice() — same list, same order, same \bmale\b rule:
+    // /male/ matches "Female" as a substring, which silently picked the wrong
+    // voice on desktop (2026-08-11).
+    const prefer = ['google uk english male', 'microsoft ryan', 'microsoft george',
+      'microsoft thomas', 'daniel', 'arthur', 'oliver', 'jamie'];
+    u.voice = prefer.map(n => voiceCache.find(v => v.name.toLowerCase().includes(n) && /premium|enhanced|natural/i.test(v.name)))
         .find(Boolean)
       || prefer.map(n => voiceCache.find(v => v.name.toLowerCase().includes(n))).find(Boolean)
+      || voiceCache.find(v => /en[-_]GB/i.test(v.lang) && /\bmale\b/i.test(v.name))
       || voiceCache.find(v => /en[-_]GB/i.test(v.lang))
       || voiceCache.find(v => /en[-_](AU|NZ)/i.test(v.lang))
       || voiceCache.find(v => /^en/i.test(v.lang)) || null;

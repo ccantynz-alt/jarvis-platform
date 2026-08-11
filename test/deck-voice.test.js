@@ -1,0 +1,83 @@
+// Which voice Marco speaks in, extracted from the shipped HTML and run.
+//
+// Craig, 2026-08-11: "we had a nice english male voice before, which free".
+// He had. The deck picked it with:
+//
+//   /en-GB/.test(lang) && /male|daniel|arthur/i.test(name)
+//
+// and "Google UK English FEMALE" satisfies that, because "Female" CONTAINS
+// "male". So on Chrome desktop the deck picked whichever of the two Google UK
+// voices the browser enumerated first — while the code read as if it had
+// deliberately chosen a male one. Nothing failed; it just sounded wrong.
+//
+// The fix is \bmale\b (no word boundary exists after "Fe", so it cannot match
+// inside "Female") plus an explicit best-first list of the FREE British male
+// voices on the platforms he actually uses.
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'fs';
+
+// CRLF-normalised: a Windows checkout gives \r\n, and `.` never matches \r.
+const html = readFileSync(new URL('../public/command-deck.html', import.meta.url), 'utf8')
+  .replace(/\r\n/g, '\n');
+
+const prefs = html.match(/const VOICE_PREFS = \[[\s\S]*?\];/);
+assert.ok(prefs, 'VOICE_PREFS not found in command-deck.html');
+const fn = html.match(/function pickBritishMaleVoice\(voices = voiceCache\) \{[\s\S]*?\n\}/);
+assert.ok(fn, 'pickBritishMaleVoice not found — did the voice section move?');
+
+const pick = new Function('voices', `
+  ${prefs[0]}
+  ${fn[0].replace('voices = voiceCache', 'voices')}
+  return pickBritishMaleVoice(voices);
+`);
+
+const v = (name, lang) => ({ name, lang });
+
+// The real Chrome-on-Windows list, in the order Chrome actually returns it —
+// Female BEFORE Male, which is what made this bite.
+const CHROME_WIN = [
+  v('Microsoft David - English (United States)', 'en-US'),
+  v('Microsoft Zira - English (United States)', 'en-US'),
+  v('Google UK English Female', 'en-GB'),
+  v('Google UK English Male', 'en-GB'),
+  v('Google US English', 'en-US'),
+];
+
+test('THE BUG: "Female" contains "male" — the naive test picks the wrong voice', () => {
+  // Proof the old predicate was genuinely wrong, not a style preference.
+  assert.equal(/male/i.test('Google UK English Female'), true, 'substring match is real');
+  assert.equal(/\bmale\b/i.test('Google UK English Female'), false, 'the fix excludes it');
+  assert.equal(/\bmale\b/i.test('Google UK English Male'), true, 'and still admits the real one');
+});
+
+test('Chrome desktop gets the male voice even though Female is listed first', () => {
+  assert.equal(pick(CHROME_WIN).name, 'Google UK English Male');
+});
+
+test('iPad falls to Daniel, the classic British butler voice', () => {
+  const IOS = [v('Samantha', 'en-US'), v('Karen', 'en-AU'), v('Daniel', 'en-GB'), v('Martha', 'en-GB')];
+  assert.equal(pick(IOS).name, 'Daniel');
+});
+
+test('an enhanced variant wins over the plain one', () => {
+  const withEnhanced = [v('Daniel', 'en-GB'), v('Daniel (Enhanced)', 'en-GB')];
+  assert.equal(pick(withEnhanced).name, 'Daniel (Enhanced)');
+  const natural = [v('Microsoft Ryan Online (Natural) - English (United Kingdom)', 'en-GB'), v('Daniel', 'en-GB')];
+  assert.equal(pick(natural).name, 'Microsoft Ryan Online (Natural) - English (United Kingdom)');
+});
+
+test('with no British voice at all it degrades sanely rather than going mute', () => {
+  const usOnly = [v('Microsoft Zira - English (United States)', 'en-US')];
+  assert.equal(pick(usOnly).name, 'Microsoft Zira - English (United States)');
+  // A voiceless browser must return null, never throw — speak() checks for null.
+  assert.equal(pick([]), null);
+  assert.equal(pick(undefined), null);
+});
+
+test('the gateway keeps the same rule — the two surfaces must not drift', () => {
+  const gw = readFileSync(new URL('../public/gateway.html', import.meta.url), 'utf8');
+  assert.match(gw, /google uk english male/, 'gateway lost the free desktop voice');
+  assert.match(gw, /\\bmale\\b/, 'gateway still uses the substring test that matches "Female"');
+});

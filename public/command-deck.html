@@ -1129,12 +1129,48 @@ function playNeural(blob) {
   });
 }
 
+// The free British male voice, chosen deliberately (2026-08-11). Craig: "we had
+// a nice english male voice before, which free" — this is it, and the reason it
+// stopped being reliable is a substring bug worth remembering:
+//
+//   /male/i.test('Google UK English Female')  ===  TRUE
+//
+// "Female" CONTAINS "male", so the old test picked whichever of the two Google
+// UK voices the browser happened to enumerate first, while looking correct.
+// \bmale\b does not match inside "Female" (no word boundary after "Fe"), which
+// is the whole fix. Named voices are tried first anyway, so we rarely rely on it.
+//
+// Order is best-first across the platforms Craig actually uses: Chrome desktop
+// ("Google UK English Male" — free, and the one he remembers), Windows/Edge
+// (Ryan/George/Thomas), then Apple's British males (Daniel is the classic
+// butler voice on iPad/iPhone). Enhanced/premium/natural variants win when the
+// user has installed them.
+const VOICE_PREFS = [
+  'google uk english male',
+  'microsoft ryan', 'microsoft george', 'microsoft thomas',
+  'daniel', 'arthur', 'oliver', 'jamie',
+];
+function pickBritishMaleVoice(voices = voiceCache) {
+  const list = Array.isArray(voices) ? voices : [];
+  const byName = (n, extra) => list.find(v => {
+    const name = String(v.name || '').toLowerCase();
+    return name.includes(n) && (!extra || extra.test(v.name));
+  });
+  for (const n of VOICE_PREFS) { const v = byName(n, /premium|enhanced|natural/i); if (v) return v; }
+  for (const n of VOICE_PREFS) { const v = byName(n); if (v) return v; }
+  return list.find(v => /en[-_]GB/i.test(v.lang) && /\bmale\b/i.test(v.name))
+    || list.find(v => /en[-_]GB/i.test(v.lang))
+    || list.find(v => /en[-_](AU|NZ)/i.test(v.lang))
+    || list.find(v => /^en/i.test(v.lang))
+    || list[0] || null;
+}
+
 function speakBrowserAsync(text) {
   return new Promise((resolve) => {
     if (!window.speechSynthesis) return resolve();
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
-    const v = voiceCache.find(v => /en-GB/i.test(v.lang) && /male|daniel|arthur/i.test(v.name)) || voiceCache.find(v => /en-GB/i.test(v.lang)) || voiceCache[0];
+    const v = pickBritishMaleVoice();
     if (v) u.voice = v;
     u.rate = 1.02; u.pitch = 0.9;
     let done = false;
