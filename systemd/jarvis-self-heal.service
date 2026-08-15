@@ -11,7 +11,15 @@ WorkingDirectory=/opt/jarvis
 EnvironmentFile=/opt/jarvis/config/secrets.env
 EnvironmentFile=/opt/jarvis/config/self-heal.env
 ExecStart=/usr/bin/node src/self-heal.js
-TimeoutStartSec=120
+# 2026-08-15: was 120, which no full tick could fit inside. snapshot() alone is
+# budgeted 300000ms (self-heal.js:203) for DB-backed platforms, plus a 20s live
+# probe and the dispatch call — so vapron was probed and SIGTERM'd every 5
+# minutes and could never actually be repaired, while nothing reported a
+# failure. 600 clears the worst realistic tick (two concurrent dispatches at
+# MAX_CONCURRENT=2, each snapshotting first) with margin. A tick that outruns
+# the 5-minute timer simply causes systemd to skip the next trigger, which is
+# correct: a repair already in flight should not be piled on.
+TimeoutStartSec=600
 
 # Rule 4 safety net (fleet standard) — see jarvis-memory.service for rationale.
 # 2026-07-24: this file was reconstructed from the box's REAL unit (found at

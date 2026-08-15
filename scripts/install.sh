@@ -144,13 +144,23 @@ failed=""
 for unit in $JARVIS_DIR/systemd/jarvis-*.service $JARVIS_DIR/systemd/jarvis-*.timer; do
   [ -f "$unit" ] || continue
   name=$(basename "$unit")
-  case "$name" in
-    # oneshots are driven by their timers, never started directly here
-    jarvis-fleet-check.service|jarvis-self-heal.service|jarvis-code-health.service|jarvis-backup.service|jarvis-vapron-backup.service)
-      systemctl enable "$name" >/dev/null 2>&1
-      continue
-      ;;
-  esac
+  # A Type=oneshot service is driven by its .timer and is never touched here.
+  #
+  # 2026-08-15: this used to be a hardcoded list of five unit names, and four
+  # oneshots added since (fix-runner, review-runner, harvester, experience) were
+  # never added to it — so they fell through to `systemctl restart`, which on a
+  # oneshot BLOCKS until the unit completes. Running install.sh therefore fired a
+  # live FIX_RUNNER_MODE=live tick — dispatching full-permission repair agents at
+  # product repos, from stale findings, on a half-installed box — plus a harvester
+  # run that spawns Claude agents, and blocked the installer for up to ~73
+  # minutes. A rebuild is exactly when the box is least ready for that.
+  #
+  # Reading Type= from the unit means the next oneshot is covered on the day it
+  # is added, with nothing to remember.
+  if [ "${name##*.}" = "service" ] && grep -qE '^[[:space:]]*Type=oneshot' "$unit"; then
+    echo "  skip $name — timer-driven oneshot (its .timer is enabled below)"
+    continue
+  fi
   systemctl enable "$name" >/dev/null 2>&1
   systemctl restart "$name" || failed="$failed $name"
   sleep 1

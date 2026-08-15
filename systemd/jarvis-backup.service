@@ -12,6 +12,22 @@ StandardOutput=journal
 StandardError=journal
 Environment=NODE_ENV=production
 
+# 2026-08-15: this was the ONLY Type=oneshot unit in the fleet with no
+# TimeoutStartSec, and the default is no timeout at all. backup-memory.sh now
+# ends with an off-box SSH push whose only bound is `-o ConnectTimeout=15` —
+# which covers the TCP handshake, not the transfer, and there is no
+# ServerAliveInterval/ServerAliveCountMax. A tailnet partition after the session
+# is established, or a stalled remote cat/gunzip on 158, hangs ssh forever; the
+# unit then sits in `activating` permanently and systemd SKIPS every subsequent
+# timer activation. The SQLite backup stops running for good, silently, while
+# `systemctl list-timers` still shows it scheduled and nothing goes red.
+#
+# That is the fleet-check hang (2026-07-30) landing on the backups instead. 1800
+# clears a slow but real off-box push with margin; past that the run is wedged,
+# and a killed run that the next timer retries is strictly better than a wedged
+# one that stops the timer forever.
+TimeoutStartSec=1800
+
 # Rule 4 safety net (2026-07-20) — see jarvis-memory.service for rationale.
 MemoryMax=512M
 CPUQuota=100%

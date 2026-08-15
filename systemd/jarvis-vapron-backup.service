@@ -7,3 +7,11 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/opt/jarvis/scripts/pull-vapron-backup.sh
 TimeoutStartSec=600
+
+# Rule 4 safety net (added 2026-08-15) — see jarvis-memory.service for
+# rationale. This was the one unit in the fleet with no MemoryMax, and it
+# streams and gunzips a whole Postgres/SQLite copy off box 158 on a box that
+# also hosts AlecRae, Gluecron, GateTest and the Coolify stack. Found by
+# test/systemd-invariants.test.js, which asserts the rule rather than the file.
+MemoryMax=512M
+CPUQuota=100%

@@ -34,6 +34,7 @@
  */
 
 import { spawnProcess } from './lib/spawn-agent.js';
+import { classifyScan } from './lib/gate-outcome.js';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -193,7 +194,6 @@ async function runGateTestScan(url) {
     const res = await spawnProcess('node',
       [`${GATETEST_PATH}/bin/gatetest.js`, '--suite', 'web', '--project', workspace],
       { env: process.env, timeoutMs: SCAN_TIMEOUT_MS });
-    const exitCode = res.timedOut ? 1 : (typeof res.code === 'number' ? res.code : 1);
     const output = res.timedOut
       ? `${res.stdout}\nSCAN TIMED OUT after ${Math.round(SCAN_TIMEOUT_MS / 1000)}s (process tree killed)\n${res.stderr}`
       : `${res.stdout}\n${res.stderr}`;
@@ -203,11 +203,32 @@ async function runGateTestScan(url) {
       report = JSON.parse(readFileSync(join(workspace, '.gatetest', 'reports', 'gatetest-report-latest.json'), 'utf8'));
     } catch { /* report may not exist if the run crashed before writing one */ }
 
-    const criticalCount = report?.summary?.checks?.errors ?? (exitCode !== 0 ? 1 : 0);
+    const verdict = classifyScan(res, report);
+    const criticalCount = verdict.criticalCount;
     const failedModuleNames = (report?.failures || []).map((f) => f.module || f.name).filter(Boolean);
 
+    // ---- a timeout is NOT a finding (2026-08-15) ----
+    // `blocked` used to be a bare `exitCode !== 0`, and the line above forces
+    // exitCode = 1 when the scan times out. So "the scan did not finish" took the
+    // exact same branch as "the scan found a critical defect" — and that branch
+    // dispatches a full-permission repair agent, as root, into the platform's
+    // own checkout, with a prompt ending "then commit and push as usual". No
+    // proposal, no officer review, no jarvis/fix-<id> branch restriction, no
+    // CAUTION_RE, no denied-platform list: none of the governance machinery in
+    // lib/fix-dispatch.js sits on this path, which predates it.
+    //
+    // The trigger needs no defect at all, only slowness. fleet-check.sh's own
+    // comment records vapron.ai returning 000 on 19 of 144 probes (13%) from
+    // slowness alone, and alecrae — which fix-dispatch.js:49 denies by standing
+    // rule as a live co-tenant of this box — is reachable through here.
+    //
+    // Inconclusive is now its own outcome: no dispatch, no invented health
+    // score, and a human is told the gate did not actually run. The decision
+    // itself lives in lib/gate-outcome.js so it can be tested without spawning
+    // a browser — see test/gate-outcome.test.js.
     return {
-      blocked: exitCode !== 0,
+      blocked: verdict.outcome === 'blocked',
+      inconclusive: verdict.outcome === 'inconclusive',
       criticalCount,
       summary: failedModuleNames.length > 0
         ? `${criticalCount} error(s) across: ${failedModuleNames.slice(0, 10).join(', ')}`
@@ -244,6 +265,25 @@ async function processSession(session) {
   } catch (e) {
     logEvent('SCAN_FAIL', `session ${session.id} (${platform}): ${e.message}`);
     recordRun(session.id, platform, url, 'scan-failed', 0, e.message);
+    return;
+  }
+
+  if (result.inconclusive) {
+    // The gate did not run. Say so, dispatch nothing, and do NOT write a health
+    // score — there is no measurement behind either number. Craig gets one
+    // message that names the real problem (the scan is too slow to finish here),
+    // instead of an agent silently rewriting a platform that was never diagnosed.
+    logEvent('SCAN_TIMEOUT', `session ${session.id} (${platform}): scan did not finish — no auto-fix dispatched`);
+    recordRun(session.id, platform, url, 'scan-timeout', 0, result.summary);
+    await slackSend(
+      `⏱️ *DEPLOY GATE — ${platform} — SCAN DID NOT FINISH*\n` +
+      `The GateTest scan of ${url} after session ${session.id} hit its time limit and was killed.\n` +
+      `This is NOT a finding: nothing was diagnosed, so no auto-fix was dispatched and no health score was written.\n` +
+      `${result.summary}\n` +
+      `If this repeats, the scan budget or the site's response time needs a human look.`,
+      'warning',
+      `deploy-gate-${platform}-timeout`,
+    );
     return;
   }
 

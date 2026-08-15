@@ -24,5 +24,14 @@ TimeoutStartSec=2100
 MemoryMax=768M
 CPUQuota=100%
 
-[Install]
-WantedBy=multi-user.target
+# NO [Install] SECTION, deliberately (2026-08-15).
+#
+# This unit is driven ONLY by its .timer, whose OnBootSec delay exists to stop a
+# restart storm becoming a dispatch/review/spawn storm — the timer files say so
+# in their own comments. An [Install] WantedBy=multi-user.target defeats that
+# completely: once enabled, boot starts this unit immediately and the timer's
+# delay never applies, so a reboot dispatched a repair agent at t=0.
+#
+# The four original oneshots (fleet-check, self-heal, backup, vapron-backup)
+# correctly never had one; these five acquired it by copy-paste. Enable the
+# .timer, never the .service. test/systemd-invariants.test.js pins this.

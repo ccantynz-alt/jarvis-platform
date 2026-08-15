@@ -175,6 +175,45 @@ export function rollDay(s, day = today()) {
   return { ...s, day, attemptsToday: countIsToday ? s.attemptsToday : 0 };
 }
 
+/**
+ * Every marker that gates a once-a-day `alert` about a condition only Craig can
+ * clear. THE LIST IS THE MECHANISM: `claimDailyNotice` stamps one of these and
+ * `clearDailyNotices` wipes all of them on recovery, so adding a new
+ * human-must-act branch means adding one string here and nothing else.
+ *
+ * This exists because the pattern was previously copied by hand into each
+ * branch, and the third one to need it never got it (2026-08-15). That branch —
+ * the daily-repair-cap escalation — sat directly beneath a comment explaining
+ * the flood it was about to cause, and produced ~246 max-priority pushes a day
+ * for any platform down past its cap: the 235-in-48h craig-pc flood again, from
+ * the same root cause, one branch over. `alert` bypasses push dedupe and the
+ * hourly cap, and this unit is Type=oneshot so push.js's in-process suppression
+ * is empty on every tick; nothing downstream can save a missing marker here.
+ */
+export const DAILY_NOTICE_KEYS = ['manualNoticeDay', 'dnsNoticeDay', 'capNoticeDay'];
+
+/**
+ * Pure. Decide whether today's once-a-day notice for `key` is still owed, and
+ * return the state that records having sent it. Caller announces only when
+ * `announce` is true, and persists `state` either way.
+ */
+export function claimDailyNotice(s, key, day = today()) {
+  if (!DAILY_NOTICE_KEYS.includes(key)) throw new Error(`unknown daily notice key: ${key}`);
+  if (s && s[key] === day) return { announce: false, state: s };
+  return { announce: true, state: { ...s, [key]: day } };
+}
+
+/**
+ * Pure. Clear every daily marker — called the moment a platform comes back, so
+ * the next outage announces immediately instead of being suppressed by a marker
+ * left over from the previous one.
+ */
+export function clearDailyNotices(s) {
+  const out = { ...s };
+  for (const k of DAILY_NOTICE_KEYS) out[k] = null;
+  return out;
+}
+
 async function memSummary() {
   const r = await fetch(`${MEMORY}/memory/summary`);
   const t = (await r.text()).replace(/<!DOCTYPE[\s\S]*$/i, '').trim();
@@ -256,7 +295,7 @@ export async function runOnce() {
       // platform resolves again, so the registrar reminder has served its purpose.
       // manualNoticeDay clears for the same reason: a platform that recovered and
       // then failed AGAIN today is a new outage and deserves to be heard.
-      saveState(name, { ...s, firstDown: null, dnsNoticeDay: null, manualNoticeDay: null });
+      saveState(name, clearDailyNotices({ ...s, firstDown: null }));
     }
   }
 
@@ -293,7 +332,7 @@ export async function runOnce() {
     const reachable = entry.server === OWN_IP || /^\d{1,3}(\.\d{1,3}){3}$/.test(entry.server || '');
     // Same helper as the recovered-platform loop above — one place decides how a
     // day rolls over, so the two paths cannot disagree again.
-    const s = rollDay(stateOf(name));
+    let s = rollDay(stateOf(name));   // let: claimDailyNotice returns a new state object
     if (!s.firstDown) s.firstDown = now();
     const downMin = Math.round((now() - s.firstDown) / 60000);
     const url = URLS[name];
@@ -317,8 +356,9 @@ export async function runOnce() {
       // until craig-pc went 'error' nothing unreachable had ever been DOWN.
       // A condition only a human can clear needs a human's rate limit, not a
       // monitor's.
-      if (s.manualNoticeDay !== today()) {
-        s.manualNoticeDay = today();
+      const manualNotice = claimDailyNotice(s, 'manualNoticeDay');
+      s = manualNotice.state;
+      if (manualNotice.announce) {
         await notify({ source: 'self-heal', level: 'alert', title: `🔴 ${name} is down (manual)`, body: `${url || name} HTTP ${code}, ${downMin}m. Not auto-repairable (${entry.server}) — nothing on this box can fix it. I'll remind you once a day while it stays down.`, speech: `${name} is down and needs manual attention.` });
       }
       saveState(name, s); continue;
@@ -350,8 +390,9 @@ export async function runOnce() {
       // is the wrong rate limit for a condition only a human at a registrar can
       // clear. So: its own once-per-day marker. It re-reminds him each day the
       // name is still gone, which for an expiring domain is precisely right.
-      if (s.dnsNoticeDay !== today()) {
-        s.dnsNoticeDay = today();
+      const dnsNotice = claimDailyNotice(s, 'dnsNoticeDay');
+      s = dnsNotice.state;
+      if (dnsNotice.announce) {
         await notify({
           source: 'self-heal', level: 'alert',
           title: `${name} is down because its DOMAIN does not resolve`,
@@ -372,7 +413,23 @@ export async function runOnce() {
     if (now() - s.lastAttempt < COOLDOWN_MIN * 60000) { log(`${name}: in cooldown (${Math.round((now()-s.lastAttempt)/60000)}m/${COOLDOWN_MIN}m)`); saveState(name, s); continue; }
     if (s.attemptsToday >= MAX_ATTEMPTS_PER_DAY) {
       log(`${name}: daily cap hit (${s.attemptsToday}/${MAX_ATTEMPTS_PER_DAY}) — escalate`);
-      await notify({ source: 'self-heal', level: 'alert', title: `⛔ ${name} auto-repair capped`, body: `${name} still down after ${s.attemptsToday} attempts today. Needs a human.`, speech: `${name} keeps failing repair and needs you.` });
+      // ---- a human's rate limit, not a monitor's (2026-08-15) ----
+      // This was the THIRD branch in this function to reach notify() at `alert`
+      // level from a 5-minute timer, and the only one that never got the daily
+      // marker its two siblings above carry (manualNoticeDay, dnsNoticeDay).
+      // `alert` is exempt from push dedupe AND the hourly cap, and this unit is
+      // Type=oneshot so push.js's in-process `recent` map is empty on every
+      // tick — nothing upstream could collapse them. A platform down past its
+      // cap therefore buzzed at max priority every 5 minutes until UTC
+      // midnight, then re-capped and did it again the next day: ~246 pushes a
+      // day, the same magnitude and the same mechanism as the 235-in-48h
+      // craig-pc flood. "Auto-repair is exhausted" is a condition only Craig
+      // can clear, so it gets his rate limit: once a day, cleared on recovery.
+      const capNotice = claimDailyNotice(s, 'capNoticeDay');
+      s = capNotice.state;
+      if (capNotice.announce) {
+        await notify({ source: 'self-heal', level: 'alert', title: `⛔ ${name} auto-repair capped`, body: `${name} still down after ${s.attemptsToday} attempts today. Needs a human. I'll remind you once a day while it stays capped.`, speech: `${name} keeps failing repair and needs you.` });
+      }
       saveState(name, s); continue;
     }
     if (concurrent >= MAX_CONCURRENT) { log(`${name}: at concurrency cap (${concurrent}/${MAX_CONCURRENT}) — defer`); saveState(name, s); continue; }
@@ -387,7 +444,7 @@ export async function runOnce() {
         const live = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(20000) });
         if (live.ok || (live.status >= 300 && live.status < 400)) {
           log(`${name}: memory says error but LIVE probe returned ${live.status} — false alarm, clearing state`);
-          saveState(name, { ...s, firstDown: null, dnsNoticeDay: null, manualNoticeDay: null });   // spread — see the recovered loop above
+          saveState(name, clearDailyNotices({ ...s, firstDown: null }));   // spread — see the recovered loop above
           continue;
         }
       } catch { /* live probe also failed — genuinely down, proceed */ }
@@ -410,6 +467,17 @@ export async function runOnce() {
     // tick that is 288 phone alerts a day about a repair that never started.
     s.lastAttempt = now();
     s.attemptsToday += 1;
+    // ---- and it is durable BEFORE the dispatch, not after (2026-08-15) ----
+    // Counting in memory is not counting. Everything below this line can
+    // outlive the process: dispatchRepair() has no AbortSignal, and this unit
+    // dies at TimeoutStartSec=120 while the vapron snapshot alone is budgeted
+    // 300000ms. A SIGTERM anywhere in the try block discarded lastAttempt and
+    // attemptsToday entirely — so a repair agent could be running with the
+    // counter that bounds it rolled back to zero, and the next tick would
+    // dispatch again 5 minutes later with neither the 30-minute cooldown nor
+    // the daily cap ever engaging. That is the 117-dispatch shape, arrived at
+    // from an unpersisted counter rather than a NaN one.
+    saveState(name, s);
     try {
       const res = await dispatchRepair(name, url, code, downMin);
       if (res.error) {
