@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import express from 'express';
-import { writeFileSync, mkdirSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'fs';
+import { createHash, timingSafeEqual } from 'crypto';
 import { clampLimit } from './lib/guardrail.js';
 // The one definition of a finding's identity, shared with code-health.js so the
 // producer and the store cannot disagree about what counts as the same defect.
@@ -21,6 +22,32 @@ db.pragma('journal_mode = WAL');
 db.pragma('busy_timeout = 5000');
 const app = express();
 app.use(express.json());
+
+/**
+ * Proof that a state change was made by a HUMAN, not by an agent claiming to be
+ * one. See the transition route for the full reasoning.
+ *
+ * The secret is the deck's token, because the deck is the only surface Craig
+ * touches and it already authenticates him. Read lazily on each call so a
+ * rotated token (delete config/deck.token, restart the deck) does not also
+ * require restarting memory-server.
+ *
+ * Compared with timingSafeEqual over SHA-256 digests, matching how every other
+ * token on this box is checked (deck, gateway, dashboard, worker, heartbeat).
+ */
+function humanAssertionSecret() {
+  if (process.env.JARVIS_DECK_TOKEN) return process.env.JARVIS_DECK_TOKEN;
+  try { return readFileSync('/opt/jarvis/config/deck.token', 'utf8').trim(); } catch { return ''; }
+}
+
+function humanAssertionValid(req) {
+  const secret = humanAssertionSecret();
+  const offered = req.get('X-Jarvis-Human-Assert') || '';
+  if (!secret || !offered) return false;   // fail closed: no secret means no humans
+  const a = createHash('sha256').update(secret).digest();
+  const b = createHash('sha256').update(offered).digest();
+  return timingSafeEqual(a, b);
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
@@ -1007,6 +1034,29 @@ app.post('/memory/proposals/:id/transition', (req, res) => {
   const { to, actor_id, actor_kind = 'agent', notes } = req.body || {};
   const row = db.prepare('SELECT * FROM proposals WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'proposal not found' });
+
+  // ---- 'human' must be PROVEN, not asserted (2026-08-15) ----
+  // canTransition()'s strongest branch keys on actor.kind: a human skips
+  // separation of duties, the owning-officer check, requiresHuman()/ALWAYS_HUMAN
+  // (payment, credential, legal_filing, production_data, public_content,
+  // infrastructure) and the "an escalated proposal is Craig's alone" rule. Until
+  // now that branch was unlocked by a JSON field the caller chose for itself, so
+  // one curl to loopback — from any of the dispatched agents that run here as
+  // root with --dangerously-skip-permissions — could approve its own
+  // infrastructure change and have the append-only trail record it as `craig /
+  // human`. That artefact is exactly what due diligence would later ask for.
+  //
+  // The proof is the deck's own token, presented in a header. The deck is the
+  // only surface a human touches, and it already authenticates him.
+  // Fails CLOSED and LOUD: no configured secret means no human assertions at
+  // all, which is the safe direction for a governance gate.
+  if (actor_kind === 'human' && !humanAssertionValid(req)) {
+    console.error(`[memory] REFUSED human assertion on proposal ${req.params.id} from ${req.ip} — falling back to agent rules`);
+    return res.status(403).json({
+      error: 'human actor_kind requires proof',
+      reason: 'Set X-Jarvis-Human-Assert to the deck token. A human approval cannot be asserted by the caller alone.',
+    });
+  }
 
   const actor = { id: actor_id, kind: actor_kind };
   const check = canTransition(row, to, actor);

@@ -299,7 +299,15 @@ app.get('/api/ops', (req, res) => {
 // canTransition() is the single authority. If Craig taps approve on something
 // an agent staged illegally, the gate still refuses and says why.
 app.post('/api/ops/review', async (req, res) => {
-  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  // isAuthed ONLY — no isLocalDirect (2026-08-15). This route asserts
+  // actor_kind:'human' downstream, and isLocalDirect() is true for ANY loopback
+  // request with no X-Forwarded-For: every dispatched agent on this box runs as
+  // root with --dangerously-skip-permissions, so "on the box" was never evidence
+  // that Craig was at the keyboard. The comment above justified the hardcoded
+  // 'human' with "reaching this route already required the deck token" — this
+  // line is what finally makes that true. Marking the inbox read may stay
+  // loopback-friendly; forging a governance approval may not.
+  if (!isAuthed(req)) return res.status(403).json({ error: 'forbidden' });
   const { id, decision, notes } = req.body || {};
   const TO = { approve: 'approved', reject: 'rejected', escalate: 'escalated' };
   if (!Number.isInteger(id) || !TO[decision]) {
@@ -307,7 +315,11 @@ app.post('/api/ops/review', async (req, res) => {
   }
   try {
     const r = await fetch(`${MEMORY}/memory/proposals/${id}/transition`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+      // The human assertion is PROVEN, not just claimed: memory-server rejects
+      // actor_kind:'human' unless this header matches the deck's own token, so a
+      // loopback curl cannot mint a human approval by setting a JSON field.
+      headers: { 'Content-Type': 'application/json', 'X-Jarvis-Human-Assert': AUTH_TOKEN || '' },
       body: JSON.stringify({ to: TO[decision], actor_id: 'craig', actor_kind: 'human', notes: notes || null }),
       signal: AbortSignal.timeout(8000),
     });
@@ -382,6 +394,31 @@ Append <b style="color:#00e5ff">/?token=&lt;deck token&gt;</b> to this address o
   // page load: a device only expires after 30 days of not visiting at all.
   const tok = requestToken(req);
   if (tok && tokenMatches(tok)) res.setHeader('Set-Cookie', authCookieHeader(tok));
+  // ---- CSP: the second lock on the injection path (2026-08-15) ----
+  // showBriefing() concatenated job task text straight into innerHTML, and with
+  // no CSP anywhere on this server an <img onerror> ran in the deck's own origin
+  // — which holds the sliding 30-day cookie, so it could POST /api/ops/review
+  // and forge a human governance approval. The sink is fixed (esc() on every
+  // server value), but the deck renders text written by agents that read
+  // untrusted web pages, so it should not depend on every future render site
+  // remembering. 'unsafe-inline' is unavoidable today: the whole deck is one
+  // file of inline <script> and <style>. It still kills the payload that
+  // mattered, because that one loads REMOTE script — img-src and connect-src
+  // below keep an injected node from reaching an attacker's host at all.
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data: blob:",
+    "connect-src 'self' ws: wss:",
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "object-src 'none'",
+  ].join('; '));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
   res.sendFile('/opt/jarvis/public/command-deck.html');
 });
 

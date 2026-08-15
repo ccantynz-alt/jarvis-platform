@@ -785,7 +785,24 @@ function renderReview() {
     row.querySelector('.rs').textContent = `${p.status} · ${p.risk} · ${p.change_class}`;
     row.querySelector('.rr').textContent = p.review_notes ? `${p.rationale}  —  ${p.reviewed_by || 'officer'}: ${p.review_notes}` : p.rationale;
     const a = row.querySelector('.ra');
-    if (p.artifact_url) { a.href = p.artifact_url; a.textContent = '▸ view the diff'; }
+    // http(s) ONLY (2026-08-15), the same rule showThing() applies to a capture
+    // URL. `artifact_url` is attached by the repair agent itself via
+    // POST /memory/proposals/:id/artifact, which stores whatever string it is
+    // given — no validation server-side, none in deck-server, none here. A
+    // `javascript:` value therefore executed in the deck's origin on the very
+    // click this panel steers Craig into making: it offers APPROVE only once an
+    // artifact exists, i.e. it asks him to view the diff first. One click then
+    // POSTs /api/ops/review as actor_kind:'human' and the audit trail records a
+    // human approval that no human made. target="_blank" is no defence — every
+    // browser runs a javascript: href against the current document regardless.
+    const safeArtifact = /^https?:\/\//i.test(String(p.artifact_url || '')) ? p.artifact_url : null;
+    if (safeArtifact) { a.href = safeArtifact; a.textContent = '▸ view the diff'; }
+    else if (p.artifact_url) {
+      // Refused, and SAID so — a silently dropped link would read as "no diff yet".
+      a.removeAttribute('href');
+      a.textContent = 'artifact link refused (not http/https)';
+      a.style.color = '#ff4d6a';
+    }
     else { a.removeAttribute('href'); a.textContent = 'no artifact attached yet'; a.style.color = '#5f7a8c'; }
     const acts = row.querySelector('.racts');
     // Approve is offered only where a decision is still open, and only with an
@@ -2464,10 +2481,22 @@ document.addEventListener('keydown', (e) => {
 
 function showBriefing(d) {
   const box = $('briefing');
+  // esc() on every server-supplied value (2026-08-15). This helper built the one
+  // panel in the deck that did not escape — showThing() sits 40 lines above and
+  // does it correctly, with test/deck-show.test.js pinning it for exactly this
+  // threat model. The gap was reachable end to end: any process on the box can
+  // POST /dispatch with arbitrary `task` text (orchestrator.js validates none of
+  // it), dispatched agents run as root and are the things that read untrusted
+  // web pages, and `j.task` below lands in innerHTML while the job is running.
+  // With no CSP on the deck, an <img onerror> then executed in the deck's origin
+  // holding its sliding 30-day cookie — enough to POST /api/ops/review, which
+  // stamps actor_kind:'human' and bypasses every separation-of-duties check in
+  // canTransition(). `dot`/`extraColor` stay unescaped: both are literals at the
+  // four call sites below, never server data.
   const row = (dot, name, extra, extraColor) =>
     '<div class="brief-row"><span style="color:' + dot + '">●</span>' +
-    '<span style="font-weight:700;color:#eaffff">' + name + '</span>' +
-    (extra ? '<span class="mono" style="color:' + (extraColor || '#7d99aa') + '">' + extra + '</span>' : '') + '</div>';
+    '<span style="font-weight:700;color:#eaffff">' + esc(name) + '</span>' +
+    (extra ? '<span class="mono" style="color:' + (extraColor || '#7d99aa') + '">' + esc(extra) + '</span>' : '') + '</div>';
   let html = '<div class="brief-card"><div class="brief-h">' +
     '<div style="font-family:\'Michroma\',sans-serif;font-size:14px;letter-spacing:4px;color:#eaffff">BRIEFING</div>' +
     '<div class="mono" style="font-size:11px;color:#6b8a9e">' + new Date(d.date).toLocaleString('en-NZ', { dateStyle: 'full' }) + '</div>' +
@@ -2489,7 +2518,7 @@ function showBriefing(d) {
       d.jobs.map(j => row('#00e5ff', j.platform, j.task)).join('');
   }
   if (d.openIssues) {
-    html += '<div class="brief-sec" style="color:#ffb547">⚠ ' + d.openIssues + ' UNRESOLVED ISSUES IN MEMORY</div>';
+    html += '<div class="brief-sec" style="color:#ffb547">⚠ ' + esc(d.openIssues) + ' UNRESOLVED ISSUES IN MEMORY</div>';
   }
   html += '</div>';
   box.innerHTML = html;
