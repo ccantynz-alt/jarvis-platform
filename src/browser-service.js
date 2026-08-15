@@ -19,6 +19,7 @@ import express from 'express';
 import { chromium } from 'playwright-core';
 import dns from 'dns/promises';
 import net from 'net';
+import { fetchPinned } from './lib/pinned-fetch.js';
 import { appendFileSync, mkdirSync, statSync } from 'fs';
 
 const PORT = 9211;
@@ -111,15 +112,23 @@ async function guard(rawUrl) {
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return { blocked: true, reason: `scheme ${u.protocol} not allowed` };
   const host = u.hostname;
   if (BLOCKED_HOST.test(host)) return { blocked: true, reason: `blocked host ${host}` };
+  // `addrs` is the whole point of the return value, not `ip` (2026-08-15). This
+  // guard used to resolve, validate, and hand back an `ip` that NO CALLER EVER
+  // READ — the request was then made from the NAME, so fetch resolved again on
+  // its own. Check-by-name/connect-by-name is a TOCTOU, and DNS rebinding walked
+  // through it: reproduced live, 35 of 120 attempts reached a loopback-only
+  // server. Callers must now pass `addrs` to fetchPinned so the socket cannot
+  // land anywhere this function did not approve.
   if (net.isIP(host)) {
     if (isPrivateIP(host)) return { blocked: true, reason: `private address ${host}` };
-    return { ok: true, ip: host, url: u };
+    return { ok: true, ip: host, addrs: [{ address: host, family: net.isIP(host) }], url: u };
   }
   let addrs;
   try { addrs = await dns.lookup(host, { all: true }); }
   catch { return { blocked: true, reason: `DNS lookup failed for ${host}` }; }
+  if (!addrs.length) return { blocked: true, reason: `${host} resolved to no addresses` };
   for (const a of addrs) if (isPrivateIP(a.address)) return { blocked: true, reason: `${host} resolves to private ${a.address}` };
-  return { ok: true, ip: addrs[0]?.address, url: u };
+  return { ok: true, ip: addrs[0]?.address, addrs, url: u };
 }
 
 const clip = (s, n = MAX_TEXT) => { s = (s || '').replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); return s.length > n ? s.slice(0, n) + `\n…[truncated ${s.length - n} chars]` : s; };
@@ -134,10 +143,17 @@ app.post('/browser/fetch', async (req, res) => {
     while (hops++ <= MAX_REDIRECTS) {
       const g = await guard(url);
       if (g.blocked) { audit({ action: 'fetch', url, blocked: g.reason }); return res.status(400).json({ error: 'blocked', reason: g.reason }); }
-      const r = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(FETCH_TIMEOUT), headers: { 'User-Agent': 'JarvisBrowser/1.0' } });
-      if (r.status >= 300 && r.status < 400 && r.headers.get('location')) { url = new URL(r.headers.get('location'), url).href; continue; }
-      const ct = r.headers.get('content-type') || '';
-      let body = await r.text();
+      // Pinned to the addresses g just validated — see lib/pinned-fetch.js.
+      // Redirects stay manual so every hop is re-guarded AND re-pinned; a hop
+      // that only re-checked the name would leave the same hole one step later.
+      const r = await fetchPinned(url, {
+        addrs: g.addrs,
+        timeoutMs: FETCH_TIMEOUT,
+        headers: { 'User-Agent': 'JarvisBrowser/1.0' },
+      });
+      if (r.status >= 300 && r.status < 400 && r.headers.location) { url = new URL(r.headers.location, url).href; continue; }
+      const ct = r.headers['content-type'] || '';
+      let body = r.body;
       let title = null;
       if (/html/i.test(ct)) {
         title = (body.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1]?.trim() || null;
@@ -189,6 +205,22 @@ app.post('/browser/render', async (req, res) => {
     // Block any sub-request (and any redirect hop — Playwright's network
     // interception sees each hop as its own request) that targets a
     // private/loopback/metadata/tailnet address.
+    //
+    // KNOWN REMAINING GAP (2026-08-15) — read before trusting this path.
+    // Every hop here is re-guarded by NAME, and Chromium then resolves that name
+    // itself, in its own process, with its own cache. So the address pinning
+    // added to /browser/fetch (lib/pinned-fetch.js) does NOT cover the render
+    // path: a TTL-0 rebinding host can still answer public for guard()'s lookup
+    // and private for the browser's. Playwright's route API exposes no hook to
+    // pin a resolved address, so closing this properly needs one of:
+    //   (a) run Chromium behind a local proxy that enforces the allowlist and
+    //       owns the only resolution, or
+    //   (b) --host-resolver-rules to pin the name to the verified address for
+    //       the lifetime of the context, or
+    //   (c) the raw-CDP Network/Fetch interception that CLAUDE.md Rule 5 already
+    //       names as the way to retire the playwright-core exception.
+    // Until then: show_me is materially weaker than /browser/fetch, and this
+    // comment is the honest statement of it rather than a silent assumption.
     //
     // SECURITY FIX (2026-07-26): this used to only check literal IP addresses
     // and a fixed hostname-suffix list — a hostname whose DNS record simply
