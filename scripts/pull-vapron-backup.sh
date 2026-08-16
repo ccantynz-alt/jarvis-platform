@@ -24,6 +24,20 @@ notify_fail() {
 }
 trap 'notify_fail "see $LOG"' ERR
 
+# The ERR trap alone was NOT enough (found 2026-08-06, fixed 2026-08-16). Both
+# of this script's DELIBERATE exits sit in constructs bash explicitly exempts
+# from errexit and the ERR trap: the left-hand side of a `||` list, and a
+# failing test inside `if`. `exit 3` is not itself a failing command, so the
+# trap never ran. Verified:
+#   bash -c 'set -Eeuo pipefail; trap "echo FIRED" ERR; false || { exit 3; }'
+#   → exits 3, prints nothing.
+# So a failed off-box Vapron backup alerted NOBODY: no push, no inbox row, and
+# jarvis-vapron-backup.service has no OnFailure= while metrics-collector only
+# probes listening ports. The most likely trigger is the most likely condition —
+# 158 unreachable over the tailnet.
+# Every non-zero exit goes through here instead.
+fail() { local rc="$1"; shift; log "$*"; notify_fail "$*"; exit "$rc"; }
+
 mkdir -p "$DEST_DIR"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 SNAP="/tmp/vapron-snap-$STAMP.db"
@@ -33,7 +47,7 @@ log "start: snapshot $BOX:$REMOTE_DB"
 # Consistent online .backup + integrity check ON the source box.
 "${SSH[@]}" "sqlite3 'file:$REMOTE_DB' '.backup $SNAP' && \
   [ \"\$(sqlite3 '$SNAP' 'PRAGMA integrity_check;' | head -1)\" = ok ]" \
-  || { log "snapshot/integrity failed on $BOX"; "${SSH[@]}" "rm -f '$SNAP'" || true; exit 3; }
+  || { "${SSH[@]}" "rm -f '$SNAP'" || true; fail 3 "snapshot/integrity failed on $BOX"; }
 
 EXP="$("${SSH[@]}" "stat -c%s '$SNAP'")"
 "${SSH[@]}" "gzip -c '$SNAP'" > "$DEST"
@@ -41,7 +55,7 @@ EXP="$("${SSH[@]}" "stat -c%s '$SNAP'")"
 
 GOT="$(zcat "$DEST" | wc -c)"
 if [ "$GOT" != "$EXP" ]; then
-  log "SIZE MISMATCH got=$GOT expected=$EXP — discarding"; rm -f "$DEST"; exit 4
+  rm -f "$DEST"; fail 4 "SIZE MISMATCH got=$GOT expected=$EXP — snapshot discarded, no usable backup was written"
 fi
 
 log "ok: $DEST ($(stat -c%s "$DEST") bytes gz, db=$EXP bytes, integrity ok)"

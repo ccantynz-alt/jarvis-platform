@@ -108,15 +108,36 @@ export function parseSessionJsonl(text) {
 }
 
 // ── classification ──────────────────────────────────────────────────────────
-// The brain's conversational sessions carry Craig's voice channel — every turn
-// arrives prefixed with the statusDigest marker. One marker anywhere is enough:
-// this errs toward exclusion, because the cost of wrongly excluding a coding
-// session is one unharvested session, and the cost of wrongly INCLUDING a
-// conversation is private speech in the flywheel.
+// The brain's conversational sessions carry Craig's voice channel. One marker
+// anywhere is enough: this errs toward exclusion, because the cost of wrongly
+// excluding a coding session is one unharvested session, and the cost of
+// wrongly INCLUDING a conversation is private speech in the flywheel.
+//
+// CLAUDE.md calls this exclusion "by construction". It was not (found
+// 2026-08-07, fixed 2026-08-16). It keyed ONLY on the statusDigest prefix
+// below — and brain-claude.js builds that prefix best-effort:
+//   const digest = await Promise.race([statusDigest(gate), <150ms timeout ''>])
+//   ... (digest ? digest + ' ' : '') + userText
+// statusDigest() also returns '' when its three loopback fetches fail. So in
+// exactly the conditions where Craig talks to Jarvis most — memory-server or
+// the orchestrator slow or down — every user turn was his raw speech with NO
+// marker, isConversationSession returned false, and session-harvester indexed
+// the session (cwd, turn counts, up to 500 chars of the reply as `outcome`)
+// and fed an excerpt of his private speech to a distillation agent.
+//
+// CONVERSATION_TAG is now written UNCONDITIONALLY by brain-claude.js, ahead of
+// both the recap and the digest, so it cannot be lost to a race. It is exported
+// from here — the module that owns the privacy decision — so the writer and the
+// reader can never drift apart into two string literals.
+export const CONVERSATION_TAG = '[jarvis-conversation]';
+
+// Legacy: transcripts written before the tag existed. Kept so old sessions on
+// disk stay excluded; new sessions match on the tag.
 const CONVERSATION_MARKER = '[Live status, background only';
 
 export function isConversationSession(parsed) {
-  return parsed.userTexts.some(t => t.startsWith(CONVERSATION_MARKER));
+  return parsed.userTexts.some(t =>
+    t.startsWith(CONVERSATION_TAG) || t.startsWith(CONVERSATION_MARKER));
 }
 
 // Canary probes, empty shells, one-liner checks: nothing to learn, don't spend

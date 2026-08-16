@@ -61,6 +61,49 @@ async function readKey(key) {
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+// ── turn ownership ──────────────────────────────────────────────────────────
+//
+// Rolling a failed turn back by INDEX corrupts the conversation whenever two
+// turns overlap, and they overlap routinely: loadTranscript() hands every
+// socket and every turn the SAME array, the ws message handler is async and the
+// ws library does not await it, and brain-claude.js already documents that "the
+// deck kills the previous VOICE session on a new command but does not await the
+// previous brain turn".
+//
+// The 2026-08-04 sequence: turn A captures before_A = length and pushes userA;
+// turn B captures before_B and pushes userB; turn A then fails its
+// first-token/turn watchdog and runs splice(before_A) — deleting userB, a
+// message it never owned. Craig's second utterance vanished from the durable
+// transcript, so the next turn's recap had no record he had said it.
+//
+// So each turn stamps the messages it pushes and removes exactly those. The tag
+// is a SYMBOL: JSON.stringify skips symbol keys, so the durable KV payload is
+// byte-identical to before and nothing downstream has to learn about it.
+const TURN = Symbol('jarvis.turn');
+let turnSeq = 0;
+
+/** A fresh id for one logical turn. */
+export function newTurnId() { return ++turnSeq; }
+
+/** Stamp a message as belonging to `turnId`, then return it for chaining. */
+export function ownTurn(msg, turnId) {
+  if (msg && turnId != null) msg[TURN] = turnId;
+  return msg;
+}
+
+/** Remove exactly the messages this turn pushed, wherever they now sit. */
+export function rollbackTurn(transcript, turnId) {
+  if (!Array.isArray(transcript) || turnId == null) return 0;
+  let removed = 0;
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    if (transcript[i] && transcript[i][TURN] === turnId) { transcript.splice(i, 1); removed++; }
+  }
+  return removed;
+}
+
+/** Test seam: which turn owns this message. */
+export function turnIdOf(msg) { return msg ? msg[TURN] : undefined; }
+
 /**
  * The shared conversation. Safe to call concurrently — the first call owns the
  * fetch and everyone else awaits it, so two utterances landing together can't

@@ -198,3 +198,33 @@ test('RISK_LEVELS and requiresHuman agree on what exists', () => {
     assert.equal(req, r === 'high', r);
   }
 });
+
+// ── The deck's APPROVE/REJECT buttons could never work ──────────────────────
+// 2026-08-07 finding. POST /api/ops/review forwarded {to:'approved',
+// actor_kind:'human'} straight to the transition endpoint, but TRANSITIONS
+// .proposed is ['under_review','withdrawn'] — no edge to any verdict. Every
+// open proposal sat at 'proposed' (REVIEW_RUNNER_MODE=dry-run never transitions
+// anything), so Craig armed the button, tapped CONFIRM, and got 409 REFUSED
+// for every proposal in the queue. The deck now picks a proposal up into
+// 'under_review' first, which is why this two-step must keep working.
+
+
+test('a human verdict straight from proposed is still refused — the gate is unchanged', () => {
+  for (const to of ['approved', 'rejected', 'escalated']) {
+    assert.equal(canTransition({ status: 'proposed' }, to, CRAIG).allowed, false,
+      `proposed → ${to} must not be a legal edge`);
+  }
+});
+
+test('the deck\'s two-step walks a human decision from proposed to approved', () => {
+  const pickup = canTransition({ status: 'proposed' }, 'under_review', CRAIG);
+  assert.equal(pickup.allowed, true, 'Craig must be able to pick a proposal up');
+  const verdict = canTransition({ status: 'under_review' }, 'approved', CRAIG);
+  assert.equal(verdict.allowed, true, 'and then decide it');
+});
+
+test('the same two-step works for reject and escalate', () => {
+  for (const to of ['rejected', 'escalated']) {
+    assert.equal(canTransition({ status: 'under_review' }, to, CRAIG).allowed, true, to);
+  }
+});

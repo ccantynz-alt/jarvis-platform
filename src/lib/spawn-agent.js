@@ -118,39 +118,59 @@ export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMi
 
   const run = () => spawnProcess('claude', args, { cwd, env: workerEnv(extraEnv), timeoutMin });
   let result = await run();
-  if (result.code !== 0 && !result.timedOut) {
+
+  // A LOOP, not a single check, because the retry's own answer matters as much
+  // as the first one (finding #336). The old shape classified run #1, flipped
+  // to account B, ran again — and returned B's result unexamined. When both
+  // logins were near their 5-hour window (routine; the brain and the workers
+  // share them) B answered "usage limit reached" too, `limitHeld` stayed unset,
+  // orchestrator.js:278 skipped its hold branch, and finishJob marked the job
+  // FAILED. The task was gone, nothing re-queued it, and Craig got a "❌ Job
+  // failed" push blaming the agent. reportExhausted(B) was never called either,
+  // so B was never recorded as exhausted and the next job repeated the whole
+  // dance.
+  //
+  // usage_limit and auth are handled IDENTICALLY here on purpose: both mean
+  // "this login cannot do the work right now", both are survivable by flipping
+  // to the other account, and both must be announced when they are not.
+  //
+  // `auth` was missing entirely until 2026-08-16, and the omission cost three
+  // days: an expired OAuth session made every spawn exit 1 in ~2 seconds, this
+  // branch ignored it, and the eight autonomous timers each reported their own
+  // generic "agent failed" while the fleet did no work at all. The brain had
+  // its own auth reporting, so Craig was told the BRAIN was down — never that
+  // code-health, fix-runner, self-heal, review-runner, the harvester and the
+  // role agents had all stopped with it.
+  let retried = false;
+  while (result.code !== 0 && !result.timedOut) {
     const cls = classifyFailure(result);
-    // usage_limit and auth are handled IDENTICALLY on purpose: both mean "this
-    // login cannot do the work right now", both can be survived by flipping to
-    // the other account, and both must be announced when they cannot.
-    //
-    // `auth` was missing here until 2026-08-16, and the omission cost three
-    // days: an expired OAuth session made every spawn exit 1 in ~2 seconds,
-    // this branch ignored it, and the eight autonomous timers each reported
-    // their own generic "agent failed" while the fleet did no work at all. The
-    // brain had its own auth reporting, so Craig was told the BRAIN was down —
-    // never that code-health, fix-runner, self-heal, review-runner, the
-    // harvester and the role agents had all stopped with it.
-    if (cls.kind === 'usage_limit' || cls.kind === 'auth') {
-      const current = getActiveProfile()?.name;
-      const next = cls.kind === 'auth'
-        ? await reportAuthFailure(current, result.stderr || result.stdout || '').catch(() => null)
-        : await reportExhausted(current, cls.resetAt).catch(() => null);
-      if (next && next !== current) {
-        // Tell the caller BEFORE the second run starts — see onRetry above.
-        // Promise.resolve so a SYNCHRONOUS callback works too — `onRetry(...).catch?.()`
-        // would have thrown a TypeError on a callback that returns undefined,
-        // taking down the very retry it exists to announce.
-        if (onRetry) await Promise.resolve(onRetry({ from: current, to: next })).catch(() => {});
-        result = await run(); // fresh env picks up the flip
-      }
-      // No usable account either way — the caller should re-queue, not burn the
-      // job. `authHeld` is named distinctly from `limitHeld` because the two
-      // need opposite handling by a human: a limit ends by itself, a dead login
-      // ends only when Craig runs `claude login`.
-      else if (cls.kind === 'auth') result.authHeld = true;
-      else result.limitHeld = true;
+    if (cls.kind !== 'usage_limit' && cls.kind !== 'auth') break;
+
+    const current = getActiveProfile()?.name;
+    const next = cls.kind === 'auth'
+      ? await reportAuthFailure(current, result.stderr || result.stdout || '').catch(() => null)
+      : await reportExhausted(current, cls.resetAt).catch(() => null);
+
+    // Only ever flip once per spawn. Without the `retried` latch a box with
+    // three profiles could walk them all inside one job's timeout.
+    if (next && next !== current && !retried) {
+      retried = true;
+      // Tell the caller BEFORE the second run starts — see onRetry above.
+      // Promise.resolve so a SYNCHRONOUS callback works too — `onRetry(...).catch?.()`
+      // would have thrown a TypeError on a callback that returns undefined,
+      // taking down the very retry it exists to announce.
+      if (onRetry) await Promise.resolve(onRetry({ from: current, to: next })).catch(() => {});
+      result = await run();  // fresh env picks up the flip
+      continue;              // …and its result goes back through the classifier
     }
+
+    // No usable account either way — the caller should re-queue, not burn the
+    // job. `authHeld` is named distinctly from `limitHeld` because the two need
+    // opposite handling by a human: a limit ends by itself, a dead login ends
+    // only when Craig runs `claude login`.
+    if (cls.kind === 'auth') result.authHeld = true;
+    else result.limitHeld = true;
+    break;
   }
   // Record the heartbeat that proves spawning still authenticates, and clear a
   // standing auth alert on recovery. Best-effort: a memory-server blip must

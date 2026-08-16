@@ -359,7 +359,6 @@ wss.on('connection', (ws, req) => {
         // otherwise fall back to the frozen keyword/Haiku intent pipeline.
         if (hasAgent()) {
           const transcript = await loadTranscript();
-          const before = transcript.length;
           try {
             const full = await runAgent(transcript, text, (chunk) =>
               ws.send(JSON.stringify({ type: 'reply_chunk', text: chunk })), dispatchGate);
@@ -373,10 +372,12 @@ wss.on('connection', (ws, req) => {
               type: 'reply_done', speech: full.speech, via: 'agent', ms: Date.now() - t0,
             }));
           } catch (e) {
-            // Both brain providers unusable — undo the partial turn and fall
-            // through to the keyword intent pipeline (previously this branch
-            // dead-ended in a generic error and never reached the fallback).
-            transcript.splice(before);
+            // Both brain providers unusable — fall through to the keyword
+            // intent pipeline (previously this branch dead-ended in a generic
+            // error and never reached the fallback). runAgent has already
+            // rolled its own turn back by identity; the `transcript.splice(
+            // before)` that used to sit here truncated by INDEX and could
+            // delete a concurrent turn's messages (2026-08-04 finding).
             console.error('[gateway] agent brain failed, using intent pipeline:', e.message);
             const notice = noteBrainDegraded();
             if (notice) ws.send(JSON.stringify({ type: 'reply', text: notice, speech: notice, interim: true }));

@@ -210,17 +210,63 @@ async function reviewOne(p) {
   }).catch(() => {});
 }
 
+/**
+ * Choose this tick's proposals — a durable round-robin over the queue.
+ *
+ * Two defects, both found 2026-08-07 and both live until 2026-08-16.
+ *
+ * `withArtifact` was computed for the log line and then never used: the loop
+ * iterated `rows`, so a proposal an agent had left with no artifact (a STOP
+ * CONDITION does exactly that, permanently) was reviewed anyway.
+ *
+ * Worse, memory-server returns proposals id DESC and dry-run transitions
+ * nothing, so the same three newest ids sat at the head of the list forever.
+ * The journal caught it: ticks at 19:04, 19:25 and 19:46 each reviewed #11,
+ * #10, #9 with fresh but equivalent verdicts, while #4–#8 were never reviewed
+ * at all. Three subscription turns every 20 minutes — ~216 a day — spent
+ * re-deciding three proposals.
+ *
+ * So: oldest first, resuming after the last id reviewed, wrapping when it runs
+ * off the end. The cursor is durable (KV) because this runs as a oneshot and
+ * in-process state dies with the tick.
+ *
+ * Pure and exported so the rotation is testable without a memory server.
+ */
+export function pickForReview(rows, { cursor = 0, max = 3 } = {}) {
+  const eligible = (Array.isArray(rows) ? rows : [])
+    .filter(p => p && p.artifact_url)
+    .sort((a, b) => a.id - b.id);
+  if (!eligible.length) return [];
+  const after = eligible.filter(p => p.id > cursor);
+  // Wrap: once the tail is reached, start again from the oldest rather than
+  // stalling on an empty slice forever.
+  const ordered = after.concat(eligible.filter(p => p.id <= cursor));
+  return ordered.slice(0, Math.max(0, max));
+}
+
+const CURSOR_KEY = 'review-runner-cursor';
+
 async function tick() {
   if (MODE === 'off') { log('mode=off — nothing to do'); return; }
   const rows = await jget(`${MEMORY}/memory/proposals?status=proposed&limit=50`);
   if (!Array.isArray(rows)) { log('memory unreachable — skipping this tick'); return; }
 
-  const withArtifact = rows.filter(p => p.artifact_url);
-  log(`mode=${MODE} · ${rows.length} awaiting review · ${withArtifact.length} with an artifact`);
+  const cursorKv = await jget(`${MEMORY}/memory/kv/${CURSOR_KEY}`);
+  const cursor = Number(cursorKv?.value) || 0;
 
-  for (const p of rows.slice(0, MAX_PER_TICK)) {
+  const withArtifact = rows.filter(p => p.artifact_url);
+  const batch = pickForReview(rows, { cursor, max: MAX_PER_TICK });
+  log(`mode=${MODE} · ${rows.length} awaiting review · ${withArtifact.length} with an artifact · resuming after #${cursor} · this tick: ${batch.map(p => '#' + p.id).join(' ') || 'none'}`);
+
+  for (const p of batch) {
     try { await reviewOne(p); }
     catch (e) { log(`#${p.id} review failed: ${e.message}`); }
+    // Advance PER PROPOSAL, not at the end: a tick that dies halfway must not
+    // replay the ones it already spent turns on.
+    await fetch(`${MEMORY}/memory/kv`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: CURSOR_KEY, value: String(p.id) }),
+    }).catch(() => {});
   }
 }
 

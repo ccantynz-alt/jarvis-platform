@@ -305,12 +305,38 @@ app.post('/api/ops/review', async (req, res) => {
   if (!Number.isInteger(id) || !TO[decision]) {
     return res.status(400).json({ error: 'id (integer) and decision (approve|reject|escalate) required' });
   }
+  const transition = (to, note) => fetch(`${MEMORY}/memory/proposals/${id}/transition`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to, actor_id: 'craig', actor_kind: 'human', notes: note }),
+    signal: AbortSignal.timeout(8000),
+  });
+
   try {
-    const r = await fetch(`${MEMORY}/memory/proposals/${id}/transition`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: TO[decision], actor_id: 'craig', actor_kind: 'human', notes: notes || null }),
-      signal: AbortSignal.timeout(8000),
-    });
+    // Pick it up before deciding it. TRANSITIONS.proposed is
+    // ['under_review','withdrawn'] — there is no edge from 'proposed' straight
+    // to a verdict, so every tap of APPROVE/REJECT on the deck came back 409
+    // REFUSED. That was EVERY proposal in the queue: REVIEW_RUNNER_MODE=dry-run
+    // never transitions anything, so all 8 open proposals sat at 'proposed'
+    // and the buttons had never once worked (found 2026-08-07, fixed
+    // 2026-08-16).
+    //
+    // Two explicit transitions rather than a new proposed→approved edge, so the
+    // state machine keeps its meaning and the audit trail records what actually
+    // happened: Craig picked it up, then Craig decided it. canTransition stays
+    // the single authority — if the verdict is illegal it still refuses here.
+    const current = await fetch(`${MEMORY}/memory/proposals/${id}`, { signal: AbortSignal.timeout(8000) })
+      .then(r => r.ok ? r.json() : null).catch(() => null);
+    const status = current?.status ?? null;   // GET returns {...row, audit, decision}
+
+    if (status === 'proposed') {
+      const pickup = await transition('under_review', 'picked up for review from the deck');
+      if (!pickup.ok) {
+        pollOps().catch(() => {});
+        return res.status(pickup.status).json(await pickup.json().catch(() => ({ error: 'pickup refused' })));
+      }
+    }
+
+    const r = await transition(TO[decision], notes || null);
     const body = await r.json();
     pollOps().catch(() => {});   // push the new queue to every client now
     res.status(r.status).json(body);
@@ -942,13 +968,27 @@ wss.on('close', () => clearInterval(KEEPALIVE));
 // The one rolling conversation — now lib/transcript.js, shared with the
 // gateway so context follows Craig between surfaces instead of each server
 // keeping its own. runAgent() mutates and bounds the array itself.
-// Dispatch confirmation gate: `turn` counts human commands; a preview stamps
-// the turn it was shown in, and a dispatch only fires when confirmed in a LATER
-// turn (see agent.js dispatch_job). Deliberately NOT shared with the gateway:
-// a preview shown on one surface must not be confirmable from another.
-const dispatchGate = { turn: 0, pending: null };
 
 wss.on('connection', (ws, req) => {
+  // Dispatch confirmation gate: `turn` counts human commands; a preview stamps
+  // the turn it was shown in, and a dispatch only fires when confirmed in a
+  // LATER turn (see agent.js dispatch_job).
+  //
+  // PER CONNECTION, deliberately — matching gateway-server.js:302. This sat at
+  // MODULE scope until 2026-08-16, one object shared by every deck socket,
+  // while the comment three lines above it declared the opposite invariant:
+  // "a preview shown on one surface must not be confirmable from another".
+  //
+  // The live sequence: Craig, on the iPad deck, asks for a repair or a PC
+  // change; previewPcAction/previewDispatch writes gate.pending stamped with
+  // turn N. A SECOND connected client — a desktop tab he left open, his phone's
+  // PWA — sends any compact affirmation ("ok"). That client's message bumps the
+  // SAME shared gate.turn to N+1, so classifyGateReply sees a confirmation in a
+  // later turn and the staged action fires. A full-permission agent launched
+  // from a device that was never shown the preview. This is the ONE path from
+  // "Craig said go" to a production agent, so it gets the strictest reading.
+  const dispatchGate = { turn: 0, pending: null };
+
   const user = req.headers['tailscale-user-login'] || 'local';
   console.log(`[deck] client connected (${user}) — ${wss.clients.size} online`);
   ws.isAlive = true;
@@ -1012,7 +1052,6 @@ wss.on('connection', (ws, req) => {
       }
       if (hasAgent()) {
         const transcript = await loadTranscript();
-        const before = transcript.length;
         // Voice v2 (docs/VOICE-V2.md): stream speech server-side while the
         // brain streams text. Sentences feed ONE ElevenLabs stream; mp3
         // chunks go to the client as binary frames on this same socket.
@@ -1126,9 +1165,12 @@ wss.on('connection', (ws, req) => {
           return send({ type: 'chat', text: full.text || 'Done, sir.', speech: session?.audioAny ? null : full.speech });
         } catch (e) {
           if (session) { session.tts?.abort(); session.discard = true; if (voiceSession === session) voiceSession = null; }
-          // Both brain providers unusable (no credits, outage) — undo this
-          // turn's partial transcript and fall through to the intent pipeline.
-          transcript.splice(before);
+          // Both brain providers unusable (no credits, outage) — fall through
+          // to the intent pipeline. runAgent has already rolled its own turn
+          // back BY IDENTITY (lib/transcript.js). This used to be
+          // `transcript.splice(before)` with `before` captured before runAgent
+          // ran, which truncated by index and so deleted whatever a CONCURRENT
+          // turn had appended in the meantime — the 2026-08-04 finding.
           console.error('[deck] agent brain failed, using intent pipeline:', e.message);
           const notice = noteBrainDegraded();
           if (notice) send({ type: 'notify', level: 'warn', title: notice, speech: notice });

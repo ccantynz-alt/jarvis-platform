@@ -233,3 +233,47 @@ test('pcListPlan: a transient failure or a success re-dispatches normally', () =
     lastJob: { status: 'completed', error: null },
   }).action, 'dispatch');
 });
+
+// ── The privacy exclusion was not "by construction" ─────────────────────────
+// 2026-08-07 finding. CLAUDE.md claimed brain CONVERSATION sessions were
+// excluded from the flywheel by construction. They were excluded by a prefix
+// that brain-claude.js writes best-effort:
+//   const digest = await Promise.race([statusDigest(gate), <150ms timeout ''>])
+//   ... (digest ? digest + ' ' : '') + userText
+// statusDigest() also returns '' when its loopback fetches fail — so in exactly
+// the conditions where Craig talks to Jarvis most (memory-server or the
+// orchestrator slow or down), every turn was his raw speech with NO marker and
+// the harvester indexed and distilled it.
+
+import { CONVERSATION_TAG } from '../src/lib/harvest.js';
+
+test('a conversation is excluded when the status digest was DROPPED', () => {
+  // The exact regression: no digest prefix, just Craig speaking.
+  const parsed = { userTexts: [`${CONVERSATION_TAG} what did the fleet do overnight`] };
+  assert.equal(isConversationSession(parsed), true);
+});
+
+test('the legacy digest marker still excludes transcripts already on disk', () => {
+  const parsed = { userTexts: ['[Live status, background only — 3 jobs] hello'] };
+  assert.equal(isConversationSession(parsed), true);
+});
+
+test('the tag survives being followed by a recap and a digest', () => {
+  // On a FRESH session brain-claude prepends a recap, and the digest may also
+  // land. The tag goes FIRST precisely so startsWith still matches.
+  const parsed = { userTexts: [`${CONVERSATION_TAG} [recap] [Live status, background only] hi`] };
+  assert.equal(isConversationSession(parsed), true);
+});
+
+test('a real coding session is still harvested', () => {
+  const parsed = { userTexts: ['fix the failing test in audit-runner'] };
+  assert.equal(isConversationSession(parsed), false);
+});
+
+test('one marked turn anywhere excludes the whole session', () => {
+  // Errs toward exclusion: the cost of wrongly excluding a coding session is
+  // one unharvested session; the cost of wrongly including a conversation is
+  // Craig's private speech in the flywheel.
+  const parsed = { userTexts: ['tool result', `${CONVERSATION_TAG} and what about vapron`] };
+  assert.equal(isConversationSession(parsed), true);
+});

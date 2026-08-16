@@ -103,7 +103,7 @@ Network/Fetch interception, tested against private-IP egress first.
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | GateTest scan gating platform deploys |
 | jarvis-gateway | src/gateway-server.js | 9208 | **THE interface** — voice/text control + inbox; tailnet `--https=8443`; token JARVIS_GATEWAY_TOKEN; spec docs/GATEWAY.md |
 | jarvis-agents | src/agent-scheduler.js | 9209 | Agent-org scheduler: 44 role agents (CEO → C-suite → per-platform/per-jurisdiction specialists) from config/agents.json on cron, budget-capped; reports route up the ladder (ok→inbox, action_needed→warn, escalate→alert). `AGENTS_MODE=live` since 2026-07-19 |
-| jarvis-deck | src/deck-server.js | 9210 | **Command Deck v2.2** (public/command-deck.html): CORE brain + HUD/Hierarchy/Flow/Platforms/OPS tabs, PWA, briefings, raw WS `/jarvis`; tailnet `--https=8444`. Deck mints its OWN token — `config/deck.token` (env `JARVIS_DECK_TOKEN`); the gateway token does NOT unlock it. Cookie re-stamps on every authed load (sliding 30-day). OPS tab = inbox (mark-read is the ONLY mutating action, via `POST /api/ops/inbox-read`) + findings + agent reports + job queue; data via 15s `{type:'ops'}` broadcast + `GET /api/ops` (the only path virtual-time captures see). QA: `?demo-alert=1` / `?demo-briefing=1` / `?view=hud\|org\|flow\|plat\|ops`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs (src/lib/tts.js — cache, daily budget, TTS_DISABLED), speechSynthesis fallback. Evidence: docs/DECK-AUDIT-2026-07-16.md |
+| jarvis-deck | src/deck-server.js | 9210 | **Command Deck v2.2** (public/command-deck.html): CORE brain + HUD/Hierarchy/Flow/Platforms/OPS tabs, PWA, briefings, raw WS `/jarvis`; tailnet `--https=8444`. Deck mints its OWN token — `config/deck.token` (env `JARVIS_DECK_TOKEN`); the gateway token does NOT unlock it. Cookie re-stamps on every authed load (sliding 30-day). OPS tab = inbox (mark-read via `POST /api/ops/inbox-read`) + Craig's proposal verdicts via `POST /api/ops/review`, which picks a `proposed` proposal up into `under_review` BEFORE applying the decision — `TRANSITIONS.proposed` has no edge to a verdict, so without that step every APPROVE/REJECT tap returned 409 (they had never once worked; fixed 2026-08-16) + findings + agent reports + job queue; data via 15s `{type:'ops'}` broadcast + `GET /api/ops` (the only path virtual-time captures see). QA: `?demo-alert=1` / `?demo-briefing=1` / `?view=hud\|org\|flow\|plat\|ops`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs (src/lib/tts.js — cache, daily budget, TTS_DISABLED), speechSynthesis fallback. Evidence: docs/DECK-AUDIT-2026-07-16.md |
 | jarvis-browser | src/browser-service.js | 9211 | SSRF-guarded web search/fetch/render bridge |
 
 Health paths are namespaced: `/memory/health`, `/screenshot/health`,
@@ -398,6 +398,21 @@ auth).
 - The confirmation gate: a false "yes" launches a production agent — test
   both directions before touching the vocabulary.
 - Transcript saves merge; `agent_context` is the KV table — never "clean" it.
+- **One transcript array is shared by every socket and every turn, so roll a
+  failed turn back BY IDENTITY, never by index.** `newTurnId()`/`ownTurn()`/
+  `rollbackTurn()` in lib/transcript.js; the tag is a Symbol so the durable KV
+  payload is unchanged. `transcript.splice(before)` deleted a CONCURRENT turn's
+  messages (2026-08-04). `runAgent` owns the cleanup — callers must not splice.
+- **The deck's dispatch gate is PER CONNECTION**, like the gateway's. At module
+  scope one deck client could confirm an action staged on another (2026-08-03).
+- **Audits are serialised through one promise chain** (`enqueueAudit`): `runCmd`
+  is `spawnSync` and blocks the whole event loop for minutes, which aborted a
+  concurrent audit's probes and screenshots and reported a healthy platform as
+  down (2026-08-04).
+- **The harvester's privacy exclusion rides on `CONVERSATION_TAG`**, written
+  unconditionally and FIRST by brain-claude.js. It used to key on the
+  statusDigest prefix, which is best-effort — lost to a 150ms race or a down
+  dependency, i.e. exactly when Craig talks to Jarvis most (2026-08-07).
 - The ear is shut while Jarvis talks; the open mic has bounds; diagnose voice
   via the `jarvis-conversation` KV first.
 - Drop-ins beat unit files; oneshot units need explicit `TimeoutStartSec`.

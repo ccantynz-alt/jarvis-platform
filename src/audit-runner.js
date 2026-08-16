@@ -677,6 +677,48 @@ async function runAudit(platform) {
   return report;
 }
 
+/**
+ * Audits run ONE AT A TIME (2026-08-04 finding, fixed 2026-08-16).
+ *
+ * POST /audit/run used to reply and then call runAudit() fire-and-forget with
+ * no in-flight guard, so N audits overlapped — and orchestrator.js's
+ * cronDailyAudit POSTs for ~10 platforms in a loop. runCmd is spawnSync, which
+ * blocks the WHOLE event loop for up to 180s (build), 120s (tests), 60s
+ * (checks); alecrae's cold `bun run typecheck` is measured at 72s in this very
+ * file.
+ *
+ * The damage was subtle and looked like a platform outage: audit A reaches its
+ * awaited network work (probeUrls, AbortSignal.timeout(20000); takeScreenshots,
+ * 35000) and yields; the freed event loop immediately accepts the queued POST
+ * for platform B, whose runAudit re-enters spawnSync and blocks for minutes.
+ * A's timers cannot fire while blocked, so on resume every probe and screenshot
+ * aborts at once and A records {status:0, ok:false} for a platform that was
+ * perfectly healthy.
+ *
+ * A promise chain rather than a rejecting guard, because the daily cron's burst
+ * is legitimate work that should all happen — just not at once. Same-platform
+ * requests coalesce: a second audit of a platform already waiting adds nothing.
+ */
+let auditChain = Promise.resolve();
+const auditQueue = new Set();
+
+function enqueueAudit(platform) {
+  if (auditQueue.has(platform)) return false;
+  auditQueue.add(platform);
+  auditChain = auditChain.then(async () => {
+    auditQueue.delete(platform);
+    try {
+      await runAudit(platform);
+    } catch (e) {
+      console.error(`[audit] ${platform} failed:`, e.message);
+      db.prepare(`
+        UPDATE platform_state SET status = 'error', updated_at = ? WHERE platform = ?
+      `).run(new Date().toISOString(), platform);
+    }
+  });
+  return true;
+}
+
 // POST /audit/run
 app.post('/audit/run', async (req, res) => {
   const { platform } = req.body;
@@ -685,13 +727,12 @@ app.post('/audit/run', async (req, res) => {
     return res.status(400).json({ error: `Unknown platform. Valid: ${[...Object.keys(PLATFORM_CONFIG), ...Object.keys(URL_ONLY_CONFIG)].join(', ')}` });
   }
 
-  res.json({ ok: true, message: `Audit started for ${platform}`, timestamp: new Date().toISOString() });
-
-  runAudit(platform).catch(e => {
-    console.error(`[audit] ${platform} failed:`, e.message);
-    db.prepare(`
-      UPDATE platform_state SET status = 'error', updated_at = ? WHERE platform = ?
-    `).run(new Date().toISOString(), platform);
+  const queued = enqueueAudit(platform);
+  res.json({
+    ok: true,
+    message: queued ? `Audit queued for ${platform}` : `Audit already queued for ${platform}`,
+    queue_depth: auditQueue.size,
+    timestamp: new Date().toISOString(),
   });
 });
 

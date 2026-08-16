@@ -374,3 +374,66 @@ test('a turn that lands DURING the read is not erased — second-pass race', asy
   assert.ok(written.includes('B'), 'the turn queued before the save survives');
   assert.ok(written.includes('C-arrived-mid-read'), 'and so does the one that landed during the read');
 });
+
+// ── Rolling a turn back must not delete another turn's messages ─────────────
+// 2026-08-04 finding. loadTranscript() hands every socket and every turn the
+// SAME array; the ws message handler is async and the ws library does not await
+// it, so two turns overlap routinely. Rolling back by INDEX
+// (`transcript.splice(before)`) then deleted whatever the other turn had
+// appended in between — Craig's second utterance vanished from the durable
+// transcript, so the next turn's recap had no record he had said it.
+
+import { newTurnId, ownTurn, rollbackTurn, turnIdOf } from '../src/lib/transcript.js';
+
+test('a failed turn removes only its OWN messages when two turns interleave', () => {
+  const t = [];
+  const A = newTurnId();
+  const B = newTurnId();
+
+  t.push(ownTurn({ role: 'user', content: 'userA' }, A));   // turn A starts
+  t.push(ownTurn({ role: 'user', content: 'userB' }, B));   // turn B starts
+  t.push(ownTurn({ role: 'assistant', content: 'replyB' }, B));
+
+  rollbackTurn(t, A);   // A fails its watchdog
+
+  assert.deepEqual(t.map(m => m.content), ['userB', 'replyB'],
+    "B's message survived A's rollback");
+});
+
+test('rollback removes every message the turn pushed, not just the last', () => {
+  const t = [];
+  const A = newTurnId();
+  t.push(ownTurn({ role: 'user', content: 'u' }, A));
+  t.push(ownTurn({ role: 'assistant', content: 'tool-use' }, A));
+  t.push(ownTurn({ role: 'user', content: 'tool-result' }, A));
+  assert.equal(rollbackTurn(t, A), 3);
+  assert.equal(t.length, 0);
+});
+
+test('turn ids are distinct so two concurrent turns can never collide', () => {
+  assert.notEqual(newTurnId(), newTurnId());
+});
+
+test('the ownership tag never reaches the durable KV payload', () => {
+  // The transcript is persisted with JSON.stringify. A string key would have
+  // added a field to every stored message and changed the durable format;
+  // a Symbol is skipped, so the payload is byte-identical to before.
+  const msg = ownTurn({ role: 'user', content: 'hello' }, newTurnId());
+  assert.equal(JSON.stringify(msg), '{"role":"user","content":"hello"}');
+  assert.equal(Object.keys(msg).length, 2);
+});
+
+test('rollback is a no-op for an untagged transcript rather than clearing it', () => {
+  // Messages restored from KV carry no symbol. Rolling back must not treat
+  // "untagged" as "mine" and wipe the stored conversation.
+  const t = [{ role: 'user', content: 'from KV' }];
+  assert.equal(rollbackTurn(t, newTurnId()), 0);
+  assert.equal(t.length, 1);
+  assert.equal(turnIdOf(t[0]), undefined);
+});
+
+test('a null turn id removes nothing — no accidental mass deletion', () => {
+  const t = [ownTurn({ role: 'user', content: 'x' }, newTurnId())];
+  assert.equal(rollbackTurn(t, null), 0);
+  assert.equal(t.length, 1);
+});

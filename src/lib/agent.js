@@ -38,6 +38,7 @@ import { TOOLS, runTool, systemPrompt, statusDigest } from './brain-tools.js';
 import { runClaudeBrain, hasClaudeBrain, warmupClaudeBrain, restartClaudeBrain, setBrainModel } from './brain-claude.js';
 import { switchProfile } from './claude-auth.js';
 import { notify } from './notify.js';
+import { newTurnId, ownTurn, rollbackTurn } from './transcript.js';
 
 // Fable 5 — Anthropic's top-tier model. Craig's call (2026-07-16): the brain
 // runs the smartest model available; cost is accepted. Workers stay on sonnet.
@@ -200,14 +201,17 @@ export async function maybeBrainSwitch(text) {
  * payload if a confirmed dispatch fired this turn (so the caller can watchJob).
  */
 export async function runAgent(transcript, userText, onChunk = () => {}, gate = null) {
-  transcript.push({ role: 'user', content: userText });
+  // Every message this turn pushes is stamped with `turnId`, so a failure rolls
+  // back exactly its own messages instead of index-truncating whatever a
+  // concurrent turn had appended in the meantime. See lib/transcript.js.
+  const turnId = newTurnId();
+  transcript.push(ownTurn({ role: 'user', content: userText }, turnId));
 
   // Try the active provider; on an auth/billing/API failure, fail over to the
   // other provider if it has a key (a Claude-pinned box with dead credits
   // auto-recovers on GPT, and vice-versa) and STICK to the one that worked.
   const primary = getBrainProvider();
   const order = [primary, ...PROVIDERS.filter(p => p !== primary)]; // primary first, then fail over
-  const before = transcript.length;
   let lastErr = null;
   // 2026-07-24 HARD TOTAL BUDGET (Craig: "I have to wait 10 minutes"). The
   // per-piece timeouts STACK: claude 180s×2 attempts, then each fallback
@@ -229,8 +233,8 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
         // userText is passed EXPLICITLY — brain-claude must not re-derive it from
         // the transcript tail, which two overlapping commands scramble. See the
         // comment at that read for the full sequence.
-        ? await runClaudeBrain(transcript, onChunk, gate, deadline, userText)
-        : await runBrainLoop(provider, apiKey, transcript, onChunk, gate, deadline);
+        ? await runClaudeBrain(transcript, onChunk, gate, deadline, userText, turnId)
+        : await runBrainLoop(provider, apiKey, transcript, onChunk, gate, deadline, turnId);
       if (provider !== brainProvider) { // failed over — make the working one sticky
         brainProvider = provider;
         fetch(`${MEMORY}/memory/kv`, {
@@ -254,7 +258,11 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
     } catch (e) {
       lastErr = e;
       console.error(`[agent] ${provider} brain failed: ${e.message}`);
-      transcript.splice(before); // undo any partial turns before retrying/bailing
+      // Undo any partial turns before retrying/bailing — BY IDENTITY, so a
+      // concurrent turn's messages survive. The user message is re-pushed
+      // below so the next provider still sees what Craig asked.
+      rollbackTurn(transcript, turnId);
+      transcript.push(ownTurn({ role: 'user', content: userText }, turnId));
     }
   }
   // 2026-07-26 fix: a TOTAL outage (every provider failed) used to throw with
@@ -272,12 +280,19 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
     body: `All configured brain providers failed this turn (last error: ${(lastErr && lastErr.message) || 'unknown'}). Falling back to basic keyword mode until a provider recovers.`,
     speech: 'Sir, my reasoning brain is completely unavailable right now — every provider failed. Running in basic mode.',
   }).catch(() => {});
+  // Every provider failed. Leave the transcript exactly as this turn found it —
+  // the callers used to do this themselves with `transcript.splice(before)`,
+  // captured before runAgent ran, which is the same index-based hazard one
+  // level up. Owning the cleanup here means the deck and the gateway don't
+  // have to, and recordFallbackTurn() still writes the exchange durably after
+  // the intent pipeline answers.
+  rollbackTurn(transcript, turnId);
   throw lastErr || new Error('agent unavailable: no usable brain provider');
 }
 
 // The tool-calling loop for one provider. Throws on API failure so runAgent can
 // fail over. Returns { text, speech, dispatched }.
-async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null, deadline = Infinity) {
+async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null, deadline = Infinity, turnId = null) {
   const ctx = { pending: null, dispatched: null, gate };
   let finalText = '';
   // Computed once per turn (not per internal tool round-trip) — same live
@@ -315,7 +330,7 @@ async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null, 
       if (tu.sig) blk._thoughtSig = tu.sig; // Gemini 3 thinking signature — replayed to Gemini, stripped for others
       assistantBlocks.push(blk);
     }
-    transcript.push({ role: 'assistant', content: assistantBlocks });
+    transcript.push(ownTurn({ role: 'assistant', content: assistantBlocks }, turnId));
 
     const toolResults = [];
     for (const tu of toolUses) {
@@ -324,11 +339,11 @@ async function runBrainLoop(provider, apiKey, transcript, onChunk, gate = null, 
       catch (e) { out = `Tool ${tu.name} failed: ${e.message}`; }
       toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: String(out).slice(0, 4000) });
     }
-    transcript.push({ role: 'user', content: toolResults });
+    transcript.push(ownTurn({ role: 'user', content: toolResults }, turnId));
     // loop again so the model can read tool output and answer (or chain a tool)
   }
 
-  if (finalText) transcript.push({ role: 'assistant', content: finalText });
+  if (finalText) transcript.push(ownTurn({ role: 'assistant', content: finalText }, turnId));
   // keep the transcript bounded (voice sessions are long-lived)
   if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
 

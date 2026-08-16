@@ -64,3 +64,60 @@ test('the word approve appearing in prose does not become an approval', () => {
   const r = parseVerdict('I would not approve this. It touches unrelated files.');
   assert.equal(r.verdict, 'escalate');
 });
+
+// ── The review-runner re-decided the same three proposals forever ───────────
+// 2026-08-07 finding. memory-server returns proposals id DESC and dry-run
+// transitions nothing, so `rows.slice(0, MAX_PER_TICK)` took the same newest
+// three every 20 minutes. The journal caught it: ticks at 19:04, 19:25 and
+// 19:46 each reviewed #11, #10, #9 with equivalent verdicts while #4-#8 were
+// never reviewed at all — ~216 subscription turns a day, re-deciding three
+// proposals. `withArtifact` was computed for the log line and never used.
+
+import { pickForReview } from '../src/review-runner.js';
+
+const P = (id, artifact = true) => ({ id, artifact_url: artifact ? `http://a/${id}` : null });
+// As memory-server returns them: newest first.
+const QUEUE = [P(11), P(10), P(9), P(8), P(7), P(6), P(5), P(4)];
+
+test('the first tick takes the OLDEST proposals, not the newest', () => {
+  assert.deepEqual(pickForReview(QUEUE, { cursor: 0, max: 3 }).map(p => p.id), [4, 5, 6]);
+});
+
+test('the next tick advances instead of re-reviewing the same three', () => {
+  const first = pickForReview(QUEUE, { cursor: 0, max: 3 });
+  const cursor = first[first.length - 1].id;
+  assert.deepEqual(pickForReview(QUEUE, { cursor, max: 3 }).map(p => p.id), [7, 8, 9]);
+});
+
+test('the queue wraps once the tail is reached rather than stalling empty', () => {
+  assert.deepEqual(pickForReview(QUEUE, { cursor: 11, max: 3 }).map(p => p.id), [4, 5, 6]);
+});
+
+test('a full pass reaches every proposal — none is starved', () => {
+  const seen = new Set();
+  let cursor = 0;
+  for (let tick = 0; tick < 3; tick++) {
+    const batch = pickForReview(QUEUE, { cursor, max: 3 });
+    batch.forEach(p => seen.add(p.id));
+    cursor = batch[batch.length - 1].id;
+  }
+  assert.deepEqual([...seen].sort((a, b) => a - b), [4, 5, 6, 7, 8, 9, 10, 11]);
+});
+
+test('proposals with no artifact are skipped — an agent that hit a STOP CONDITION leaves one forever', () => {
+  const q = [P(9), P(8, false), P(7)];
+  assert.deepEqual(pickForReview(q, { cursor: 0, max: 3 }).map(p => p.id), [7, 9]);
+});
+
+test('no eligible proposals returns an empty batch rather than throwing', () => {
+  assert.deepEqual(pickForReview([], { cursor: 0, max: 3 }), []);
+  assert.deepEqual(pickForReview([P(1, false)], { cursor: 0, max: 3 }), []);
+});
+
+test('a batch never contains the same proposal twice', () => {
+  // The wrap concatenates two slices; if they overlapped, a tick would spend
+  // two subscription turns on one proposal.
+  const batch = pickForReview(QUEUE, { cursor: 7, max: 8 });
+  assert.equal(new Set(batch.map(p => p.id)).size, batch.length);
+  assert.equal(batch.length, 8);
+});

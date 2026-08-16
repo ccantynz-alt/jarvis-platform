@@ -20,6 +20,36 @@ const MEMORY_SVC    = 'http://127.0.0.1:9200';
 const app = express();
 app.use(express.json());
 
+/**
+ * Express 4 does NOT catch a rejected promise returned by a route handler, and
+ * nothing here registers an unhandledRejection handler — so on Node 20 a single
+ * rejected await inside an async route took the WHOLE DISPATCH ENGINE down.
+ *
+ * The live path (found 2026-07-31): POST /worker/result ends in
+ * `await finishJob(...)` → jobTransition → dbPost, which rejects whenever
+ * memory-server is unreachable or answers non-2xx. Craig's PC worker posts
+ * after every job and retries 4×, so it only had to land while jarvis-memory
+ * was restarting or briefly wedged — a condition this file already documents as
+ * real in reapOverdueRunningJobs. Every in-flight local and SSH job died with
+ * the process.
+ *
+ * Wrap async handlers in this instead of returning a bare promise to Express.
+ */
+const asyncRoute = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch((e) => {
+  console.error(`[orchestrator] ${req.method} ${req.path} failed: ${e && e.stack || e}`);
+  logEvent('ERR', `${req.method} ${req.path} threw: ${String(e && e.message || e).slice(0, 120)}`);
+  if (!res.headersSent) res.status(500).json({ error: String(e && e.message || e) });
+});
+
+// Backstop for the same class of bug anywhere else in this process. Deliberately
+// does NOT exit: this is the dispatch engine, and dying loses every in-flight
+// job to recover its own bug. Loud in the log and the event stream instead —
+// quiet degradation is the failure mode this codebase refuses (principle 6).
+process.on('unhandledRejection', (reason) => {
+  console.error(`[orchestrator] UNHANDLED REJECTION (process kept alive): ${reason && reason.stack || reason}`);
+  try { logEvent('ERR', `Unhandled rejection: ${String(reason && reason.message || reason).slice(0, 160)}`); } catch { /* logEvent must never be the thing that kills us */ }
+});
+
 // Defaults to 9205 (the live port). Honouring PORT lets a test instance bind a
 // free port without touching the live service; secrets.env sets no PORT, so the
 // systemd service still binds 9205 unchanged.
@@ -656,7 +686,7 @@ async function reapExpiredPcLeases() {
 
 // POST /worker/claim { worker_id }
 // Atomically claims the oldest queued executor='pc' job, or 204 when none.
-app.post('/worker/claim', async (req, res) => {
+app.post('/worker/claim', asyncRoute(async (req, res) => {
   const workerId = (req.body && req.body.worker_id) || 'unknown';
   // Optional runtime filter (2026-07-31). The worker runs ONE agent job at a
   // time — correct, it is Craig's own machine — but a typed action takes
@@ -692,7 +722,7 @@ app.post('/worker/claim', async (req, res) => {
     });
   }
   return res.status(204).end();
-});
+}));
 
 // POST /worker/heartbeat { worker_id, job_id? }
 // Keeps the worker's presence known and, when it holds a job, extends the
@@ -857,7 +887,7 @@ async function pcWorkerCapability() {
 }
 
 // POST /worker/result { job_id, worker_id, code, stdout, stderr, timedOut }
-app.post('/worker/result', async (req, res) => {
+app.post('/worker/result', asyncRoute(async (req, res) => {
   const { job_id, worker_id, code, stdout = '', stderr = '', timedOut = false } = req.body || {};
   if (!job_id) return res.status(400).json({ error: 'job_id required' });
   let row;
@@ -910,7 +940,7 @@ app.post('/worker/result', async (req, res) => {
 
   await finishJob(row, { code, stdout, stderr, timedOut });
   res.json({ ok: true });
-});
+}));
 
 async function pcWorkerEnabled() {
   try {

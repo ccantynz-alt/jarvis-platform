@@ -22,6 +22,8 @@
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { TOOLS, runTool, systemPrompt, statusDigest } from './brain-tools.js';
+import { CONVERSATION_TAG } from './harvest.js';
+import { ownTurn } from './transcript.js';
 import {
   hasClaudeAuth, getActiveProfile, profileEnv,
   classifyFailure, reportExhausted, reportAuthFailure, reportModelRejected,
@@ -293,7 +295,7 @@ function runTurn(s, text, onChunk, fresh = false) {
  * user's message (last entry); returns { text, speech, dispatched } and
  * appends the assistant reply. Throws on failure so agent.js can fail over.
  */
-export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null, deadline = Infinity, passedText = null) {
+export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null, deadline = Infinity, passedText = null, turnId = null) {
   const run = async () => {
     // The caller's OWN text, passed in explicitly (2026-07-30, found by the
     // code-health spine on the concurrency lens).
@@ -344,8 +346,16 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
       currentCtx = ctx;
 
       try {
-        const text = await runTurn(s, (fresh ? recapFrom(transcript) : '') + (digest ? digest + ' ' : '') + userText, onChunk, fresh);
-        transcript.push({ role: 'assistant', content: text });
+        // CONVERSATION_TAG goes FIRST and unconditionally — ahead of the recap
+        // and the digest — because it is what keeps Craig's private speech out
+        // of the harvester flywheel (lib/harvest.js isConversationSession).
+        // The old exclusion rode on the digest prefix, which is best-effort:
+        // it loses a 150ms race, or statusDigest returns '' when its loopback
+        // fetches fail, and then the turn is unmarked. Position matters as much
+        // as presence — the classifier uses startsWith, and on a FRESH session
+        // the recap would otherwise sit in front of the marker.
+        const text = await runTurn(s, CONVERSATION_TAG + ' ' + (fresh ? recapFrom(transcript) : '') + (digest ? digest + ' ' : '') + userText, onChunk, fresh);
+        transcript.push(ownTurn({ role: 'assistant', content: text }, turnId));
         if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
         // An escalated session served its one hard turn — drop back to the
         // everyday tier afterwards so usage limits aren't burned on chit-chat.
