@@ -22,7 +22,12 @@ The platform registry is `config/platforms.json` (hot-reloaded — edits apply
 instantly). Read it; never trust a list in a doc. Local checkouts of note:
 AlecRae runs ON THIS BOX at `/opt/alecrae` (live co-tenant, bun :4100 / next
 :4200), Gluecron runs here as a Docker container behind Coolify/Traefik,
-GateTest at `/opt/gatetest`, zoobicon clone at `/root/zoobicon`. The eSIM MVNO
+GateTest at `/opt/gatetest`, zoobicon clone at `/root/zoobicon`. **DavenRoe is
+a live co-tenant too** (`/opt/davenroe`, systemd `davenroe-api`,
+FastAPI/uvicorn on 10.0.1.1:8010, serving API + built SPA; Traefik routes it
+from the hand-written `/data/coolify/proxy/dynamic/davenroe.yaml`) — it moved
+off Vercel onto this box on 2026-08-10/11 and the registry still said
+`"server":"vercel"` for five days. The eSIM MVNO
 is not yet registered — add it when it's real.
 
 ## HOW WE BUILD (the next-20-moves principles)
@@ -347,8 +352,9 @@ NOT fight it for :443) · :6001/:6002/:8000/:8080 Coolify · **:9212**
 jarvis-dashboard's public liveness ping — ONE static `GET /health` route for
 the off-box watchdog, never anything more.
 
-Loopback: :3000 gatetest-web (10.0.1.1) · :4100/:4200 AlecRae · :5432
-Postgres · :9200–9202, :9204–9207, :9209–9211 Jarvis. Tailnet HTTPS exposure:
+Loopback: :3000 gatetest-web (10.0.1.1) · :4100/:4200 AlecRae · **:8010
+davenroe-api (10.0.1.1)** · :5432 Postgres · :9200–9202, :9204–9207,
+:9209–9211 Jarvis. Tailnet HTTPS exposure:
 gateway :8443, deck :8444, dashboard :8445. Vapron does NOT own ports on this
 box. Re-verify with `ss -tlnp`.
 

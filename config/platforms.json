@@ -176,18 +176,23 @@
     "davenroe": {
       "name": "davenroe",
       "display_name": "DavenRoe",
-      "server": "vercel",
-      "path": "",
-      "repo": "git@github.com:ccantynz-alt/davenroe.git",
+      "server": "66.42.121.161",
+      "path": "/opt/davenroe",
+      "repo": "git@github.com:ccantynz-alt/DavenRoe.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
       "tech_stack": [
-        "TypeScript",
-        "Next.js"
+        "Python",
+        "FastAPI",
+        "uvicorn"
       ],
-      "site_url": "https://www.davenroe.com",
+      "site_url": "https://davenroe.com",
       "status": "active",
-      "notes": "Vercel-hosted (not on the box). Deploy is Vercel's; Jarvis monitors the live site + repo, not a local checkout."
+      "services": [
+        "davenroe-api"
+      ],
+      "port": 8010,
+      "notes": "Registry truth pass 2026-08-16 — every field above was wrong. It said server 'vercel', path '', tech_stack TypeScript/Next.js and 'Vercel-hosted (not on the box)'. Reality: DavenRoe moved ONTO the master box on 2026-08-10/11 (DNS flip) and is a FastAPI/uvicorn service, davenroe-api, running as user 'davenroe' from /opt/davenroe/backend on 10.0.1.1:8010, serving BOTH the API and the built SPA. Traefik routes it via the hand-written /data/coolify/proxy/dynamic/davenroe.yaml (apex + www, www 301s to apex, Let's Encrypt). So it is an undocumented CO-TENANT on the master box — Rule 4 applies. repo case corrected: GitHub is ccantynz-alt/DavenRoe. CAUTION: /opt/davenroe is a git repo with NO remote configured, so the box cannot pull; its HEAD d9332d67 was verified identical to GitHub main on 2026-08-16, but the next push will not reach the box and nothing will notice. Adding the remote is Craig's call (product repo, proposal-only). Consequence of the old empty path: code-health could never sweep DavenRoe, so a live production accounting platform has had ZERO code review; that starts now, and fix-runner stays gated off by its git-remote requirement."
     },
     "screenshot-to-code": {
       "name": "screenshot-to-code",
