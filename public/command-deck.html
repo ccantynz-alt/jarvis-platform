@@ -1040,13 +1040,34 @@ function stopAllAudio() {
 
 // ── The Jarvis voice — ONE engine at a time, ONE utterance at a time ─────────
 // Everything spoken (replies, alerts, the boot greeting) flows through a single
-// serialized queue. The neural voice (/tts, ElevenLabs) is THE voice; the
-// browser voice is only an announced, sticky backup for the session — never a
-// silent per-utterance surprise. Before the first tap unlocks audio, speech
-// waits in the queue (with a visible badge) instead of playing robotic.
+// serialized queue. Before the first tap unlocks audio, speech waits in the
+// queue (with a visible badge) instead of playing robotic.
+//
+// WHICH VOICE IS "THE" VOICE — Craig, 2026-08-16: "we shouldnt be using
+// elevenlabs its a free english voice from google this mistake gets hapening".
+// The free Google browser voice (VOICE_PREFS below) is THE voice. ElevenLabs is
+// OFF by ruling — TTS_DISABLED=1 in secrets.env — and this comment used to say
+// the opposite, which is how the mistake kept coming back.
+//
+// That inversion had a real cost. With TTS deliberately off, every session
+// started on 'neural', fetched /tts, got 503 {reason:'unconfigured'}, and called
+// enterBackupVoice — which SPOKE "Neural voice link unavailable, sir" and hung a
+// ⚠ BACKUP VOICE warning on the screen. Then the 10-minute re-probe below reset
+// the engine to 'neural' and the whole apology happened again, forever, for a
+// configuration that is exactly what Craig asked for.
+//
+// So the server's own reason code decides. 'unconfigured' means BY DESIGN:
+// browser voice, no badge, no apology, no re-probe. 'budget' and 'api_error'
+// still mean a genuine degradation and still announce themselves — that
+// distinction is the whole point (principle 6: never degrade quietly, but never
+// cry degradation over a deliberate setting either).
 const speechQ = [];
 let speechActive = false;
-let voiceEngine = 'neural'; // 'neural' | 'backup' (sticky; re-probes after 10 min)
+// 'neural'  — try ElevenLabs (only reachable if someone re-enables TTS)
+// 'browser' — the free Google voice, by ruling. Silent, permanent, not a fault.
+// 'backup'  — a real degradation (budget spent / API error). Announced, sticky,
+//             re-probes after 10 min.
+let voiceEngine = 'neural';
 let backupSince = 0, ttsFailStreak = 0;
 let lastSpeechEndAt = 0; // Date.now() when Jarvis last stopped talking — see MIC_COOLDOWN_MS
 
@@ -1098,7 +1119,10 @@ async function speakOnce(text) {
         try { reason = (await r.json()).reason || reason; } catch {}
       } catch { /* network — treat as api_error */ }
       ttsFailStreak++;
-      if (reason === 'budget' || reason === 'unconfigured' || ttsFailStreak >= 3) {
+      // 'unconfigured' is a RULING, not a failure — go quietly to the Google
+      // voice and stay there. Only budget/api_error are worth announcing.
+      if (reason === 'unconfigured') { enterBrowserVoice(text); return; }
+      if (reason === 'budget' || ttsFailStreak >= 3) {
         enterBackupVoice(reason, text);
         return;
       }
@@ -1114,6 +1138,17 @@ async function speakOnce(text) {
     return;
   }
   await speakBrowserAsync(text);
+}
+
+// The intended steady state: the free Google English voice. No badge, no
+// announcement, and deliberately NOT re-probed — speakOnce's 10-minute retry
+// only applies to 'backup', so this never turns back into an apology loop.
+function enterBrowserVoice(pendingText) {
+  voiceEngine = 'browser';
+  ttsFailStreak = 0;
+  setVoiceBadge('');
+  if (pendingText) speechQ.unshift(pendingText);
+  updatePendingBadge();
 }
 
 function enterBackupVoice(reason, pendingText) {

@@ -103,7 +103,7 @@ Network/Fetch interception, tested against private-IP egress first.
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | GateTest scan gating platform deploys |
 | jarvis-gateway | src/gateway-server.js | 9208 | **THE interface** — voice/text control + inbox; tailnet `--https=8443`; token JARVIS_GATEWAY_TOKEN; spec docs/GATEWAY.md |
 | jarvis-agents | src/agent-scheduler.js | 9209 | Agent-org scheduler: 44 role agents (CEO → C-suite → per-platform/per-jurisdiction specialists) from config/agents.json on cron, budget-capped; reports route up the ladder (ok→inbox, action_needed→warn, escalate→alert). `AGENTS_MODE=live` since 2026-07-19 |
-| jarvis-deck | src/deck-server.js | 9210 | **Command Deck v2.2** (public/command-deck.html): CORE brain + HUD/Hierarchy/Flow/Platforms/OPS tabs, PWA, briefings, raw WS `/jarvis`; tailnet `--https=8444`. Deck mints its OWN token — `config/deck.token` (env `JARVIS_DECK_TOKEN`); the gateway token does NOT unlock it. Cookie re-stamps on every authed load (sliding 30-day). OPS tab = inbox (mark-read via `POST /api/ops/inbox-read`) + Craig's proposal verdicts via `POST /api/ops/review`, which picks a `proposed` proposal up into `under_review` BEFORE applying the decision — `TRANSITIONS.proposed` has no edge to a verdict, so without that step every APPROVE/REJECT tap returned 409 (they had never once worked; fixed 2026-08-16) + findings + agent reports + job queue; data via 15s `{type:'ops'}` broadcast + `GET /api/ops` (the only path virtual-time captures see). QA: `?demo-alert=1` / `?demo-briefing=1` / `?view=hud\|org\|flow\|plat\|ops`. Voice: wake word "Jarvis" (fuzzy), `GET /tts` = ElevenLabs (src/lib/tts.js — cache, daily budget, TTS_DISABLED), speechSynthesis fallback. Evidence: docs/DECK-AUDIT-2026-07-16.md |
+| jarvis-deck | src/deck-server.js | 9210 | **Command Deck v2.2** (public/command-deck.html): CORE brain + HUD/Hierarchy/Flow/Platforms/OPS tabs, PWA, briefings, raw WS `/jarvis`; tailnet `--https=8444`. Deck mints its OWN token — `config/deck.token` (env `JARVIS_DECK_TOKEN`); the gateway token does NOT unlock it. Cookie re-stamps on every authed load (sliding 30-day). OPS tab = inbox (mark-read via `POST /api/ops/inbox-read`) + Craig's proposal verdicts via `POST /api/ops/review`, which picks a `proposed` proposal up into `under_review` BEFORE applying the decision — `TRANSITIONS.proposed` has no edge to a verdict, so without that step every APPROVE/REJECT tap returned 409 (they had never once worked; fixed 2026-08-16) + findings + agent reports + job queue; data via 15s `{type:'ops'}` broadcast + `GET /api/ops` (the only path virtual-time captures see). QA: `?demo-alert=1` / `?demo-briefing=1` / `?view=hud\|org\|flow\|plat\|ops`. Voice: wake word "Jarvis" (fuzzy); **the free Google browser voice is THE voice** (see VOICE), `GET /tts` = ElevenLabs, OFF by ruling (`TTS_DISABLED=1`). Evidence: docs/DECK-AUDIT-2026-07-16.md |
 | jarvis-browser | src/browser-service.js | 9211 | SSRF-guarded web search/fetch/render bridge |
 
 Health paths are namespaced: `/memory/health`, `/screenshot/health`,
@@ -177,6 +177,23 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
 
 ## VOICE (deck + gateway)
 
+- **THE VOICE IS THE FREE GOOGLE ONE. DO NOT TURN ELEVENLABS ON.** Craig,
+  2026-08-16: *"we shouldnt be using elevanlabs its a free english voice from
+  google this mistake gets hapening"* — it had happened again that same hour.
+  `TTS_DISABLED=1` in `config/secrets.env` is the RULING, not a fault to fix,
+  and `ELEVENLABS_API_KEY` being present is not permission to use it. The voice
+  is `VOICE_PREFS` in public/command-deck.html, best-first: **"Google UK English
+  Male"**, then Windows/Edge (Ryan/George/Thomas), then Apple's British males
+  (Daniel). Beware `/male/i.test('Google UK English Female') === true` — the
+  match is `\bmale\b` for exactly that reason (2026-08-11).
+- **A deliberate setting must never be reported as a degradation.** `/tts`'s
+  503 `reason` is the contract: `unconfigured` = by design → `enterBrowserVoice()`,
+  silent, no badge, permanent. `budget`/`api_error` = real → `enterBackupVoice()`,
+  announced and sticky, re-probed after 10 min. Conflating them made the deck
+  speak "Neural voice link unavailable, sir" and hang a ⚠ BACKUP VOICE warning
+  on screen every 10 minutes forever, for the configuration Craig asked for
+  (2026-08-16). `jarvis-experience`'s `checkVoice` calls this "off by choice"
+  and passes — correctly; the deck is what had it wrong.
 - **The ear is SHUT while Jarvis talks — every platform, no exceptions.**
   `closeEar()` + `isSelfEcho()` (LCS) as backstop. No voice barge-in (Craig
   accepted 2026-07-31): Escape, STOP bar, or mic button.
