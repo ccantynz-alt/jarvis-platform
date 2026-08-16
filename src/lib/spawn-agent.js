@@ -15,7 +15,7 @@
 // in agent_context (memory-server :9200) so it survives restarts.
 
 import { spawn, execFile } from 'child_process';
-import { profileEnv, classifyFailure, reportExhausted, getActiveProfile } from './claude-auth.js';
+import { profileEnv, classifyFailure, reportExhausted, reportAuthFailure, noteSpawnSuccess, getActiveProfile } from './claude-auth.js';
 
 const MEMORY = 'http://127.0.0.1:9200';
 const CANARY_KEY = 'claude_verified_version';
@@ -120,9 +120,22 @@ export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMi
   let result = await run();
   if (result.code !== 0 && !result.timedOut) {
     const cls = classifyFailure(result);
-    if (cls.kind === 'usage_limit') {
+    // usage_limit and auth are handled IDENTICALLY on purpose: both mean "this
+    // login cannot do the work right now", both can be survived by flipping to
+    // the other account, and both must be announced when they cannot.
+    //
+    // `auth` was missing here until 2026-08-16, and the omission cost three
+    // days: an expired OAuth session made every spawn exit 1 in ~2 seconds,
+    // this branch ignored it, and the eight autonomous timers each reported
+    // their own generic "agent failed" while the fleet did no work at all. The
+    // brain had its own auth reporting, so Craig was told the BRAIN was down —
+    // never that code-health, fix-runner, self-heal, review-runner, the
+    // harvester and the role agents had all stopped with it.
+    if (cls.kind === 'usage_limit' || cls.kind === 'auth') {
       const current = getActiveProfile()?.name;
-      const next = await reportExhausted(current, cls.resetAt).catch(() => null);
+      const next = cls.kind === 'auth'
+        ? await reportAuthFailure(current, result.stderr || result.stdout || '').catch(() => null)
+        : await reportExhausted(current, cls.resetAt).catch(() => null);
       if (next && next !== current) {
         // Tell the caller BEFORE the second run starts — see onRetry above.
         // Promise.resolve so a SYNCHRONOUS callback works too — `onRetry(...).catch?.()`
@@ -131,8 +144,19 @@ export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMi
         if (onRetry) await Promise.resolve(onRetry({ from: current, to: next })).catch(() => {});
         result = await run(); // fresh env picks up the flip
       }
-      else result.limitHeld = true; // every account exhausted — caller should re-queue, not fail
+      // No usable account either way — the caller should re-queue, not burn the
+      // job. `authHeld` is named distinctly from `limitHeld` because the two
+      // need opposite handling by a human: a limit ends by itself, a dead login
+      // ends only when Craig runs `claude login`.
+      else if (cls.kind === 'auth') result.authHeld = true;
+      else result.limitHeld = true;
     }
+  }
+  // Record the heartbeat that proves spawning still authenticates, and clear a
+  // standing auth alert on recovery. Best-effort: a memory-server blip must
+  // never turn a successful agent run into a failed one.
+  if (result.code === 0) {
+    await noteSpawnSuccess(getActiveProfile()?.name).catch(() => {});
   }
   return result;
 }

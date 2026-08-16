@@ -232,6 +232,44 @@ export function checkPcWorker({ secondsSinceSeen, staleAfter = 4 * 3600 }) {
   return result('pc_worker', true, { detail: `PC worker seen ${Math.round(secondsSinceSeen / 60)}m ago` });
 }
 
+/**
+ * Can the box still SPAWN an agent at all?
+ *
+ * 2026-08-16, and the sharpest example yet of the thing this file exists for.
+ * Both claude.ai logins on the box expired. Every box-local spawn then failed
+ * in about two seconds — code-health, fix-runner, self-heal, review-runner,
+ * harvester distillation, the 44 role agents — for THREE DAYS. All twelve
+ * services stayed green the entire time, because every one of them reports its
+ * own port and none of them reports "the thing I exist to launch cannot start".
+ * The only visible symptom was an absence: no new code findings. Craig asked
+ * how to run a bigger bug search; the honest answer was that the finder had
+ * been dead since the 13th.
+ *
+ * The signal is a heartbeat written by spawn-agent.js on every spawn that
+ * authenticates (KV `claude-last-spawn-ok`), so this measures the real thing —
+ * an agent actually ran — rather than a config file's opinion of it.
+ *
+ * Generous by default: the busiest gap between scheduled sweeps is code-health
+ * at 3h, so 6h means at least two cadences produced nothing. `warn`, never
+ * `alert`, per this file's standing rule.
+ */
+export function checkAgentSpawns({ secondsSinceOk, staleAfter = 6 * 3600 }) {
+  if (secondsSinceOk == null) {
+    return result('agent_spawns', false, {
+      severity: 'warn', incident: '2026-08-16',
+      detail: 'no agent spawn has ever authenticated — every autonomous timer is doing nothing',
+    });
+  }
+  if (secondsSinceOk > staleAfter) {
+    const hours = Math.round(secondsSinceOk / 3600);
+    return result('agent_spawns', false, {
+      severity: 'warn', incident: '2026-08-16',
+      detail: `no agent has spawned successfully in ${hours}h — code-health, fix-runner, self-heal and the role agents are all stopped; check the Claude login on the box`,
+    });
+  }
+  return result('agent_spawns', true, { detail: `last successful agent spawn ${Math.round(secondsSinceOk / 60)}m ago` });
+}
+
 /** show_me depends on the guarded render path; a dead browser service kills it silently. */
 export function checkShowMe({ browserOk }) {
   return browserOk

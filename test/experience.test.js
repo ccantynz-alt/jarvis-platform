@@ -142,3 +142,48 @@ test('summaries and speech: worst first, and good news is never spoken', () => {
   assert.equal(speech([ok('voice')]), null, 'a timer must never speak good news at him');
   assert.match(speech(results), /^Sir,/);
 });
+
+// ── The finder was dead and nothing said so (2026-08-16) ────────────────────
+// Craig asked how to run a bigger bug search. The honest answer was that
+// jarvis-code-health had filed nothing since the 13th, because both claude.ai
+// logins had expired and every box-local spawn was failing in two seconds.
+// Twelve services stayed green throughout: each reports its own port, none
+// reports "the thing I exist to launch cannot start".
+
+import { checkAgentSpawns } from '../src/lib/experience.js';
+
+test('a fresh spawn heartbeat passes', () => {
+  const r = checkAgentSpawns({ secondsSinceOk: 20 * 60 });
+  assert.equal(r.ok, true);
+});
+
+test('no successful spawn for hours is caught — the actual 2026-08-16 outage', () => {
+  const r = checkAgentSpawns({ secondsSinceOk: 3 * 24 * 3600 });
+  assert.equal(r.ok, false);
+  assert.equal(r.incident, '2026-08-16');
+  assert.match(r.detail, /72h/, 'the detail must state how long the fleet has been stopped');
+});
+
+test('a heartbeat that has NEVER been written is a failure, not a pass', () => {
+  // The trap: treating a missing KV key as "fine" would have made this check
+  // green on exactly the box it was written for, since the key does not exist
+  // until the first successful spawn writes it.
+  const r = checkAgentSpawns({ secondsSinceOk: null });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /has ever authenticated/i);
+});
+
+test('the spawn check never reaches alert level', () => {
+  // Standing rule for this file: a timer that can hit push.js's alert
+  // exemption IS the flood. Every failure here must stay at warn.
+  for (const s of [null, 6 * 3600 + 1, 30 * 24 * 3600]) {
+    assert.equal(checkAgentSpawns({ secondsSinceOk: s }).severity, 'warn');
+  }
+});
+
+test('the window is generous enough to survive one quiet code-health cadence', () => {
+  // code-health is the busiest spawner at 3h. A single missed sweep must not
+  // announce anything; two must.
+  assert.equal(checkAgentSpawns({ secondsSinceOk: 3.5 * 3600 }).ok, true);
+  assert.equal(checkAgentSpawns({ secondsSinceOk: 6.5 * 3600 }).ok, false);
+});

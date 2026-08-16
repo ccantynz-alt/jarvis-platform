@@ -97,3 +97,40 @@ test('every account exhausted holds until the EARLIEST reset', () => {
   assert.equal(hold.until, T + 20 * 60_000, 'work resumes when the FIRST account comes back, not the last');
   assert.equal(hold.at, new Date(T + 20 * 60_000).toISOString());
 });
+
+// ── The three-day blind spot (2026-08-16) ───────────────────────────────────
+// Both claude.ai logins on the box expired. Every box-local spawn then failed
+// in ~2s, and the eight autonomous timers did nothing for three days while all
+// twelve services reported green. Three separate defects made that possible;
+// one test each.
+
+import { classifyFailure as classify2, utcDay } from '../src/lib/claude-auth.js';
+
+// Verbatim from `claude --model claude-opus-5 --print hi` on the box, 2026-08-16.
+const EXPIRED_OAUTH = 'Failed to authenticate: OAuth session expired and could not be refreshed';
+
+test('the live expired-OAuth string classifies as auth, not other', () => {
+  // If this ever regresses to 'other', spawn-agent silently burns the job and
+  // brain-claude escalates to a heavier tier that fails identically.
+  assert.equal(classify2({ stderr: EXPIRED_OAUTH, code: 1 }).kind, 'auth');
+});
+
+test('an auth failure outranks nothing it should not — limits still win', () => {
+  // Ordering guard: LIMIT_RE is checked before AUTH_RE/AUTH_RE2, and a message
+  // mentioning both must be treated as the recoverable one.
+  const both = `${EXPIRED_OAUTH}\nClaude AI usage limit reached`;
+  assert.equal(classify2({ message: both }).kind, 'usage_limit');
+});
+
+test('the auth alert is rate-limited by UTC DAY, not by process lifetime', () => {
+  // The old limiter was an in-process `lastAuthAlert` timestamp. Every caller
+  // is a systemd ONESHOT, so it reset on every run and gated nothing — and the
+  // notify is level:'alert', which is exempt from push dedupe AND the hourly
+  // cap. That combination is precisely the 235-buzz flood of 2026-08-10.
+  const morning = Date.parse('2026-08-16T01:25:00Z');
+  const evening = Date.parse('2026-08-16T23:59:59Z');
+  const nextDay = Date.parse('2026-08-17T00:00:01Z');
+  assert.equal(utcDay(morning), utcDay(evening), 'same UTC day must share one marker');
+  assert.notEqual(utcDay(evening), utcDay(nextDay), 'a new day must be allowed to alert again');
+  assert.equal(utcDay(morning), '2026-08-16');
+});

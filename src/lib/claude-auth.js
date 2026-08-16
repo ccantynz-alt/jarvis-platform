@@ -30,13 +30,20 @@ const PROFILES_DIR = process.env.CLAUDE_PROFILES_DIR || '/root/.claude-profiles'
 const DEFAULT_CONFIG = '/root/.claude';
 const ACTIVE_KEY = 'claude-active-profile';
 const EXHAUSTED_PREFIX = 'claude-profile-exhausted:';
+const AUTHFAIL_PREFIX = 'claude-profile-authfail:';   // name → UTC day we last alerted
+const LAST_SPAWN_OK_KEY = 'claude-last-spawn-ok';     // ISO of the last spawn that authed
 const REFRESH_MS = 60_000;
 // When a limit error carries no reset time, assume the worst-case remainder of
 // a 5-hour window is unknowable and re-probe after an hour.
 const DEFAULT_COOLDOWN_MS = 60 * 60_000;
+// A broken login is presumed broken for this long, so the failover doesn't flap
+// back onto it every spawn. Short, because the fix (`claude login`) is a human
+// action that can land at any moment and should be picked up promptly.
+const AUTH_COOLDOWN_MS = 15 * 60_000;
 
 let active = null;                  // profile name, in-process cache
 let exhausted = {};                 // name → epoch-ms until which it's dead
+let authBroken = {};                // name → epoch-ms until which its login is presumed dead
 let refreshTimer = null;
 
 // ── Profile discovery ────────────────────────────────────────────────────────
@@ -62,11 +69,17 @@ export function getActiveProfile() {
   return { name, configDir: name === 'default' ? null : path.join(PROFILES_DIR, name) };
 }
 
-// A profile we could flip to: not the active one, not inside its cooldown.
+// A profile we could flip to: not the active one, not inside a usage cooldown,
+// and not one whose LOGIN we just watched fail. The auth clause was added
+// 2026-08-16: without it, an auth failover would happily flip to a second
+// account whose OAuth was equally dead and call that a recovery.
 function otherUsableProfile() {
   const cur = getActiveProfile()?.name;
   const now = Date.now();
-  return listProfiles().find(p => p !== cur && (!exhausted[p] || exhausted[p] < now)) || null;
+  return listProfiles().find(p =>
+    p !== cur
+    && (!exhausted[p] || exhausted[p] < now)
+    && (!authBroken[p] || authBroken[p] < now)) || null;
 }
 
 /**
@@ -226,17 +239,93 @@ export async function switchProfile(name) {
   return target;
 }
 
-/** An auth-classified failure means a login needs redoing — alert once/hour. */
-let lastAuthAlert = 0;
-export async function reportAuthFailure(name, detail = '') {
-  if (Date.now() - lastAuthAlert < 3600_000) return;
-  lastAuthAlert = Date.now();
+/** The UTC day stamp used to rate-limit "only Craig can fix this" alerts. */
+export function utcDay(now = Date.now()) { return new Date(now).toISOString().slice(0, 10); }
+
+/**
+ * An auth-classified failure means a login needs redoing. Same shape as
+ * reportExhausted: mark the profile dead, flip to the other account if one is
+ * usable, say so. Returns the NEW active profile name, or null when no login
+ * works anywhere.
+ *
+ * TWO defects behind this, both found 2026-08-16 after box-local agent spawns
+ * had been dead for three days:
+ *
+ *  1. This function was only ever called from brain-claude.js. spawn-agent.js
+ *     classified the failure and then handled `usage_limit` ONLY, so `auth`
+ *     fell through and every autonomous timer (code-health, fix-runner,
+ *     self-heal, review-runner, harvester, agent-scheduler) logged a generic
+ *     "agent exited 1" forever. Craig was told the BRAIN was down; nothing said
+ *     the whole autonomous fleet had stopped with it.
+ *
+ *  2. The rate limit was an in-process `lastAuthAlert` timestamp. Every one of
+ *     those callers is a systemd ONESHOT — a fresh process per run — so the
+ *     hourly limiter reset every single time and gated nothing. Paired with
+ *     `level:'alert'`, which CLAUDE.md records as exempt from BOTH push dedupe
+ *     and the hourly cap, wiring this into the spawner naively would have
+ *     rebuilt the 235-notification flood of 2026-08-10 exactly.
+ *
+ * So the limit is a DURABLE once-per-UTC-day marker in KV, cleared on recovery
+ * by noteSpawnSuccess() — a human's rate limit for a human-only fix, which is
+ * the rule the flood incident earned.
+ */
+export async function reportAuthFailure(name, detail = '', now = Date.now()) {
+  authBroken[name] = now + AUTH_COOLDOWN_MS;
+
+  const next = otherUsableProfile();
+  if (next) {
+    active = next;
+    await kvSet(ACTIVE_KEY, next);
+    console.warn(`[claude-auth] login for ${name} is broken — flipped to ${next}`);
+    await notify({
+      source: 'claude-auth', level: 'warn',
+      title: `Claude login for "${name}" is broken — switched to "${next}"`,
+      body: `${detail.slice(0, 300)}\nRe-authorise it on the box: ${loginHint(name)}`,
+      speech: `Sir, the Claude login for account ${spoken(name)} needs re-authorising. I've switched to the other account and I'm still working.`,
+    });
+    return next;
+  }
+
+  // Nothing else to fall back on: this is a total outage of every autonomous
+  // Claude path, and only Craig can end it. Alert loudly — but once a day.
+  const today = utcDay(now);
+  if (await kvGet(AUTHFAIL_PREFIX + name) === today) {
+    console.error(`[claude-auth] login for ${name} still broken (already alerted ${today})`);
+    return null;
+  }
+  await kvSet(AUTHFAIL_PREFIX + name, today);
+  console.error(`[claude-auth] login for ${name} is broken and NO profile is usable`);
   await notify({
     source: 'claude-auth', level: 'alert',
-    title: `Claude login for profile "${name}" is broken`,
-    body: `${detail.slice(0, 300)}\nFix on the box: ${name === 'default' ? '' : `CLAUDE_CONFIG_DIR=${PROFILES_DIR}/${name} `}claude login`,
-    speech: `Sir, the Claude login for account ${name === 'default' ? 'one' : name} needs re-authorising.`,
+    title: `Claude login for "${name}" is broken — every autonomous agent is stopped`,
+    body: `${detail.slice(0, 300)}\n\nNo other profile can authenticate, so EVERY box-local Claude spawn is failing: code-health sweeps, fix-runner repairs, self-heal, review-runner, harvester distillation and the role agents. The services stay "green" because each one only reports its own port.\n\nFix on the box: ${loginHint(name)}`,
+    speech: `Sir, the Claude login for account ${spoken(name)} has expired and there's no working account to fall back on. Every autonomous agent is stopped until it's re-authorised.`,
   });
+  return null;
+}
+
+function loginHint(name) {
+  return name === 'default' ? 'claude login' : `CLAUDE_CONFIG_DIR=${PROFILES_DIR}/${name} claude login`;
+}
+function spoken(name) { return name === 'default' ? 'one' : name; }
+
+/**
+ * A spawn authenticated. Records the heartbeat the experience check reads, and
+ * clears a standing auth alert so the next real failure is loud again (the
+ * daily marker must never outlive the outage it describes).
+ */
+export async function noteSpawnSuccess(name, now = Date.now()) {
+  delete authBroken[name];
+  await kvSet(LAST_SPAWN_OK_KEY, new Date(now).toISOString());
+  if (await kvGet(AUTHFAIL_PREFIX + name)) {
+    await kvSet(AUTHFAIL_PREFIX + name, '');
+    await notify({
+      source: 'claude-auth', level: 'info',
+      title: `Claude login for "${name}" is working again`,
+      body: 'A spawn authenticated successfully. Autonomous agents have resumed.',
+      speech: `Sir, the Claude login for account ${spoken(name)} is working again. Autonomous agents have resumed.`,
+    });
+  }
 }
 
 /**

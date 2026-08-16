@@ -29,7 +29,7 @@ import { appendFileSync } from 'fs';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import {
-  checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe, checkPcWorker,
+  checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe, checkPcWorker, checkAgentSpawns,
   fingerprint, announcement, summarize, speech,
 } from './lib/experience.js';
 
@@ -121,12 +121,19 @@ const saveState = (state) => fetch(`${MEMORY}/memory/kv`, {
 async function main() {
   if (MODE === 'off') { log('EXPERIENCE_MODE=off — exiting'); return; }
 
-  const [voice, brain, lastHour, browser, pc] = await Promise.all([
+  const [voice, brain, lastHour, browser, pc, spawnOk] = await Promise.all([
     voiceState(), brainState(), alertRate(),
     jget(`${BROWSER}/browser/health`),
     jget('http://127.0.0.1:9205/pc/status'),
+    jget(`${MEMORY}/memory/kv/claude-last-spawn-ok`),
   ]);
   const git = gitState();
+
+  // Written by spawn-agent.js on every spawn that authenticates. Absent or
+  // unparseable → null, which checkAgentSpawns reports as "never" rather than
+  // silently treating a missing heartbeat as a fresh one.
+  const spawnAt = Date.parse(spawnOk?.value || '');
+  const secondsSinceOk = Number.isNaN(spawnAt) ? null : Math.max(0, (Date.now() - spawnAt) / 1000);
 
   const results = [
     checkDeploy(git),
@@ -134,6 +141,7 @@ async function main() {
     checkBrain(brain),
     checkAlertRate({ lastHour, threshold: ALERT_THRESHOLD }),
     checkPcWorker({ secondsSinceSeen: pc ? pc.seconds_since_seen : null }),
+    checkAgentSpawns({ secondsSinceOk }),
     checkShowMe({ browserOk: !!browser }),
   ];
 
