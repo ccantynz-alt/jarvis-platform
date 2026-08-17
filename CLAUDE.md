@@ -226,11 +226,18 @@ Pull-based worker `craig-pc` (`executor:"pc"` in the registry):
 `src/pc-worker.js` under Task Scheduler `JarvisPcWorker` polls the gateway's
 `/worker/claim` (scoped `JARVIS_WORKER_TOKEN`), runs `claude --print` on the
 PC's own subscription, reports to `/worker/result`; expired lease re-queues.
-Jarvis can also OPERATE the PC: `src/lib/pc-actions.js` — 10 typed verbs as
+Jarvis can also OPERATE the PC: `src/lib/pc-actions.js` — 13 typed verbs as
 PowerShell via `-EncodedCommand` (never stdin — `powershell -Command -` runs
 NOTHING and exits 0; never interpolation — `psQuote()` only). Read-only verbs
 run instantly; **anything mutating goes through the SAME dispatch confirmation
-gate as a fleet job** (`mutates` defaults TRUE for undeclared verbs). Rides
+gate as a fleet job** (`mutates` defaults TRUE for undeclared verbs).
+`system.info` is the LIVE snapshot (uptime, load, free memory/disk);
+**`system.specs` (2026-08-17) is the static hardware inventory** — machine
+model, CPU, installed memory + modules, GPU, disks, OS build — added because
+"what are my PC's specs" had no path through the platform at all: the nearest
+verb reported how much memory was in USE and nothing about what it IS. A new
+verb does not reach the PC until the worker is RESTARTED (`workerKnowsVerb`
+refuses it up front until then). Rides
 the jobs table on the `runtime` column (`'action'` vs `'claude'`). Elevation
 is measured and shipped in heartbeats (KV `pc-worker-capability`), along with
 the worker's VERB LIST (2026-08-10): `/pc/action` refuses a verb the connected

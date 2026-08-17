@@ -164,9 +164,9 @@ export const TOOLS = [
       task: { type: 'string', description: 'what the agent should do' },
       confirmed: { type: 'boolean', description: 'true ONLY after Craig has verbally confirmed' },
     }, required: ['task'] } },
-  { name: 'pc_control', description: "Act on CRAIG'S OWN WINDOWS PC (not the fleet box) — check or restart Windows services, list/kill processes, read the crash & error event log, snapshot the machine, or run a PowerShell command. Diagnostics run instantly. Anything that CHANGES the machine is staged and needs Craig's spoken yes. Use this for 'restart the worker service', 'why does my PC keep crashing', 'what's eating my memory'.",
+  { name: 'pc_control', description: "Act on CRAIG'S OWN WINDOWS PC (not the fleet box) — check or restart Windows services, list/kill processes, read the crash & error event log, snapshot the machine, read its hardware specs, or run a PowerShell command. Diagnostics run instantly. Anything that CHANGES the machine is staged and needs Craig's spoken yes. Use this for 'restart the worker service', 'why does my PC keep crashing', 'what's eating my memory', 'what are my PC's specs'.",
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', description: "one of: service.status, service.list, process.list, system.info, eventlog.errors (all read-only, instant); service.restart, service.start, service.stop, process.kill, shell (all staged for confirmation)" },
+      action: { type: 'string', description: "one of: service.status, service.list, process.list, system.info (LIVE snapshot: uptime, load, free memory/disk), system.specs (STATIC hardware: machine model, CPU, installed memory, GPU, disks, OS build), eventlog.errors (all read-only, instant); service.restart, service.start, service.stop, process.kill, shell (all staged for confirmation)" },
       name: { type: 'string', description: 'service or process name, for the service.*/process.kill actions' },
       pid: { type: 'number', description: 'process id, as an alternative to name for process.kill' },
       command: { type: 'string', description: 'PowerShell to run, for action=shell' },

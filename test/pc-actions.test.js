@@ -63,7 +63,7 @@ test('a legitimate service name with dots and dollars is accepted', () => {
 // ── The gate classification ─────────────────────────────────────────────────
 
 test('diagnostics are read-only and run without confirmation', () => {
-  for (const verb of ['service.status', 'service.list', 'process.list', 'system.info', 'eventlog.errors']) {
+  for (const verb of ['service.status', 'service.list', 'process.list', 'system.info', 'system.specs', 'eventlog.errors']) {
     const plan = planAction(verb, { name: 'Spooler' });
     assert.equal(plan.mutates, false, verb);
   }
@@ -123,6 +123,52 @@ test('process.kill requires a real pid when one is given', () => {
   assert.throws(() => planAction('process.kill', { pid: 'abc' }), /pid must be/);
   assert.throws(() => planAction('process.kill', { pid: -3 }), /pid must be/);
   assert.doesNotThrow(() => planAction('process.kill', { pid: 4242 }));
+});
+
+// ── The specs verb (2026-08-17) ─────────────────────────────────────────────
+// Craig asked what his PC's specs were and the platform had no path to the
+// answer: system.info reports how much memory is IN USE and nothing about what
+// the memory IS, and no other verb touched hardware. A read-only inventory.
+
+test('system.specs is read-only and needs no admin — it must run instantly', () => {
+  const plan = planAction('system.specs', {});
+  assert.equal(plan.mutates, false);
+  assert.equal(plan.needsAdmin, false);
+});
+
+test('system.specs reads the hardware, not the live load', () => {
+  const { script } = planAction('system.specs', {});
+  // The four things "what are the specs" actually means:
+  assert.match(script, /Win32_Processor/);        // CPU model, cores, clock
+  assert.match(script, /Win32_PhysicalMemory/);   // installed sticks, not free MB
+  assert.match(script, /Win32_VideoController/);  // GPU
+  assert.match(script, /Get-PhysicalDisk/);       // drives, with a Win32 fallback
+  assert.match(script, /Win32_DiskDrive/);
+});
+
+test('every optional spec source degrades instead of failing the whole action', () => {
+  // A machine with no discrete GPU, or a build without the Storage module,
+  // must still return the CPU and memory — a spec sheet is useful in parts.
+  const { script } = planAction('system.specs', {});
+  for (const cls of ['Win32_BIOS', 'Win32_PhysicalMemory', 'Win32_VideoController', 'Get-PhysicalDisk']) {
+    const line = script.split('\n').find((l) => l.includes(cls));
+    assert.match(line, /-ErrorAction SilentlyContinue/, `${cls} must not be fatal`);
+  }
+});
+
+test('system.specs bounds its output like every other verb', () => {
+  // Unbounded text blows up a job row and a spoken reply.
+  const { script } = planAction('system.specs', {});
+  for (const m of script.match(/Select-Object -First (\d+)/g) || []) {
+    assert.ok(Number(m.match(/(\d+)/)[1]) <= 8, m);
+  }
+  assert.equal((script.match(/Select-Object -First/g) || []).length, 4);
+});
+
+test('system.specs takes no arguments — nothing untrusted reaches the script', () => {
+  const a = planAction('system.specs', {}).script;
+  const b = planAction('system.specs', { name: "'; Remove-Item C:\\ -Recurse; '", top: 9999 }).script;
+  assert.equal(a, b);
 });
 
 // ── Flywheel harvest verbs (2026-08-08) ─────────────────────────────────────
@@ -207,6 +253,10 @@ test('a worker that reports its verbs pins dispatch to them', () => {
   ] };
   assert.equal(workerKnowsVerb(staleWorker, 'harvest.list'), false);
   assert.equal(workerKnowsVerb(staleWorker, 'system.info'), true);
+  // Shipping system.specs in this repo does not put it on the PC: until the
+  // worker is restarted it reports the older table and /pc/action refuses the
+  // dispatch up front, with the restart as the remedy.
+  assert.equal(workerKnowsVerb(staleWorker, 'system.specs'), false);
   // A current worker reports the full table and everything dispatches:
   const current = { elevated: false, verbs: Object.keys(VERBS) };
   for (const verb of Object.keys(VERBS)) {

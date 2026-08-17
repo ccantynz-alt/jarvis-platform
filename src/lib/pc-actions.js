@@ -125,6 +125,82 @@ export const VERBS = {
         Format-Table -AutoSize | Out-String -Width 200`,
   },
 
+  /**
+   * system.specs — the HARDWARE INVENTORY, as opposed to system.info's live
+   * snapshot. Both existed as one verb in Craig's head and neither answered
+   * him: 2026-08-10 he asked Marco for his PC's specs and got nothing back
+   * (the worker had been dead 26 hours), and even with the worker alive the
+   * only verb in range was system.info, which reports how much of the memory
+   * is in USE and says nothing about what the memory IS. "What CPU is in this
+   * machine" had no path through the platform at all.
+   *
+   * Separate verb, not a flag on system.info: these answers are static, so
+   * the two have different lifetimes — a snapshot is worth re-taking every
+   * time, an inventory is worth quoting from a job row weeks later.
+   *
+   * Every optional source is -ErrorAction SilentlyContinue with a fallback,
+   * because a machine missing ONE CIM class (Get-PhysicalDisk on an old
+   * build, no discrete GPU) must still return the rest rather than fail the
+   * whole action — a spec sheet is useful in parts.
+   */
+  'system.specs': {
+    mutates: false, needsAdmin: false,
+    describe: () => "read the PC's hardware specs (machine, CPU, memory, GPU, disks, OS)",
+    build: () => `
+      $cs   = Get-CimInstance Win32_ComputerSystem
+      $os   = Get-CimInstance Win32_OperatingSystem
+      $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
+      $cpus = @(Get-CimInstance Win32_Processor)
+      $cpu  = $cpus[0]
+      $biosDate = if ($bios -and $bios.ReleaseDate) { $bios.ReleaseDate.ToString('yyyy-MM-dd') } else { 'unknown' }
+      # Computed OUT of the string rather than as a nested-quote subexpression:
+      # this script is only ever exercised on Craig's machine, so parser
+      # cleverness that cannot be tested here does not belong in it.
+      $sockets = if ($cpus.Count -gt 1) { ', ' + $cpus.Count + ' sockets' } else { '' }
+
+      "Machine     : $($cs.Manufacturer) $($cs.Model)"
+      "Host        : $($cs.Name)   ($($cs.SystemType))"
+      "BIOS        : $($bios.SMBIOSBIOSVersion)  ($biosDate)   serial $($bios.SerialNumber)"
+      "OS          : $($os.Caption) $($os.OSArchitecture), build $($os.BuildNumber)  (version $($os.Version))"
+      "CPU         : $(($cpu.Name -replace '\\s+', ' ').Trim())"
+      "              $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) threads @ $($cpu.MaxClockSpeed) MHz$sockets"
+      "Memory      : $([math]::Round($cs.TotalPhysicalMemory/1GB, 1)) GB installed"
+      ""
+
+      $mem = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+      if ($mem.Count -gt 0) {
+        "Memory modules:"
+        $mem | Select-Object -First 8 @{N='Slot';E={$_.DeviceLocator}},
+          @{N='GB';E={[math]::Round($_.Capacity/1GB, 1)}},
+          @{N='MHz';E={if ($_.ConfiguredClockSpeed) { $_.ConfiguredClockSpeed } else { $_.Speed }}},
+          Manufacturer, PartNumber |
+          Format-Table -AutoSize | Out-String -Width 200
+      }
+
+      $gpu = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+      if ($gpu.Count -gt 0) {
+        "Graphics:"
+        $gpu | Select-Object -First 4 Name,
+          @{N='VRAM_GB';E={if ($_.AdapterRAM -gt 0) { [math]::Round($_.AdapterRAM/1GB, 1) } else { '?' }}},
+          @{N='Driver';E={$_.DriverVersion}},
+          @{N='Mode';E={$_.VideoModeDescription}} |
+          Format-Table -AutoSize | Out-String -Width 200
+      }
+
+      "Disks:"
+      $phys = @(Get-PhysicalDisk -ErrorAction SilentlyContinue)
+      if ($phys.Count -gt 0) {
+        $phys | Select-Object -First 8 FriendlyName, MediaType, BusType,
+          @{N='SizeGB';E={[math]::Round($_.Size/1GB)}} |
+          Format-Table -AutoSize | Out-String -Width 200
+      } else {
+        Get-CimInstance Win32_DiskDrive -ErrorAction SilentlyContinue |
+          Select-Object -First 8 Model, InterfaceType,
+            @{N='SizeGB';E={[math]::Round($_.Size/1GB)}} |
+          Format-Table -AutoSize | Out-String -Width 200
+      }`,
+  },
+
   // The verb that matters most right now: Craig's PC is crashing and nobody
   // has read its event log. Kernel-Power 41 = it went down without a clean
   // shutdown; BugCheck = a blue screen with a dump to read.
