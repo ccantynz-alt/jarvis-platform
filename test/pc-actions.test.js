@@ -13,6 +13,7 @@ import assert from 'node:assert/strict';
 import {
   psQuote, planAction, VERBS, isKnownVerb, workerKnowsVerb,
   encodeActionJob, decodeActionJob, ACTION_RUNTIME,
+  SPECS_PROBE, parseSpecsSummary, sanitizeSpecs, describeRam,
 } from '../src/lib/pc-actions.js';
 
 // ── Quoting: the whole injection defence ────────────────────────────────────
@@ -183,6 +184,58 @@ test('system.specs takes no arguments — nothing untrusted reaches the script',
   const a = planAction('system.specs', {}).script;
   const b = planAction('system.specs', { name: "'; Remove-Item C:\\ -Recurse; '", top: 9999 }).script;
   assert.equal(a, b);
+});
+
+// ── The specs probe: an answer that outlives the machine (2026-08-17) ───────
+// Craig, out shopping with only his phone, asked what RAM the laptop has. Every
+// route needed the laptop: dispatch the verb -> worker online -> worker
+// restarted to know the verb. The machine was at home. A static hardware fact
+// must not require the hardware to be present.
+
+test('the probe reports the RAM facts that need answering offline', () => {
+  for (const key of ['ram_gb', 'ram_type', 'ram_modules', 'ram_slots', 'ram_max_gb', 'cpu', 'host']) {
+    assert.match(SPECS_PROBE, new RegExp(`"${key}=`), key);
+  }
+});
+
+test('parseSpecsSummary takes only allowlisted keys', () => {
+  const specs = parseSpecsSummary([
+    'ram_gb=16', 'ram_type=DDR4', 'ram_modules=2', 'ram_slots=2', 'ram_max_gb=64',
+    'evil=whatever', 'not a pair', '=novalue',
+  ].join('\r\n'));
+  assert.equal(specs.ram_gb, '16');
+  assert.equal(specs.ram_max_gb, '64');
+  assert.equal(specs.evil, undefined);
+});
+
+test('a probe that returns nothing usable yields null, never an empty record', () => {
+  // The heartbeat omits the field entirely in this case, so the server keeps
+  // the good specs it already had. Overwriting them with {} defeats the point.
+  assert.equal(parseSpecsSummary(''), null);
+  assert.equal(parseSpecsSummary('PowerShell exploded'), null);
+  assert.equal(parseSpecsSummary(null), null);
+});
+
+test('sanitizeSpecs refuses to trust the wire', () => {
+  // A worker is a machine that can be running edited code.
+  assert.equal(sanitizeSpecs('16 GB'), null);
+  assert.equal(sanitizeSpecs(['ram_gb']), null);
+  assert.equal(sanitizeSpecs({ dropTable: 'x' }), null);
+  const clean = sanitizeSpecs({ ram_gb: 16, cpu: 'x'.repeat(500), rogue: 'no' });
+  assert.equal(clean.ram_gb, '16');
+  assert.equal(clean.cpu.length, 120);
+  assert.equal(clean.rogue, undefined);
+});
+
+test('describeRam says something useful from whatever survived', () => {
+  assert.equal(
+    describeRam({ ram_gb: '16', ram_type: 'DDR4', ram_modules: '2', ram_slots: '2', ram_max_gb: '64' }),
+    '16 GB DDR4, 2 of 2 slots used, 64 GB board maximum');
+  // Partial is still worth speaking when he is standing in a shop.
+  assert.equal(describeRam({ ram_gb: '16' }), '16 GB');
+  assert.equal(describeRam({ ram_gb: '16', ram_type: 'unknown' }), '16 GB');
+  assert.equal(describeRam(null), null);
+  assert.equal(describeRam({ cpu: 'no ram here' }), null);
 });
 
 // ── Flywheel harvest verbs (2026-08-08) ─────────────────────────────────────

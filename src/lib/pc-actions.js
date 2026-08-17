@@ -393,6 +393,114 @@ export const VERBS = {
 export const isKnownVerb = (verb) => Object.prototype.hasOwnProperty.call(VERBS, verb);
 
 /**
+ * THE SPECS PROBE — why a verb was not enough (2026-08-17).
+ *
+ * Craig, out shopping with only a phone, asked what RAM his laptop has. Every
+ * route to the answer required the laptop itself: dispatch system.specs → the
+ * worker must be online → and it must have been restarted to know the verb.
+ * The machine was at home. So the platform could not answer a static fact
+ * about hardware it has been diagnosing for weeks.
+ *
+ * A fact that never changes should not need the machine present to be read.
+ * The worker measures this ONCE at startup and ships it in every heartbeat;
+ * the server keeps it in KV `pc-worker-capability`, which SURVIVES the laptop
+ * being asleep, shut, or in another county. "What RAM do I have" is then
+ * answerable from any surface, offline, with no job dispatch at all.
+ *
+ * Deliberately k=v lines rather than JSON: PowerShell's ConvertTo-Json on CIM
+ * objects drags in type metadata and can emit an array or a bare object
+ * depending on row count — a shape that changes with the data is the wrong
+ * contract for something parsed on the far side of a wire.
+ */
+export const SPECS_PROBE = `
+  $cs   = Get-CimInstance Win32_ComputerSystem
+  $os   = Get-CimInstance Win32_OperatingSystem
+  $cpu  = @(Get-CimInstance Win32_Processor)[0]
+  $mem  = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+  $arr  = Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction SilentlyContinue
+  $memTypes = @{ 20='DDR'; 21='DDR2'; 22='DDR2 FB-DIMM'; 24='DDR3'; 26='DDR4';
+                 27='LPDDR'; 28='LPDDR2'; 29='LPDDR3'; 30='LPDDR4'; 34='DDR5'; 35='LPDDR5' }
+  $ramType = 'unknown'
+  if ($mem.Count -gt 0 -and $memTypes.ContainsKey([int]$mem[0].SMBIOSMemoryType)) { $ramType = $memTypes[[int]$mem[0].SMBIOSMemoryType] }
+  $ramMax = ''
+  if ($arr) {
+    if ($arr.MaxCapacityEx) { $ramMax = [math]::Round($arr.MaxCapacityEx/1MB) }
+    elseif ($arr.MaxCapacity) { $ramMax = [math]::Round($arr.MaxCapacity/1MB) }
+  }
+  "host=$($cs.Name)"
+  "machine=$($cs.Manufacturer) $($cs.Model)"
+  "cpu=$(($cpu.Name -replace '\\s+', ' ').Trim())"
+  "cpu_cores=$($cpu.NumberOfCores)"
+  "cpu_threads=$($cpu.NumberOfLogicalProcessors)"
+  "ram_gb=$([math]::Round($cs.TotalPhysicalMemory/1GB, 1))"
+  "ram_type=$ramType"
+  "ram_modules=$($mem.Count)"
+  "ram_slots=$(if ($arr -and $arr.MemoryDevices) { $arr.MemoryDevices } else { '' })"
+  "ram_max_gb=$ramMax"
+  "os=$($os.Caption) build $($os.BuildNumber)"`;
+
+// The keys the probe is allowed to report. An allowlist rather than "whatever
+// came back": this string is parsed on the server and stored, and a probe from
+// a machine running older or edited code must not be able to inject arbitrary
+// keys into the capability record.
+export const SPECS_KEYS = [
+  'host', 'machine', 'cpu', 'cpu_cores', 'cpu_threads',
+  'ram_gb', 'ram_type', 'ram_modules', 'ram_slots', 'ram_max_gb', 'os',
+];
+
+/**
+ * Parse the probe's k=v output. Total: never throws, ignores anything it does
+ * not recognise, and returns null when nothing usable came back — a worker on
+ * a machine that answered garbage must leave the stored specs alone rather
+ * than overwrite good data with an empty object.
+ */
+export function parseSpecsSummary(stdout) {
+  const out = {};
+  for (const raw of String(stdout || '').split(/\r?\n/)) {
+    const eq = raw.indexOf('=');
+    if (eq < 1) continue;
+    const key = raw.slice(0, eq).trim();
+    if (!SPECS_KEYS.includes(key)) continue;
+    // Bounded: a stored value is read back into a spoken reply.
+    const value = raw.slice(eq + 1).trim().slice(0, 120);
+    if (value) out[key] = value;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Server side: specs arriving over the wire, allowlisted and bounded. The job
+ * row is not a trust boundary and neither is a heartbeat body — a worker is a
+ * machine that can be running edited code, so the server takes only the keys
+ * it knows and truncates every value before it is stored and later spoken.
+ */
+export function sanitizeSpecs(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const out = {};
+  for (const key of SPECS_KEYS) {
+    const v = value[key];
+    if (v === undefined || v === null) continue;
+    const s = String(v).trim().slice(0, 120);
+    if (s) out[key] = s;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * One line Craig can hear. Written from whatever the probe managed to collect,
+ * because a partial answer ("16 GB, DDR4") is worth far more than silence when
+ * he is standing in a shop.
+ */
+export function describeRam(specs) {
+  if (!specs || !specs.ram_gb) return null;
+  let line = `${specs.ram_gb} GB`;
+  if (specs.ram_type && specs.ram_type !== 'unknown') line += ` ${specs.ram_type}`;
+  if (specs.ram_modules && specs.ram_slots) line += `, ${specs.ram_modules} of ${specs.ram_slots} slots used`;
+  if (specs.ram_max_gb) line += `, ${specs.ram_max_gb} GB board maximum`;
+  return line;
+}
+
+/**
  * Does the CONNECTED worker know this verb? The worker re-validates every job
  * against its own copy of this table (decodeActionJob — the job row is not a
  * trust boundary), which means shipping a verb in this repo does not ship it

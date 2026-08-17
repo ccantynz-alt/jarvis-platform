@@ -24,7 +24,10 @@ import { existsSync, readFileSync, statSync, readdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import { pathToFileURL } from 'url';
-import { decodeActionJob, buildPowerShellArgs, cleanStderr, VERBS } from './lib/pc-actions.js';
+import {
+  decodeActionJob, buildPowerShellArgs, cleanStderr, VERBS,
+  SPECS_PROBE, parseSpecsSummary,
+} from './lib/pc-actions.js';
 
 function loadEnvFile(p) {
   if (!existsSync(p)) return {};
@@ -153,6 +156,9 @@ function startHeartbeat() {
       // the 2026-08-08→10 harvest.list loop, 41 failed jobs from one missing
       // worker restart.
       verbs: Object.keys(VERBS),
+      // Static hardware facts, measured once at startup. Omitted entirely when
+      // the probe failed, so the server never loses a good record to a bad run.
+      ...(machineSpecs ? { specs: machineSpecs } : {}),
     }).catch(e => log(`heartbeat failed: ${e.message}`));
   }, HEARTBEAT_MS);
   heartbeatTimer.unref?.();
@@ -223,6 +229,11 @@ function runClaude(prompt, cwd, timeoutMin) {
 // "Access is denied" that nobody can act on.
 let isElevated = null;   // null = not yet known
 
+// Measured once at startup alongside elevation, and shipped in every heartbeat
+// so the answer outlives the machine being switched off. See SPECS_PROBE in
+// lib/pc-actions.js for why a verb was not enough.
+let machineSpecs = null; // null = not yet known / probe failed
+
 function powershell(script, timeoutMin) {
   return new Promise((resolve) => {
     const proc = spawn('powershell.exe', buildPowerShellArgs(script), {
@@ -255,6 +266,18 @@ async function detectElevation() {
   isElevated = /true/i.test(r.stdout);
   log(`elevation: ${isElevated ? 'ADMINISTRATOR — service control available' : 'standard user — service control will FAIL (re-run scripts/install-pc-worker.ps1 as admin)'}`);
   return isElevated;
+}
+
+// A failed probe leaves machineSpecs null and the heartbeat simply omits the
+// field, so the server keeps whatever it already had. Overwriting a good spec
+// record with nothing would defeat the entire point of storing it.
+async function detectSpecs() {
+  const r = await powershell(SPECS_PROBE, 1);
+  machineSpecs = parseSpecsSummary(r.stdout);
+  log(machineSpecs
+    ? `specs: ${machineSpecs.ram_gb} GB RAM (${machineSpecs.ram_type}), ${machineSpecs.cpu}`
+    : 'specs: probe returned nothing usable — keeping whatever the server already has');
+  return machineSpecs;
 }
 
 async function runAction(job) {
@@ -541,6 +564,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   // Measure elevation before the first heartbeat so the server never has to
   // guess, and so the log says plainly what this worker can and cannot do.
   detectElevation().catch(e => log(`elevation check failed: ${e.message}`));
+  detectSpecs().catch(e => log(`specs probe failed: ${e.message}`));
   startHeartbeat();
   loop();
   actionLoop();

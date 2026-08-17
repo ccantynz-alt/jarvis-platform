@@ -174,7 +174,7 @@ export const TOOLS = [
       top: { type: 'number', description: 'how many rows for the list actions' },
       filter: { type: 'string', description: 'substring filter for service.list' },
     }, required: ['action'] } },
-  { name: 'get_pc_status', description: "Is Craig's PC online, is the Jarvis worker running on it, and does it have administrator rights (needed to restart services)? Check this before promising anything on the PC.",
+  { name: 'get_pc_status', description: "Is Craig's PC online, is the Jarvis worker running on it, and does it have administrator rights (needed to restart services)? ALSO returns its HARDWARE SPECS — RAM (size, type, slots used, board maximum), CPU, machine model, OS — recorded at the worker's last startup and served whether the PC is online or NOT. Use this for 'what RAM does my laptop have', 'what are my PC's specs': it needs no job dispatch and works while the machine is off. Check this before promising anything on the PC.",
     input_schema: { type: 'object', properties: {}, required: [] } },
   { name: 'web_search', description: "Search the public web for a query and get back a list of result titles, URLs and snippets. Use to find pages before fetching/rendering them.",
     input_schema: { type: 'object', properties: { query: { type: 'string' }, count: { type: 'number', description: 'how many results (1-10, default 6)' } }, required: ['query'] } },

@@ -239,7 +239,21 @@ model, CPU, installed memory + modules, GPU, disks, OS build — added because
 verb reported how much memory was in USE and nothing about what it IS. A new
 verb does not reach the PC until the worker is RESTARTED (`workerKnowsVerb`
 refuses it up front until then). Rides
-the jobs table on the `runtime` column (`'action'` vs `'claude'`). Elevation
+the jobs table on the `runtime` column (`'action'` vs `'claude'`).
+
+**Hardware specs ride the heartbeat, and that is the point: `GET /pc/status`
+answers "what RAM does my laptop have" WHILE THE LAPTOP IS OFF (2026-08-17).**
+Craig asked that from a shop with only his phone, and every route demanded the
+machine — dispatch `system.specs` → worker online → worker restarted to know
+the verb. A static fact must not require the hardware to be present. The worker
+measures `SPECS_PROBE` once at startup and ships it; the server stores it in
+the capability KV and **carries it forward when a heartbeat omits it** (older
+worker, failed probe) — that record is rebuilt from scratch every beat, so
+without the carry-forward one bad probe erases the answer. Sanitised
+server-side against `SPECS_KEYS` (a heartbeat body is not a trust boundary).
+Brain tool: `get_pc_status`.
+
+Elevation
 is measured and shipped in heartbeats (KV `pc-worker-capability`), along with
 the worker's VERB LIST (2026-08-10): `/pc/action` refuses a verb the connected
 worker hasn't got (409 + remedy, `workerKnowsVerb()`) instead of manufacturing

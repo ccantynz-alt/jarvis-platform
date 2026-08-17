@@ -9,7 +9,7 @@ import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spaw
 import { usageHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
-import { planAction, encodeActionJob, workerKnowsVerb } from './lib/pc-actions.js';
+import { planAction, encodeActionJob, workerKnowsVerb, sanitizeSpecs, describeRam } from './lib/pc-actions.js';
 import { jobWritesPlatformHealth } from './lib/health-status.js';
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
@@ -745,9 +745,18 @@ app.post('/worker/heartbeat', async (req, res) => {
     const verbs = Array.isArray(req.body?.verbs)
       ? req.body.verbs.slice(0, 64).map(v => String(v).slice(0, 60))
       : undefined;
+    // `specs` (2026-08-17): static hardware, measured once at worker startup.
+    // This record is REBUILT from scratch every heartbeat, so a heartbeat that
+    // omits specs — an older worker, or a probe that failed — must not erase
+    // them. Carry the stored value forward; the whole point is that the answer
+    // outlives the machine being switched off, and it is worthless if a single
+    // bad probe wipes it. (Doctrine: new state is additive; writers UPSERT only
+    // the fields they own.)
+    let specs = sanitizeSpecs(req.body?.specs);
+    if (!specs) specs = sanitizeSpecs((await pcWorkerCapability())?.specs);
     await dbPost('/memory/kv', {
       key: 'pc-worker-capability',
-      value: JSON.stringify({ worker_id: worker_id || 'unknown', host: host || null, elevated: !!elevated, verbs, at: new Date().toISOString() }),
+      value: JSON.stringify({ worker_id: worker_id || 'unknown', host: host || null, elevated: !!elevated, verbs, specs, at: new Date().toISOString() }),
     }).catch(() => {});
   }
   // job_ids (plural) because the worker can hold an agent job and a fast-lane
@@ -863,6 +872,12 @@ app.get('/pc/status', async (req, res) => {
     seconds_since_seen: ageMs == null ? null : Math.round(ageMs / 1000),
     elevated: capability ? capability.elevated : null,
     host: capability ? capability.host : null,
+    // Hardware, from the last worker startup. Deliberately served whether the
+    // PC is online or NOT: it is a static fact held on the box, and the case
+    // that motivated it was Craig asking what RAM his laptop has while the
+    // laptop was at home and he was in a shop with a phone (2026-08-17).
+    specs: capability ? (capability.specs || null) : null,
+    ram: capability ? describeRam(capability.specs) : null,
     enabled: await pcWorkerEnabled(),
   });
 });
