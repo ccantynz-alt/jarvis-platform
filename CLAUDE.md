@@ -418,6 +418,21 @@ auth).
   in-process timestamp: every caller is a oneshot, so a process-local limiter
   gates nothing, and `alert` is exempt from push dedupe. First check when the
   fleet is quiet but healthy: `claude --model claude-opus-5 --print hi`.
+- **EVERY cooldown a oneshot touches must be durable, not just the alert
+  limiter** (2026-08-17). The auth-broken cooldown stayed in process memory, so
+  each fresh oneshot thought the other account was fine and flipped to it — 171
+  notifications in 7 days announcing recovery onto a login that was equally
+  dead. Durable in `claude-profile-authbroken:<name>`; the switch notice has its
+  OWN daily marker (`claude-profile-authwarn:<name>`) so it can never suppress
+  the total-outage alert.
+- **Both accounts dying at once usually means the ORG, not the sessions**
+  (2026-08-17). A claude.ai org can switch Claude Code access off for all its
+  members; `claude login` cannot fix it and neither can the second account —
+  only re-enabling it in claude.ai settings (Craig is the org admin). It
+  classifies as `auth`/`reason:'org_disabled'` and deliberately never fails
+  over. **Check the newest CLI in the fleet when a diagnosis rests on an error
+  string**: 158 (2.1.223) named the org policy outright while the master
+  (2.1.220) reported only a generic "OAuth session expired".
 - The confirmation gate: a false "yes" launches a production agent — test
   both directions before touching the vocabulary.
 - Transcript saves merge; `agent_context` is the KV table — never "clean" it.

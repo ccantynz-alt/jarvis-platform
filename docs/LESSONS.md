@@ -128,6 +128,48 @@ really heard, said, and called.
 
 ---
 
+**An org-level switch kills BOTH accounts at once, and the failover flapped
+between them for three days (2026-08-17).** Craig opened with "we have major
+defects". Every one of the 491 tests passed, all twelve services answered 200,
+every timer fired on schedule — and the fleet had done no work since the 14th.
+Both claude.ai profiles on the box had `expiresAt: 0` and
+`hasAvailableSubscription: false`, and box 158 — running a NEWER CLI (2.1.223 vs
+the master's 2.1.220) — printed the actual reason the master's generic
+"OAuth session expired and could not be refreshed" had hidden: *"Your
+organization has disabled Claude subscription access for Claude Code."* One root
+cause, not three. Craig is the org admin, so every `claude login` anyone might
+have run in response would have been refused the moment it finished.
+
+Two code defects sat underneath it:
+
+1. **The auth-broken cooldown was in-process; every autonomous caller is a
+   systemd oneshot.** So `authBroken` was empty at process start, each fresh
+   process believed the *other* account was fine, flipped to it, and announced a
+   triumphant recovery — 171 claude-auth notifications in seven days, ~90 a day,
+   every one of them "switched to X". This is the SAME defect the 2026-08-16 fix
+   records as closed for the *alert limiter*: made durable one layer up, left
+   in-process one layer down. Whenever a limiter or a cooldown guards something
+   a oneshot touches, the state has to be in KV — process memory gates nothing.
+   Now `claude-profile-authbroken:<name>`, loaded in `refreshFromKV()` and
+   awaited *before* the decision. The switch notice got its own once-per-UTC-day
+   marker on a SEPARATE key (`claude-profile-authwarn:<name>`) so it can never
+   suppress the far more important total-outage alert.
+
+2. **The org-disabled message classified as `other`.** `spawn-agent.js` breaks
+   out of its auth branch for any non-auth kind, so the single most informative
+   error in the estate — the one naming its own fix — produced a generic "agent
+   exited 1", no failover, no alert, no `authHeld`. It now classifies as
+   `auth`/`reason:'org_disabled'`, and that reason **never fails over**: trying
+   the second account under a disabled org is not a failover, it is a second
+   identical failure. The alert says "re-enable Claude Code access in claude.ai
+   settings", not "run `claude login`", because the second is wrong advice.
+
+The decision is now a pure `authFailoverPlan()` with ten regression tests, so a
+flap that could previously only be observed in production is testable. Standing
+lesson: **when a diagnosis depends on an error string, check the newest CLI in
+the fleet** — the master's binary was three patches behind and turned an
+actionable org-policy message into a generic session error.
+
 ## Guardrails & numeric limits
 
 **The 117-dispatch day (2026-07-17).** systemd's `EnvironmentFile` does NOT
