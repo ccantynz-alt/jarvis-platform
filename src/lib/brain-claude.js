@@ -379,7 +379,7 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
           const next = await reportExhausted(s.profile, cls.resetAt);
           if (next) continue;             // retry once on the other login
         } else if (cls.kind === 'auth') {
-          await reportAuthFailure(s.profile, e.message);
+          await reportAuthFailure(s.profile, e.message, { reason: cls.reason });
         } else if (cls.kind === 'model') {
           // This box's `claude` binary doesn't know the tier we asked for.
           // Escalating UP would hand the same stale binary a model it knows

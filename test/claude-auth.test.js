@@ -134,3 +134,102 @@ test('the auth alert is rate-limited by UTC DAY, not by process lifetime', () =>
   assert.notEqual(utcDay(evening), utcDay(nextDay), 'a new day must be allowed to alert again');
   assert.equal(utcDay(morning), '2026-08-16');
 });
+
+// ── 2026-08-17: the failover that flapped between two dead accounts ──────────
+// From 2026-08-14 both claude.ai logins on the box were dead. This decision ran
+// every 6-15 minutes and each time announced a switch to the other account,
+// which was equally dead: 171 claude-auth notifications in seven days. The
+// cause was `authBroken` living only in process memory while every autonomous
+// caller is a systemd oneshot — the SAME defect this file's tests above record
+// as fixed for the alert limiter on 2026-08-16, one layer further down.
+
+import { authFailoverPlan, classifyFailure as classify3 } from '../src/lib/claude-auth.js';
+
+// Verbatim from `claude --model claude-opus-5 --print hi` on box 158
+// (claude 2.1.223), 2026-08-17.
+const ORG_DISABLED =
+  'Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access';
+
+const NOW = Date.parse('2026-08-17T07:00:00Z');
+const TODAY = '2026-08-17';
+
+test('a profile whose login is DURABLY broken is not a failover target', () => {
+  // The flap in one assertion: without the durable cooldown, `next` came back
+  // as 'account-b' forever and every oneshot announced a fresh "recovery".
+  const plan = authFailoverPlan({
+    profiles: ['default', 'account-b'], name: 'default',
+    authBroken: { 'account-b': NOW + 60_000 }, now: NOW,
+  });
+  assert.equal(plan.next, null);
+  assert.equal(plan.announce, 'alert', 'no usable login is a total outage, not a switch');
+});
+
+test('an expired cooldown lets the other login be tried again', () => {
+  // Short on purpose: `claude login` is a human action that can land any moment.
+  const plan = authFailoverPlan({
+    profiles: ['default', 'account-b'], name: 'default',
+    authBroken: { 'account-b': NOW - 1 }, now: NOW,
+  });
+  assert.equal(plan.next, 'account-b');
+});
+
+test('a switch is announced once per UTC day, not once per oneshot', () => {
+  const args = {
+    profiles: ['default', 'account-b'], name: 'default',
+    authBroken: {}, now: NOW,
+  };
+  assert.equal(authFailoverPlan({ ...args }).announce, 'warn', 'first switch of the day is worth saying');
+  assert.equal(authFailoverPlan({ ...args, warnedDay: TODAY }).announce, null, 'the 90th is not');
+  assert.equal(authFailoverPlan({ ...args, warnedDay: '2026-08-16' }).announce, 'warn', 'a new day speaks again');
+});
+
+test('the warn marker cannot suppress the far more important alert', () => {
+  // Deliberately separate keys: a day that already carried a "switched to X"
+  // warn must still be able to carry "every autonomous agent is stopped".
+  const plan = authFailoverPlan({
+    profiles: ['default', 'account-b'], name: 'default',
+    authBroken: { 'account-b': NOW + 60_000 }, now: NOW,
+    warnedDay: TODAY, alertedDay: null,
+  });
+  assert.equal(plan.announce, 'alert');
+});
+
+test('the total-outage alert is still once a day', () => {
+  const plan = authFailoverPlan({
+    profiles: ['default', 'account-b'], name: 'default',
+    authBroken: { 'account-b': NOW + 60_000 }, now: NOW, alertedDay: TODAY,
+  });
+  assert.equal(plan.announce, null);
+});
+
+test('a usage-exhausted profile is not a login failover target either', () => {
+  const plan = authFailoverPlan({
+    profiles: ['default', 'account-b'], name: 'default',
+    exhausted: { 'account-b': NOW + 60_000 }, now: NOW,
+  });
+  assert.equal(plan.next, null);
+});
+
+test('the org-disabled message classifies as auth, not other', () => {
+  // It classified as 'other' until 2026-08-17, so spawn-agent.js broke straight
+  // out of its auth branch: no failover, no alert, no authHeld — just a generic
+  // "agent exited 1" for the one error that names its own fix.
+  assert.equal(classify3({ stderr: ORG_DISABLED, code: 1 }).kind, 'auth');
+  assert.equal(classify3({ stderr: ORG_DISABLED, code: 1 }).reason, 'org_disabled');
+});
+
+test('an ordinary expired session is still reason:session', () => {
+  assert.equal(classify3({ stderr: EXPIRED_OAUTH, code: 1 }).reason, 'session');
+});
+
+test('org_disabled never fails over — every login under that org is refused', () => {
+  // Trying the second account here is not a failover, it is a second identical
+  // failure, and `claude login` cannot fix either one. Go straight to the alert
+  // that tells Craig to re-enable Claude Code in his org settings.
+  const plan = authFailoverPlan({
+    profiles: ['default', 'account-b'], name: 'default',
+    reason: 'org_disabled', authBroken: {}, now: NOW,
+  });
+  assert.equal(plan.next, null, 'a healthy-looking second account must NOT be tried');
+  assert.equal(plan.announce, 'alert');
+});

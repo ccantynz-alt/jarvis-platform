@@ -15,6 +15,10 @@
  * Durable state (memory :9200 KV, shared by every service process):
  *   claude-active-profile            — name of the profile new spawns should use
  *   claude-profile-exhausted:<name>  — ISO time until which <name> is limp
+ *   claude-profile-authbroken:<name> — ISO time until which <name>'s LOGIN is
+ *                                      presumed dead (see reportAuthFailure)
+ *   claude-profile-authwarn:<name>   — UTC day we last announced a switch away
+ *                                      from <name>, so a flap can't flood
  *
  * Every service refreshes from KV every 60s, so a flip made by the deck
  * propagates to the orchestrator within a minute; the process that DETECTS a
@@ -31,6 +35,8 @@ const DEFAULT_CONFIG = '/root/.claude';
 const ACTIVE_KEY = 'claude-active-profile';
 const EXHAUSTED_PREFIX = 'claude-profile-exhausted:';
 const AUTHFAIL_PREFIX = 'claude-profile-authfail:';   // name → UTC day we last alerted
+const AUTHWARN_PREFIX = 'claude-profile-authwarn:';   // name → UTC day we last announced a switch away
+const AUTHBROKEN_PREFIX = 'claude-profile-authbroken:'; // name → ISO until which its login is presumed dead
 const LAST_SPAWN_OK_KEY = 'claude-last-spawn-ok';     // ISO of the last spawn that authed
 const REFRESH_MS = 60_000;
 // When a limit error carries no reset time, assume the worst-case remainder of
@@ -43,7 +49,11 @@ const AUTH_COOLDOWN_MS = 15 * 60_000;
 
 let active = null;                  // profile name, in-process cache
 let exhausted = {};                 // name → epoch-ms until which it's dead
-let authBroken = {};                // name → epoch-ms until which its login is presumed dead
+// name → epoch-ms until which its login is presumed dead. MIRRORED in KV under
+// AUTHBROKEN_PREFIX, because every autonomous caller is a systemd oneshot and
+// this map is therefore empty at process start (2026-08-17 — see
+// reportAuthFailure).
+let authBroken = {};
 let refreshTimer = null;
 
 // ── Profile discovery ────────────────────────────────────────────────────────
@@ -138,6 +148,19 @@ const LIMIT_RE = /usage limit reached|usage[_ ]limit|5-hour limit|weekly limit|h
 const RESET_EPOCH_RE = /limit[^0-9]{0,40}\|?(\d{10,13})/i;   // legacy "…limit reached|<epoch>"
 const AUTH_RE = /not logged in|please run \/login|\/login/i;
 const AUTH_RE2 = /invalid (api key|token|credentials)|oauth.*(expired|revoked)|authentication[_ ]error/i;
+// A claude.ai ORGANISATION can switch Claude Code access off for its members,
+// and when it does EVERY login under that org dies at once — including the
+// second account the failover exists to reach. Verbatim from `claude --print`
+// on box 158 (claude 2.1.223), 2026-08-17:
+//   "Your organization has disabled Claude subscription access for Claude Code
+//    · Use an Anthropic API key instead, or ask your admin to enable access"
+// Until this pattern existed that text classified as 'other', so spawn-agent.js
+// broke straight out of its auth branch (line ~147): no failover, no alert, no
+// `authHeld` — the remote sweeps on 158 logged a generic "agent exited 1" while
+// the real cause, and the only thing that fixes it, was written in the message.
+// It needs its own `reason` because the remedy is the OPPOSITE of a stale
+// session: `claude login` cannot fix it, and neither can the other account.
+const ORG_DISABLED_RE = /organi[sz]ation has disabled claude subscription access|subscription access for claude code|ask your admin to enable access/i;
 // The CLI rejects a model it doesn't know with:
 //   "There's an issue with the selected model (claude-opus-5). It may not
 //    exist or you may not have access to it."
@@ -170,7 +193,8 @@ export function classifyFailure({ code = null, stdout = '', stderr = '', message
     }
     return { kind: 'usage_limit', resetAt };
   }
-  if (AUTH_RE.test(text) || AUTH_RE2.test(text)) return { kind: 'auth' };
+  if (ORG_DISABLED_RE.test(text)) return { kind: 'auth', reason: 'org_disabled' };
+  if (AUTH_RE.test(text) || AUTH_RE2.test(text)) return { kind: 'auth', reason: 'session' };
   if (MODEL_RE.test(text)) {
     const m = text.match(MODEL_NAME_RE);
     return { kind: 'model', model: (m && (m[1] || m[2])) || null };
@@ -243,6 +267,45 @@ export async function switchProfile(name) {
 export function utcDay(now = Date.now()) { return new Date(now).toISOString().slice(0, 10); }
 
 /**
+ * Given DURABLE state, who takes over after `name`'s login failed — and does
+ * Craig need telling?
+ *
+ * Pure, because the thing it replaces could only be observed in production.
+ * From 2026-08-14 to 2026-08-17 both claude.ai logins on the box were dead and
+ * this decision ran ~every 6-15 minutes, each time announcing a triumphant
+ * switch to the other account, which was equally dead. 171 claude-auth
+ * notifications in seven days, ~90 a day, all of them "switched to X" — the
+ * 2026-08-10 flood shape exactly, for an outage only Craig could end.
+ *
+ * The cause was that `authBroken` lived ONLY in process memory while every
+ * autonomous caller is a systemd ONESHOT, so each fresh process believed the
+ * other account was fine. This is the same defect the file's own comment on
+ * reportAuthFailure records as fixed for the ALERT limiter on 2026-08-16 — made
+ * durable one layer up, left in-process one layer down.
+ *
+ * Two rate limits, deliberately separate keys: a switch is `warn`-worthy once a
+ * day per profile, and the total-outage `alert` must still be able to fire on a
+ * day a `warn` already went out (it is the far more important of the two).
+ *
+ * @returns {{next: string|null, announce: 'warn'|'alert'|null, day: string}}
+ */
+export function authFailoverPlan({
+  profiles = [], name, reason = 'session',
+  authBroken: broken = {}, exhausted: limp = {}, now = Date.now(),
+  warnedDay = null, alertedDay = null,
+} = {}) {
+  const day = utcDay(now);
+  // An org-level switch refuses every login under that organisation, so trying
+  // the other account is not a failover — it is a second identical failure.
+  const next = reason === 'org_disabled'
+    ? null
+    : (profiles.find(p => p !== name && !(broken[p] > now) && !(limp[p] > now)) || null);
+
+  if (next) return { next, announce: warnedDay === day ? null : 'warn', day };
+  return { next: null, announce: alertedDay === day ? null : 'alert', day };
+}
+
+/**
  * An auth-classified failure means a login needs redoing. Same shape as
  * reportExhausted: mark the profile dead, flip to the other account if one is
  * usable, say so. Returns the NEW active profile name, or null when no login
@@ -269,37 +332,56 @@ export function utcDay(now = Date.now()) { return new Date(now).toISOString().sl
  * by noteSpawnSuccess() — a human's rate limit for a human-only fix, which is
  * the rule the flood incident earned.
  */
-export async function reportAuthFailure(name, detail = '', now = Date.now()) {
+export async function reportAuthFailure(name, detail = '', { now = Date.now(), reason = 'session' } = {}) {
   authBroken[name] = now + AUTH_COOLDOWN_MS;
+  await kvSet(AUTHBROKEN_PREFIX + name, new Date(authBroken[name]).toISOString());
+  // The in-process map is empty at process start for every oneshot caller, so
+  // the durable copy is the ONLY thing that knows the other account is dead
+  // too. Load it before deciding, or this flaps forever (2026-08-17).
+  await loadAuthBroken();
 
-  const next = otherUsableProfile();
-  if (next) {
-    active = next;
-    await kvSet(ACTIVE_KEY, next);
-    console.warn(`[claude-auth] login for ${name} is broken — flipped to ${next}`);
-    await notify({
-      source: 'claude-auth', level: 'warn',
-      title: `Claude login for "${name}" is broken — switched to "${next}"`,
-      body: `${detail.slice(0, 300)}\nRe-authorise it on the box: ${loginHint(name)}`,
-      speech: `Sir, the Claude login for account ${spoken(name)} needs re-authorising. I've switched to the other account and I'm still working.`,
-    });
-    return next;
+  const [warnedDay, alertedDay] = await Promise.all([
+    kvGet(AUTHWARN_PREFIX + name),
+    kvGet(AUTHFAIL_PREFIX + name),
+  ]);
+  const plan = authFailoverPlan({
+    profiles: listProfiles(), name, reason,
+    authBroken, exhausted, now, warnedDay, alertedDay,
+  });
+
+  if (plan.next) {
+    active = plan.next;
+    await kvSet(ACTIVE_KEY, plan.next);
+    console.warn(`[claude-auth] login for ${name} is broken — flipped to ${plan.next}`);
+    if (plan.announce === 'warn') {
+      await kvSet(AUTHWARN_PREFIX + name, plan.day);
+      await notify({
+        source: 'claude-auth', level: 'warn',
+        title: `Claude login for "${name}" is broken — switched to "${plan.next}"`,
+        body: `${detail.slice(0, 300)}\n${remedy(name, reason)}`,
+        speech: `Sir, the Claude login for account ${spoken(name)} needs re-authorising. I've switched to the other account and I'm still working.`,
+      });
+    }
+    return plan.next;
   }
 
   // Nothing else to fall back on: this is a total outage of every autonomous
   // Claude path, and only Craig can end it. Alert loudly — but once a day.
-  const today = utcDay(now);
-  if (await kvGet(AUTHFAIL_PREFIX + name) === today) {
-    console.error(`[claude-auth] login for ${name} still broken (already alerted ${today})`);
+  if (!plan.announce) {
+    console.error(`[claude-auth] login for ${name} still broken (already alerted ${plan.day})`);
     return null;
   }
-  await kvSet(AUTHFAIL_PREFIX + name, today);
+  await kvSet(AUTHFAIL_PREFIX + name, plan.day);
   console.error(`[claude-auth] login for ${name} is broken and NO profile is usable`);
   await notify({
     source: 'claude-auth', level: 'alert',
-    title: `Claude login for "${name}" is broken — every autonomous agent is stopped`,
-    body: `${detail.slice(0, 300)}\n\nNo other profile can authenticate, so EVERY box-local Claude spawn is failing: code-health sweeps, fix-runner repairs, self-heal, review-runner, harvester distillation and the role agents. The services stay "green" because each one only reports its own port.\n\nFix on the box: ${loginHint(name)}`,
-    speech: `Sir, the Claude login for account ${spoken(name)} has expired and there's no working account to fall back on. Every autonomous agent is stopped until it's re-authorised.`,
+    title: reason === 'org_disabled'
+      ? 'Your claude.ai organisation has switched Claude Code OFF — every autonomous agent is stopped'
+      : `Claude login for "${name}" is broken — every autonomous agent is stopped`,
+    body: `${detail.slice(0, 300)}\n\nNo other profile can authenticate, so EVERY box-local Claude spawn is failing: code-health sweeps, fix-runner repairs, self-heal, review-runner, harvester distillation and the role agents. The services stay "green" because each one only reports its own port.\n\n${remedy(name, reason)}`,
+    speech: reason === 'org_disabled'
+      ? "Sir, your Claude organisation has Claude Code access switched off, so neither account can authenticate. Re-enabling it in your claude dot AI settings is the only fix — every autonomous agent is stopped until then."
+      : `Sir, the Claude login for account ${spoken(name)} has expired and there's no working account to fall back on. Every autonomous agent is stopped until it's re-authorised.`,
   });
   return null;
 }
@@ -310,12 +392,36 @@ function loginHint(name) {
 function spoken(name) { return name === 'default' ? 'one' : name; }
 
 /**
+ * What Craig actually has to DO. Split by reason because telling him to run
+ * `claude login` for an org-disabled account sends him to re-authorise a login
+ * that will be refused again the moment he finishes.
+ */
+function remedy(name, reason) {
+  return reason === 'org_disabled'
+    ? `Your claude.ai ORGANISATION has Claude Code access switched off. Re-running \`claude login\` will NOT fix it and the second account will not either — every login under that org is refused. Turn it back on in claude.ai → Settings → Claude Code access (you are the org admin), then re-authorise on the box: ${loginHint(name)}`
+    : `Re-authorise it on the box: ${loginHint(name)}`;
+}
+
+/** Refresh the durable auth-broken cooldowns into the in-process cache. */
+async function loadAuthBroken() {
+  const rows = await Promise.all(listProfiles().map(async p => [p, await kvGet(AUTHBROKEN_PREFIX + p)]));
+  for (const [p, iso] of rows) {
+    const t = iso ? Date.parse(iso) : NaN;
+    if (Number.isNaN(t)) delete authBroken[p]; else authBroken[p] = t;
+  }
+}
+
+/**
  * A spawn authenticated. Records the heartbeat the experience check reads, and
  * clears a standing auth alert so the next real failure is loud again (the
  * daily marker must never outlive the outage it describes).
  */
 export async function noteSpawnSuccess(name, now = Date.now()) {
   delete authBroken[name];
+  // Clear the DURABLE copies too, or a login that started working again stays
+  // fenced off for the rest of its cooldown and its next failure stays quiet.
+  await kvSet(AUTHBROKEN_PREFIX + name, '');
+  await kvSet(AUTHWARN_PREFIX + name, '');
   await kvSet(LAST_SPAWN_OK_KEY, new Date(now).toISOString());
   if (await kvGet(AUTHFAIL_PREFIX + name)) {
     await kvSet(AUTHFAIL_PREFIX + name, '');
@@ -351,14 +457,19 @@ export async function reportModelRejected(model, detail = '') {
 // ── KV refresh loop (each service process keeps its own cache warm) ──────────
 
 export async function refreshFromKV() {
+  const profiles = listProfiles();
   const [act, ...rest] = await Promise.all([
     kvGet(ACTIVE_KEY),
-    ...listProfiles().map(async p => [p, await kvGet(EXHAUSTED_PREFIX + p)]),
+    ...profiles.map(async p => [p, await kvGet(EXHAUSTED_PREFIX + p), await kvGet(AUTHBROKEN_PREFIX + p)]),
   ]);
-  if (act && listProfiles().includes(act)) active = act;
-  for (const [p, iso] of rest) {
-    const t = iso ? Date.parse(iso) : NaN;
+  if (act && profiles.includes(act)) active = act;
+  for (const [p, limpIso, brokenIso] of rest) {
+    const t = limpIso ? Date.parse(limpIso) : NaN;
     if (!Number.isNaN(t)) exhausted[p] = t;
+    // Unlike `exhausted`, this one CLEARS on a missing/blank value — that is how
+    // noteSpawnSuccess's recovery propagates to every other process.
+    const b = brokenIso ? Date.parse(brokenIso) : NaN;
+    if (Number.isNaN(b)) delete authBroken[p]; else authBroken[p] = b;
   }
 }
 

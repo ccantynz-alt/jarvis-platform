@@ -148,7 +148,7 @@ export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMi
 
     const current = getActiveProfile()?.name;
     const next = cls.kind === 'auth'
-      ? await reportAuthFailure(current, result.stderr || result.stdout || '').catch(() => null)
+      ? await reportAuthFailure(current, result.stderr || result.stdout || '', { reason: cls.reason }).catch(() => null)
       : await reportExhausted(current, cls.resetAt).catch(() => null);
 
     // Only ever flip once per spawn. Without the `retried` latch a box with
