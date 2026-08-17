@@ -146,6 +146,20 @@ test('system.specs reads the hardware, not the live load', () => {
   assert.match(script, /Win32_DiskDrive/);
 });
 
+test('the memory answer covers type, slots and headroom, not just the total', () => {
+  // "Specifically ram" (2026-08-17). On a laptop that died at 96% memory
+  // pressure, "16 GB installed" is the number that hides the problem — the
+  // useful answer is what type, how many slots are used, and what the board
+  // will take.
+  const { script } = planAction('system.specs', {});
+  assert.match(script, /Win32_PhysicalMemoryArray/);   // slot count + board maximum
+  assert.match(script, /MaxCapacityEx/);               // uint32 MaxCapacity overflows
+  assert.match(script, /SMBIOSMemoryType/);            // DDR4 vs DDR5, not a raw code
+  assert.match(script, /34='DDR5'/);
+  assert.match(script, /12='SODIMM'/);                 // laptop form factor
+  assert.match(script, /board maximum/);
+});
+
 test('every optional spec source degrades instead of failing the whole action', () => {
   // A machine with no discrete GPU, or a build without the Storage module,
   // must still return the CPU and memory — a spec sheet is useful in parts.

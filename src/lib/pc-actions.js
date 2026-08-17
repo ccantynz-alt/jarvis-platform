@@ -164,14 +164,44 @@ export const VERBS = {
       "OS          : $($os.Caption) $($os.OSArchitecture), build $($os.BuildNumber)  (version $($os.Version))"
       "CPU         : $(($cpu.Name -replace '\\s+', ' ').Trim())"
       "              $($cpu.NumberOfCores) cores / $($cpu.NumberOfLogicalProcessors) threads @ $($cpu.MaxClockSpeed) MHz$sockets"
-      "Memory      : $([math]::Round($cs.TotalPhysicalMemory/1GB, 1)) GB installed"
+
+      # MEMORY IN FULL. Craig asked for the specs "specifically ram", and on a
+      # LAPTOP the answer he needs is not just the total: it is the type, how
+      # many slots are occupied, and what the board will take — i.e. whether
+      # there is any upgrade headroom at all. This machine died at 96% memory
+      # pressure and took the worker down for 26 hours (2026-08-10), so
+      # "16 GB installed" alone is the number that hides the problem.
+      $mem = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+      $arr = Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction SilentlyContinue
+      $memTypes = @{ 20='DDR'; 21='DDR2'; 22='DDR2 FB-DIMM'; 24='DDR3'; 26='DDR4';
+                     27='LPDDR'; 28='LPDDR2'; 29='LPDDR3'; 30='LPDDR4'; 34='DDR5'; 35='LPDDR5' }
+      $formFactors = @{ 8='DIMM'; 12='SODIMM' }
+      $memType = 'unknown type'
+      $memForm = ''
+      if ($mem.Count -gt 0) {
+        if ($memTypes.ContainsKey([int]$mem[0].SMBIOSMemoryType)) { $memType = $memTypes[[int]$mem[0].SMBIOSMemoryType] }
+        if ($formFactors.ContainsKey([int]$mem[0].FormFactor)) { $memForm = $formFactors[[int]$mem[0].FormFactor] }
+      }
+      # Soldered memory reports no slots at all — say so rather than printing
+      # "0 of 0", because it is the whole answer to "can I put more in".
+      $slots = if ($arr -and $arr.MemoryDevices) { $arr.MemoryDevices } else { 'unknown' }
+      $maxGB = 'unknown'
+      if ($arr) {
+        # Both fields are in KB; MaxCapacity is a uint32 and overflows past 4 TB,
+        # so prefer MaxCapacityEx where the firmware provides it.
+        if ($arr.MaxCapacityEx) { $maxGB = [math]::Round($arr.MaxCapacityEx/1MB) }
+        elseif ($arr.MaxCapacity) { $maxGB = [math]::Round($arr.MaxCapacity/1MB) }
+      }
+      $totalGB = [math]::Round($cs.TotalPhysicalMemory/1GB, 1)
+      "Memory      : $totalGB GB installed  ($memType $memForm)"
+      "              $($mem.Count) module(s) in $slots slot(s), board maximum $maxGB GB"
       ""
 
-      $mem = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
       if ($mem.Count -gt 0) {
         "Memory modules:"
         $mem | Select-Object -First 8 @{N='Slot';E={$_.DeviceLocator}},
           @{N='GB';E={[math]::Round($_.Capacity/1GB, 1)}},
+          @{N='Type';E={if ($memTypes.ContainsKey([int]$_.SMBIOSMemoryType)) { $memTypes[[int]$_.SMBIOSMemoryType] } else { $_.SMBIOSMemoryType }}},
           @{N='MHz';E={if ($_.ConfiguredClockSpeed) { $_.ConfiguredClockSpeed } else { $_.Speed }}},
           Manufacturer, PartNumber |
           Format-Table -AutoSize | Out-String -Width 200
