@@ -16,7 +16,8 @@ else (2026-08-08).** Both aliases are pinned to TAILNET IPs in the PC's
 `~/.ssh/config`; never type `ssh root@66.42.121.161` again (Craig: "no matter
 how many times i say we have tailscale claude never remembers"). Both boxes
 answer over the tailnet, including 158 — the old "Permission denied
-(publickey) to 158" claim is dead.
+(publickey) to 158" claim is dead. **Full tailnet map: the TAILNET section
+below** — hostnames, every surface's URL, and which token opens which.
 
 The platform registry is `config/platforms.json` (hot-reloaded — edits apply
 instantly). Read it; never trust a list in a doc. Local checkouts of note:
@@ -362,8 +363,51 @@ the off-box watchdog, never anything more.
 Loopback: :3000 gatetest-web (10.0.1.1) · :4100/:4200 AlecRae · **:8010
 davenroe-api (10.0.1.1)** · :5432 Postgres · :9200–9202, :9204–9207,
 :9209–9211 Jarvis. Tailnet HTTPS exposure:
-gateway :8443, deck :8444, dashboard :8445. Vapron does NOT own ports on this
-box. Re-verify with `ss -tlnp`.
+gateway :8443, deck :8444, dashboard :8445 (full URLs + tokens: TAILNET).
+Vapron does NOT own ports on this box. Re-verify with `ss -tlnp`.
+
+## TAILNET — how Craig actually gets in
+
+**Tailnet name `tailbd6217.ts.net`.** Master node `jarvis` →
+`jarvis.tailbd6217.ts.net`; 158 → `vapron-158.tailbd6217.ts.net`. Every
+human-facing surface is tailnet-only (nothing but :22, Traefik's :80/:443 and
+the :9212 liveness ping is public). The master's own tailnet IP is not
+recorded here on purpose — get it from `tailscale ip -4` on the box or the
+admin console's Machines list; 158's is `100.89.227.39`.
+
+| Surface | URL | Token | How a NEW device logs in |
+|---|---|---|---|
+| **Deck** (the one Craig uses) | `https://jarvis.tailbd6217.ts.net:8444/` | `config/deck.token`, env `JARVIS_DECK_TOKEN`. **Self-mints on first boot** if the file is absent (deck-server.js:59–72) — and fails CLOSED if it cannot persist it | `/?token=<t>` **once**. Sets a 30-day `Secure`+HttpOnly cookie that **re-stamps on every authed load** (sliding — a device used inside 30 days is still in) |
+| **Gateway** | `https://jarvis.tailbd6217.ts.net:8443/` | `JARVIS_GATEWAY_TOKEN` (secrets.env) | **`Bearer` header or a pre-existing cookie ONLY — there is NO `?token=` bootstrap** (`requestToken()`, gateway-server.js:71). A phone browser cannot send a bearer header, so a new device cannot log in here at all. Its human UI 302s to the Deck anyway (2026-07-17 consolidation); a cookie minted before 2026-07-30 still works |
+| **Dashboard** | `https://jarvis.tailbd6217.ts.net:8445/` | `JARVIS_DASHBOARD_TOKEN` (secrets.env) | `/?token=<t>` once → 30-day cookie (hard expiry, not sliding) |
+| **158 health** | `https://vapron-158.tailbd6217.ts.net:8443/health` | — | `tailscale serve` → ops-agent :9095 |
+
+SSH: `ssh jarvis` / `ssh vapron` from Craig's PC (aliases pinned to tailnet
+IPs). Box → 158 is `root@100.89.227.39`, Tailscale SSH, `RunSSH:true`, no
+OpenSSH key; 158's PUBLIC IP refuses by design.
+
+**Getting in from a PHONE with no SSH client (2026-08-17).** Craig was away
+from the laptop, hit the deck's not-signed-in screen, and had no way to read
+`config/deck.token` — every tailnet surface's auth is a secret that lives on
+the box, so the tailnet gets you to the door and does not open it. In order:
+1. **Any device with a live deck cookie.** Sliding 30 days, re-stamped every
+   load — an iPad used in the last month is still signed in. The phone showing
+   the login screen says nothing about the other devices.
+2. **Tailscale admin console → Machines → browser SSH** on the node
+   (`login.tailscale.com`, works from a phone browser, no client app). Gets a
+   shell → `cat /opt/jarvis/config/deck.token`. **UNVERIFIED whether Tailscale
+   SSH is enabled on the MASTER node** — 158 has `RunSSH:true`, the master is
+   unconfirmed. Check the Machines list; enabling it is an ACL change and
+   Craig's call, not an unattended one.
+3. There is no third option. Do not send him to PowerShell, `ssh`, or a
+   `git pull` when he has told you he is away from the machine.
+
+Why this section exists: the tailnet hostname appeared exactly ONCE in this
+file — inside the ARCHITECTURE diagram — and the per-surface auth rules lived
+only in source comments, so a session with no box access had to grep `src/` to
+answer "how do I get in from my phone". That is the same complaint quoted at
+the top of this file ("no matter how many times i say we have tailscale claude
+never remembers"), and it cost most of a conversation on 2026-08-17.
 
 ## FILE STRUCTURE
 
