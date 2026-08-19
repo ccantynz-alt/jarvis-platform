@@ -83,12 +83,12 @@ const CONFIGURED = !!WORKER_TOKEN;
 
 function log(msg) { console.log(`[pc-worker] ${new Date().toISOString()} ${msg}`); }
 
-async function api(action, body) {
+async function api(action, body, timeoutMs = 20_000) {
   const r = await fetch(`${GATEWAY_URL}/worker/${action}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Jarvis-Worker-Token': WORKER_TOKEN },
     body: JSON.stringify(body || {}),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (r.status === 204) return null;
   if (!r.ok) throw new Error(`${action} → HTTP ${r.status}: ${(await r.text()).slice(0, 300)}`);
@@ -345,15 +345,29 @@ async function runActionJob(job) {
 // service") is never stuck behind a long agent job — without it, Jarvis is
 // unable to act on the PC for exactly as long as he is busy being useful on it,
 // which is the complaint this whole change set exists to answer.
+// Long-poll (2026-08-19, move 41): the claim is HELD on the server for up to
+// ACTION_WAIT_S seconds and woken the instant an action is enqueued, so a typed
+// action starts in ~100 ms instead of up to 3 s — and the idle request rate
+// drops from 20/min to ~2/min. An older orchestrator ignores `wait` and
+// answers at once, which degrades to exactly the old 3-second loop.
+const ACTION_WAIT_S = 25;
 async function actionPoll() {
-  if (killed() || currentActionId) return;
-  const job = await api('claim', { worker_id: WORKER_ID, runtime: 'action' });
-  if (job) await runActionJob(job);
+  if (killed() || currentActionId) return false;
+  const job = await api('claim', { worker_id: WORKER_ID, runtime: 'action', wait: ACTION_WAIT_S }, (ACTION_WAIT_S + 10) * 1000);
+  if (job) { await runActionJob(job); return true; }
+  return false;
 }
 
 async function actionLoop() {
-  try { await actionPoll(); } catch { /* the agent loop already reports and backs off */ }
-  setTimeout(actionLoop, ACTION_POLL_MS);
+  const t0 = Date.now();
+  let failed = false;
+  try { await actionPoll(); }
+  catch { failed = true; /* the agent loop already reports and backs off; a failed long-poll waits the normal interval */ }
+  // After a HELD request go straight back. If the server answered at once
+  // (older orchestrator ignoring `wait`, or an error), this is the old 3 s loop —
+  // never a hot spin.
+  const held = Date.now() - t0 >= 1000;
+  setTimeout(actionLoop, failed || currentActionId || !held ? ACTION_POLL_MS : 50);
 }
 
 async function runJob(job) {

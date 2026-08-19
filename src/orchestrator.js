@@ -2,6 +2,7 @@ import express from 'express';
 import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
+import { EventEmitter } from 'events';
 import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
@@ -97,6 +98,9 @@ const REAP_SLACK_MIN = guardrail('ORCH_REAP_SLACK_MIN', 10, { source: 'orchestra
 // lease is reaped back to queued (worker slept, lost network, or crashed).
 // The worker's heartbeat (POST /worker/heartbeat) renews it while a job runs.
 const PC_LEASE_MS = 120_000;
+// Wakes long-polling /worker/claim requests the instant a PC job is enqueued.
+const pcWake = new EventEmitter();
+pcWake.setMaxListeners(50);
 
 async function dbGet(path) {
   const r = await fetch(`${MEMORY_URL}${path}`);
@@ -732,32 +736,46 @@ app.post('/worker/claim', asyncRoute(async (req, res) => {
   const wantRuntime = req.body && req.body.runtime;
   const enabled = await pcWorkerEnabled();
   if (!enabled) return res.status(204).end();
-  let candidates;
-  try {
-    candidates = await dbGet('/memory/jobs?status=queued&executor=pc&limit=20');
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
+  // Long-poll (2026-08-19, audit move 41): `wait` seconds (≤ 25) holds this
+  // request open until a job appears — woken the instant /pc/action enqueues
+  // one — instead of the worker asking every 3 s and paying up to 3 s of
+  // latency on every typed action (~40k idle requests a day across the three
+  // loops). Same protocol otherwise; an old worker sends no `wait` and gets the
+  // old behaviour. Capped well under the worker's 20 s fetch timeout… no: the
+  // worker raises its timeout to wait+10 s when it asks to wait.
+  const waitMs = Math.min(Math.max(Number(req.body?.wait) || 0, 0), 25) * 1000;
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    let candidates;
+    try {
+      candidates = await dbGet('/memory/jobs?status=queued&executor=pc&limit=20');
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
+    if (wantRuntime) candidates = candidates.filter(r => (r.runtime || 'claude') === wantRuntime);
+    candidates.sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at));
+    const leaseUntil = new Date(Date.now() + PC_LEASE_MS).toISOString();
+    for (const row of candidates) {
+      const ok = await tryTransition(row.id, 'running',
+        `claimed by ${workerId}`,
+        { started_at: new Date().toISOString(), attempts: row.attempts + 1, worker_id: workerId, lease_until: leaseUntil },
+        'queued');
+      if (!ok) continue; // another claim/reap beat us to this one — try the next
+      logEvent('DISPATCH', `PC job ${row.id.slice(0, 8)} claimed by ${workerId}`);
+      return res.json({
+        id: row.id, task: row.task, prompt: row.prompt, path: row.path,
+        // runtime tells the worker HOW to run this: 'claude' (spawn an agent) or
+        // 'action' (a typed verb from lib/pc-actions.js, run directly). Without
+        // it every action job would be handed to the agent path as a prompt.
+        runtime: row.runtime, timeout_min: row.timeout_min, model: row.model,
+        lease_seconds: PC_LEASE_MS / 1000,
+      });
+    }
+    const left = deadline - Date.now();
+    if (left <= 0 || req.socket.destroyed) return res.status(204).end();
+    // Sleep until woken by an enqueue, or 2 s, whichever first.
+    await new Promise(r => { const t = setTimeout(() => { pcWake.off('job', on); r(); }, Math.min(left, 2000)); const on = () => { clearTimeout(t); r(); }; pcWake.once('job', on); });
   }
-  if (wantRuntime) candidates = candidates.filter(r => (r.runtime || 'claude') === wantRuntime);
-  candidates.sort((a, b) => a.priority - b.priority || a.created_at.localeCompare(b.created_at));
-  const leaseUntil = new Date(Date.now() + PC_LEASE_MS).toISOString();
-  for (const row of candidates) {
-    const ok = await tryTransition(row.id, 'running',
-      `claimed by ${workerId}`,
-      { started_at: new Date().toISOString(), attempts: row.attempts + 1, worker_id: workerId, lease_until: leaseUntil },
-      'queued');
-    if (!ok) continue; // another claim/reap beat us to this one — try the next
-    logEvent('DISPATCH', `PC job ${row.id.slice(0, 8)} claimed by ${workerId}`);
-    return res.json({
-      id: row.id, task: row.task, prompt: row.prompt, path: row.path,
-      // runtime tells the worker HOW to run this: 'claude' (spawn an agent) or
-      // 'action' (a typed verb from lib/pc-actions.js, run directly). Without
-      // it every action job would be handed to the agent path as a prompt.
-      runtime: row.runtime, timeout_min: row.timeout_min, model: row.model,
-      lease_seconds: PC_LEASE_MS / 1000,
-    });
-  }
-  return res.status(204).end();
 }));
 
 // POST /worker/heartbeat { worker_id, job_id? }
@@ -862,6 +880,7 @@ app.post('/pc/action', async (req, res) => {
     return res.status(500).json({ error: 'failed to enqueue PC action: ' + e.message });
   }
   logEvent('DISPATCH', `PC action ${jobId.slice(0, 8)} queued — ${plan.description}`);
+  pcWake.emit('job');   // wake a long-polling worker claim immediately (move 41)
 
   let waitMs = Math.min(Math.max(Number(wait_seconds) || 0, 0), 120) * 1000;
   if (!waitMs) return res.json({ jobId, status: 'queued', action: plan.verb, description: plan.description });
