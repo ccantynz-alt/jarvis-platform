@@ -144,6 +144,15 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   border:1px solid rgba(255,181,71,.55);border-radius:3px;padding:4px 10px;cursor:pointer;animation:pulseRing 2.4s ease-out infinite}
 #voice-badge{color:#ffb547;border:1px solid #ffb547;border-radius:3px;padding:2px 8px;font-size:10px;letter-spacing:1px}
 #btn-history{border:1px solid rgba(107,138,158,.4);color:#6b8a9e}
+#btn-voice{border:1px solid rgba(107,138,158,.4);color:#6b8a9e}
+#voice-sheet{width:min(520px,94vw);display:flex;flex-direction:column;gap:10px;padding:12px 14px;
+  border:1px solid rgba(0,229,255,.25);border-radius:4px;background:rgba(6,14,22,.92);animation:riseIn .2s ease both}
+.vs-row{display:flex;align-items:center;gap:12px}
+.vs-row label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:2px;color:#6b8a9e;min-width:120px}
+.vs-row select,.vs-row input[type=range]{flex:1;min-width:0;background:rgba(8,14,24,.9);color:#dcedf6;border:1px solid rgba(0,229,255,.25);
+  border-radius:3px;padding:8px;font-family:'IBM Plex Mono',monospace;font-size:13px}
+.vs-row input[type=range]{padding:0;accent-color:#00e5ff}
+#voice-sheet .btn{padding:8px 12px;min-height:36px;border:1px solid rgba(0,229,255,.35);color:#00e5ff}
 #btn-history:hover{background:rgba(107,138,158,.08)}
 #chat{display:flex} /* display lives here, not inline, so .collapsed can win */
 #chat.collapsed{display:none}
@@ -244,6 +253,23 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
             <div id="btn-mic" class="btn" role="button" tabindex="0" aria-label="Toggle voice mode">🎙 ENABLE MIC</div>
             <div id="btn-demo" class="btn" role="button" tabindex="0" aria-label="Run briefing">▶ RUN BRIEFING</div>
             <div id="btn-history" class="btn" role="button" tabindex="0" aria-label="Toggle conversation history">☰ HISTORY</div>
+            <div id="btn-voice" class="btn" role="button" tabindex="0" aria-label="Voice settings">⚙ VOICE</div>
+          </div>
+          <!-- VOICE SETTINGS (2026-08-19, move 32): the voice was a hard-coded
+               preference list with no way to see what this device actually has,
+               test it, or pick. On iOS the Google voice does not exist and the
+               fallback order was invisible. -->
+          <div id="voice-sheet" class="hidden" role="dialog" aria-label="Voice settings">
+            <div class="vs-row"><label for="vs-voice">VOICE</label><select id="vs-voice"></select></div>
+            <div class="vs-row"><label for="vs-rate">RATE <span id="vs-rate-v">1.02</span></label><input id="vs-rate" type="range" min="0.8" max="1.3" step="0.02" value="1.02"></div>
+            <div class="vs-row"><label for="vs-pitch">PITCH <span id="vs-pitch-v">0.9</span></label><input id="vs-pitch" type="range" min="0.6" max="1.3" step="0.05" value="0.9"></div>
+            <div class="vs-row"><label for="vs-lang">MIC LANGUAGE</label><select id="vs-lang"><option>en-NZ</option><option>en-GB</option><option>en-AU</option><option>en-US</option></select></div>
+            <div class="vs-row" style="justify-content:flex-end;gap:8px">
+              <div id="vs-test" class="btn" role="button" tabindex="0">▶ TEST</div>
+              <div id="vs-reset" class="btn" role="button" tabindex="0">RESET</div>
+              <div id="vs-close" class="btn" role="button" tabindex="0">✕ CLOSE</div>
+            </div>
+            <div id="vs-note" class="mono" style="font-size:10px;color:#5f7a8c;letter-spacing:1px"></div>
           </div>
           <div id="chat" class="collapsed" aria-live="polite" aria-label="Conversation with MARCO" style="flex:1;width:100%;max-width:720px;overflow-y:auto;flex-direction:column;gap:8px;padding:6px 4px;min-height:120px"></div>
         </div>
@@ -1040,10 +1066,24 @@ function renderOrg() {
 
 // ── Voice output (gateway.html patterns — iOS needs priming + fresh queue) ──
 let voiceCache = [];
+// Hoisted (2026-08-19) so primeTTS can call it: iOS often returns [] from
+// getVoices() until the first user gesture and sometimes never fires
+// voiceschanged — an empty cache meant no voice AND no lang on the utterance,
+// i.e. the device's default (US) voice instead of a British one.
+function loadVoices() {
+  if (!('speechSynthesis' in window)) return;
+  const v = speechSynthesis.getVoices();
+  if (v && v.length) { voiceCache = v; if (typeof renderVoiceSheet === 'function') renderVoiceSheet(); }
+}
 if ('speechSynthesis' in window) {
-  const loadVoices = () => { const v = speechSynthesis.getVoices(); if (v && v.length) voiceCache = v; };
   loadVoices();
   speechSynthesis.onvoiceschanged = loadVoices;
+}
+// Saved voice preferences (Voice settings sheet). Absent = the VOICE_PREFS
+// order below, i.e. the free Google UK English Male where it exists.
+const VOICE_SETTINGS_KEYS = { name: 'jarvis_voice_name', rate: 'jarvis_voice_rate', pitch: 'jarvis_voice_pitch' };
+function voiceSetting(k, fallback) {
+  try { const v = localStorage.getItem(VOICE_SETTINGS_KEYS[k]); return v == null || v === '' ? fallback : v; } catch { return fallback; }
 }
 let ttsPrimed = false;
 // One reusable element for the neural voice; iOS unlocks it on first gesture.
@@ -1054,6 +1094,8 @@ function primeTTS() { // iOS: audio + speech must be unlocked by a user gesture
     ttsPrimed = true;
     if ('speechSynthesis' in window) {
       const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u);
+      loadVoices();   // iOS populates the voice list on a gesture — ask again now
+      setTimeout(loadVoices, 500);
     }
     // 0.1s of silence unlocks the Audio element for later programmatic play
     jarvisAudio.src = 'data:audio/mpeg;base64,//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCA' +
@@ -1246,8 +1288,11 @@ const VOICE_PREFS = [
   'microsoft ryan', 'microsoft george', 'microsoft thomas',
   'daniel', 'arthur', 'oliver', 'jamie',
 ];
-function pickBritishMaleVoice(voices = voiceCache) {
+function pickBritishMaleVoice(voices = voiceCache, chosen = null) {
   const list = Array.isArray(voices) ? voices : [];
+  // An explicit choice from the Voice settings sheet wins when the device has
+  // it; a saved name the device has never heard of falls through to the list.
+  if (chosen) { const v = list.find(x => x.name === chosen); if (v) return v; }
   const byName = (n, extra) => list.find(v => {
     const name = String(v.name || '').toLowerCase();
     return name.includes(n) && (!extra || extra.test(v.name));
@@ -1266,9 +1311,16 @@ function speakBrowserAsync(text) {
     if (!window.speechSynthesis) return resolve();
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
     const u = new SpeechSynthesisUtterance(text);
-    const v = pickBritishMaleVoice();
+    const v = pickBritishMaleVoice(voiceCache, voiceSetting('name', null));
     if (v) u.voice = v;
-    u.rate = 1.02; u.pitch = 0.9;
+    // lang ALWAYS set (2026-08-19): with an empty voice cache (iOS before the
+    // first gesture, or a voiceschanged that never fires) the utterance used to
+    // carry neither voice nor lang, so the OS picked its default — the US voice
+    // Craig keeps hearing. en-GB steers the default to a British voice even
+    // when we could not name one.
+    u.lang = (v && v.lang) || 'en-GB';
+    u.rate = Number(voiceSetting('rate', 1.02)) || 1.02;
+    u.pitch = Number(voiceSetting('pitch', 0.9)) || 0.9;
     let done = false;
     const finish = () => { if (done) return; done = true; S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel(); resolve(); };
     u.onstart = () => { S.speaking = true; updateOrbLabel(); };
@@ -1290,6 +1342,49 @@ function updatePendingBadge() {
   el.classList.toggle('hidden', !show);
   if (show) el.textContent = '🔇 ' + n + ' SPOKEN ' + (n === 1 ? 'MESSAGE' : 'MESSAGES') + ' WAITING — TAP TO HEAR';
 }
+
+// ── Voice settings sheet (2026-08-19, move 32) ───────────────────────────────
+// What this device can actually say, which one is chosen, and a TEST button —
+// the difference between "the voice is wrong" and a five-second fix. Choices
+// persist per device in localStorage; RESET returns to the ruling (Google UK
+// English Male first, see VOICE_PREFS).
+function renderVoiceSheet() {
+  const sel = $('vs-voice'); if (!sel) return;
+  const chosen = voiceSetting('name', null);
+  const auto = pickBritishMaleVoice(voiceCache, null);
+  const list = [...voiceCache].sort((a, b) => {
+    const ae = /^en/i.test(a.lang) ? 0 : 1, be = /^en/i.test(b.lang) ? 0 : 1;
+    return ae - be || String(a.lang).localeCompare(String(b.lang)) || String(a.name).localeCompare(String(b.name));
+  });
+  sel.innerHTML = '';
+  const opt0 = document.createElement('option');
+  opt0.value = ''; opt0.textContent = 'AUTO — ' + (auto ? `${auto.name} (${auto.lang})` : 'no voices reported yet');
+  sel.appendChild(opt0);
+  for (const v of list) {
+    const o = document.createElement('option');
+    o.value = v.name; o.textContent = `${v.name} (${v.lang})`;
+    if (v.name === chosen) o.selected = true;
+    sel.appendChild(o);
+  }
+  $('vs-note').textContent = voiceCache.length
+    ? `${voiceCache.length} voices on this device · engine: ${voiceEngine === 'browser' ? 'browser (free Google/Apple voice)' : voiceEngine}`
+    : 'No voices reported yet — tap anywhere once (iOS lists voices after a gesture).';
+}
+(function wireVoiceSheet() {
+  const sheet = $('voice-sheet'); if (!sheet) return;
+  const open = () => { renderVoiceSheet(); $('vs-rate').value = voiceSetting('rate', 1.02); $('vs-pitch').value = voiceSetting('pitch', 0.9);
+    $('vs-rate-v').textContent = $('vs-rate').value; $('vs-pitch-v').textContent = $('vs-pitch').value; $('vs-lang').value = SR_LANG; sheet.classList.remove('hidden'); };
+  const close = () => sheet.classList.add('hidden');
+  const save = (k, v) => { try { v == null || v === '' ? localStorage.removeItem(VOICE_SETTINGS_KEYS[k]) : localStorage.setItem(VOICE_SETTINGS_KEYS[k], String(v)); } catch {} };
+  $('btn-voice').onclick = () => sheet.classList.contains('hidden') ? open() : close();
+  $('vs-close').onclick = close;
+  $('vs-voice').onchange = (e) => { save('name', e.target.value || null); renderVoiceSheet(); };
+  $('vs-rate').oninput = (e) => { $('vs-rate-v').textContent = e.target.value; save('rate', e.target.value); };
+  $('vs-pitch').oninput = (e) => { $('vs-pitch-v').textContent = e.target.value; save('pitch', e.target.value); };
+  $('vs-lang').onchange = (e) => { try { localStorage.setItem('jarvis_lang', e.target.value); } catch {} $('vs-note').textContent = 'Mic language saved — reload the deck to apply.'; };
+  $('vs-test').onclick = () => { voiceEngine === 'neural' ? speak('Voice check, sir.') : speakBrowserAsync('Voice check, sir. This is the voice you will hear.'); };
+  $('vs-reset').onclick = () => { save('name', null); save('rate', null); save('pitch', null); open(); };
+})();
 
 function updateOrbLabel() {
   $('orb-label').textContent =
@@ -1876,6 +1971,10 @@ setInterval(() => {
 // matches the repo HEAD, the whole deploy chain (git → box → your browser)
 // is proven; no more guessing whether a reload picked up the new code.
 fetch('/health').then(r => r.json()).then(h => {
+  // tts:false = the custom voice is OFF by ruling. Start on the browser voice
+  // instead of probing /tts for a 503 on every session's first sentence
+  // (2026-08-19). A genuine 'neural' session still begins on 'neural'.
+  if (h.tts === false && voiceEngine === 'neural') voiceEngine = 'browser';
   if (!h.build) return;
   console.log('[deck] build', h.build);
   const tag = document.createElement('div');

@@ -24,14 +24,37 @@ const html = readFileSync(new URL('../public/command-deck.html', import.meta.url
 
 const prefs = html.match(/const VOICE_PREFS = \[[\s\S]*?\];/);
 assert.ok(prefs, 'VOICE_PREFS not found in command-deck.html');
-const fn = html.match(/function pickBritishMaleVoice\(voices = voiceCache\) \{[\s\S]*?\n\}/);
+const fn = html.match(/function pickBritishMaleVoice\(voices = voiceCache, chosen = null\) \{[\s\S]*?\n\}/);
 assert.ok(fn, 'pickBritishMaleVoice not found — did the voice section move?');
 
 const pick = new Function('voices', `
   ${prefs[0]}
-  ${fn[0].replace('voices = voiceCache', 'voices')}
+  ${fn[0].replace('voices = voiceCache, chosen = null', 'voices, chosen = null')}
   return pickBritishMaleVoice(voices);
 `);
+
+// ── Voice settings sheet (2026-08-19, move 32): an explicit choice wins ──────
+const pickChosen = new Function('voices', 'chosen', `
+  ${prefs[0]}
+  ${fn[0].replace('voices = voiceCache, chosen = null', 'voices, chosen')}
+  return pickBritishMaleVoice(voices, chosen);
+`);
+
+test('a voice chosen in the settings sheet beats the preference list', () => {
+  const list = [{ name: 'Google UK English Male', lang: 'en-GB' }, { name: 'Daniel', lang: 'en-GB' }, { name: 'Samantha', lang: 'en-US' }];
+  assert.equal(pickChosen(list, 'Daniel').name, 'Daniel');
+});
+
+test('a saved choice this device does not have falls through to the ruling', () => {
+  const list = [{ name: 'Google UK English Male', lang: 'en-GB' }, { name: 'Samantha', lang: 'en-US' }];
+  assert.equal(pickChosen(list, 'Microsoft Ryan Online (Natural) - English (United Kingdom)').name, 'Google UK English Male');
+});
+
+test('the utterance always carries a lang, en-GB when no voice could be named', () => {
+  const fnSpeak = html.match(/function speakBrowserAsync\(text\) \{[\s\S]*?\n\}/);
+  assert.ok(fnSpeak);
+  assert.match(fnSpeak[0], /u\.lang = \(v && v\.lang\) \|\| 'en-GB'/);
+});
 
 const v = (name, lang) => ({ name, lang });
 
