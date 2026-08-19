@@ -1,8 +1,10 @@
 {
+  "id": "/",
   "name": "MARCO Command Deck",
   "short_name": "MARCO",
   "description": "Multi-agent command deck — talk to Marco, watch the fleet.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#04060c",
@@ -10,5 +12,10 @@
   "icons": [
     { "src": "/icons/deck-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
     { "src": "/icons/deck-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Talk to Marco", "short_name": "Marco", "url": "/?view=core", "icons": [{ "src": "/icons/deck-192.png", "sizes": "192x192" }] },
+    { "name": "Operations", "short_name": "OPS", "url": "/?view=ops", "icons": [{ "src": "/icons/deck-192.png", "sizes": "192x192" }] },
+    { "name": "Platforms", "short_name": "Platforms", "url": "/?view=plat", "icons": [{ "src": "/icons/deck-192.png", "sizes": "192x192" }] }
   ]
 }

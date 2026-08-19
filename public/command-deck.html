@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>MARCO Command Deck</title>
-<link rel="manifest" href="/deck.webmanifest">
+<link rel="manifest" href="/deck.webmanifest" crossorigin="use-credentials">
 <link rel="apple-touch-icon" href="/icons/deck-180.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -2789,6 +2789,13 @@ $('cmd').addEventListener('keydown', (e) => {
 });
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
+// Service worker (2026-08-19, move 28): ONLY an honest "you're off the tailnet"
+// page when the deck can't be reached, plus cached icons. It never caches the
+// shell — a cached deck is a stale, dead deck with no explanation. Skipped for
+// QA/virtual-time captures (?ws=0 / ?sim=1) so headless renders stay pure.
+if ('serviceWorker' in navigator && !WS_DISABLED && !SIM_MODE) {
+  navigator.serviceWorker.register('/sw.js').catch(e => console.warn('[deck] sw register failed:', e.message));
+}
 // ?demo-alert=1 renders a sample alert banner (screenshot/QA hook — the live
 // path is WS {type:'notify'}, which virtual-time captures can never witness).
 // ?core=idle|listening|thinking|speaking|alert — force the neural core into a

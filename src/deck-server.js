@@ -248,18 +248,28 @@ app.post('/internal/notify', (req, res) => {
   res.json({ ok: true, clients: wss?.clients?.size ?? 0 });
 });
 
-// PWA identity — manifest + icons (same auth as the page; loopback allowed
-// so the screenshot service can render/verify them).
+// PWA identity — manifest, icons and the service worker are PUBLIC on this
+// tailnet-only origin (2026-08-19, audit move 28). They were behind the page's
+// auth, and browsers fetch a manifest WITHOUT cookies unless the link carries
+// crossorigin="use-credentials" (it did not) — so the manifest 403'd, Chrome
+// never offered a real install and iOS fell back to the apple-* meta tags with
+// whatever URL it was on. Nothing here leaks: a name, an icon, and a worker
+// whose only content is an "open Tailscale" page.
 app.get('/deck.webmanifest', (req, res) => {
-  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
   res.set('Content-Type', 'application/manifest+json');
+  res.set('Cache-Control', 'public, max-age=3600');
   res.sendFile('/opt/jarvis/public/deck.webmanifest');
 });
 app.get('/icons/:file', (req, res) => {
-  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
   if (!/^deck-\d+\.png$/.test(req.params.file)) return res.status(404).end();
   res.set('Cache-Control', 'public, max-age=86400');
   res.sendFile('/opt/jarvis/public/icons/' + req.params.file);
+});
+app.get('/sw.js', (req, res) => {
+  res.set('Content-Type', 'application/javascript');
+  res.set('Cache-Control', 'no-cache');            // the browser re-checks it on every load
+  res.set('Service-Worker-Allowed', '/');
+  res.sendFile('/opt/jarvis/public/sw.js');
 });
 app.get('/deck-icon.html', (req, res) => {
   if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).end();
