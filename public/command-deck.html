@@ -2473,12 +2473,23 @@ function markStale(on) {
   for (const id of STALE_IDS) { const el = $(id); if (el) el.classList.toggle('stale', on); }
 }
 
+// Badge text for a given link mode + brain state — pure, tested in
+// test/deck-link.test.js. LIVE LINK with a dead brain is the 2026-08-16..19
+// lie: the socket was fine, the thing Craig was talking to was not.
+function linkBadge(mode, brain) {
+  if (mode === 'SIM') return { text: '⬡ SIMULATION', color: '#ffb547' };
+  if (mode !== 'LIVE') return { text: '⬡ RECONNECTING', color: '#ff5d5d' };
+  if (brain && brain.ok === false) return { text: '⬢ LIVE · BASIC MODE', color: '#ffb547' };
+  return { text: '⬢ LIVE LINK', color: '#3dffa0' };
+}
 function setLink(mode) {
   S.link = mode;
   const b = $('link-badge');
-  if (mode === 'LIVE') { b.textContent = '⬢ LIVE LINK'; b.style.color = '#3dffa0'; b.style.borderColor = '#3dffa0'; }
-  else if (mode === 'SIM') { b.textContent = '⬡ SIMULATION'; b.style.color = '#ffb547'; b.style.borderColor = '#ffb547'; }
-  else { b.textContent = '⬡ RECONNECTING'; b.style.color = '#ff5d5d'; b.style.borderColor = '#ff5d5d'; }
+  const v = linkBadge(mode, S.brain);
+  b.textContent = v.text; b.style.color = v.color; b.style.borderColor = v.color;
+  b.title = (mode === 'LIVE' && S.brain && S.brain.ok === false)
+    ? `Reasoning brain unavailable (${S.brain.reason || 'unavailable'}${S.brain.until ? `, re-probe ${S.brain.until}` : ''}) — basic commands only`
+    : '';
 }
 // What to say when the socket (re)opens — pure, tested in test/deck-link.test.js.
 // 2026-08-19: "Live link established, sir. You are seeing real telemetry." was
@@ -2591,6 +2602,16 @@ function handleMsg(m) {
   else if (m.type === 'platforms' && Array.isArray(m.platforms)) { S.platforms = m.platforms; renderPlatforms(); }
   else if (m.type === 'ops') { S.ops = m; renderOps(); }
   else if (m.type === 'situation') { S.situation = m; renderSituation(); }
+  else if (m.type === 'brain') {
+    // Honest brain state (move 33): the badge shows BASIC MODE while every login
+    // is down; on the flip back to ok, one quiet chat line — never a spoken
+    // announcement per reconnect (the server speaks recovery once, durably).
+    const was = S.brain;
+    S.brain = m;
+    setLink(S.link);
+    if (was && was.ok === false && m.ok) addChat('MARCO', 'Reasoning brain back online.', null);
+    if (was && was.ok && m.ok === false) addChat('MARCO', 'Reasoning brain unavailable — basic commands only until it returns.', null);
+  }
   else if (m.type === 'org' && Array.isArray(m.tiers)) { S.org = { tiers: m.tiers, total: m.total }; if (S.view === 'org') renderOrg(); renderAgents(); }
   else if (m.type === 'chat_chunk') onChatChunk(m.text);
   else if (m.type === 'chat') onChatFinal(m);
@@ -2784,6 +2805,8 @@ if (forceCore) {
   if (forceCore !== 'idle') $('orb-label').textContent = forceCore.toUpperCase();
 }
 if (qs.get('demo-alert')) showAlert('alert', '⬢ SAMPLE ALERT — vapron.ai DOWN 3 min, self-heal dispatched', '');
+// ?demo-brain=down renders the BASIC MODE badge (the live path is WS {type:'brain'}).
+if (qs.get('demo-brain') === 'down') setTimeout(() => { S.brain = { ok: false, provider: 'claude', reason: 'auth', until: null }; setLink(S.link); }, 1500);
 // ?demo-show=<capture.png> renders the SHOW ME panel against a real capture —
 // the live path is WS {type:'show'}, which a virtual-time capture can never
 // witness, and Rule 2 says a panel is only proven by looking at it.

@@ -60,3 +60,15 @@ test('socket handlers are scoped to THEIR socket, so a superseded one cannot sch
   assert.match(html, /const sock = ws;/);
   assert.match(html, /sock\.onclose = \(\) => \{\s*if \(sock !== ws\) return;/);
 });
+
+// ── Honest brain state on the badge (2026-08-19, audit move 33) ──────────────
+const linkBadge = extract('linkBadge');
+test('LIVE LINK with a dead brain reads BASIC MODE, not LIVE LINK', () => {
+  assert.equal(linkBadge('LIVE', { ok: false, reason: 'auth' }).text, '⬢ LIVE · BASIC MODE');
+  assert.equal(linkBadge('LIVE', { ok: true }).text, '⬢ LIVE LINK');
+  assert.equal(linkBadge('LIVE', null).text, '⬢ LIVE LINK');
+});
+test('link state still wins over brain state when the socket is down', () => {
+  assert.equal(linkBadge('DOWN', { ok: false }).text, '⬡ RECONNECTING');
+  assert.equal(linkBadge('SIM', { ok: false }).text, '⬡ SIMULATION');
+});

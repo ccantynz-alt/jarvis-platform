@@ -40,6 +40,7 @@ import { basename, join } from 'path';
 import { execSync } from 'child_process';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
+import { authHold } from './lib/claude-auth.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
 import { openTtsStream } from './lib/tts-stream.js';
 import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
@@ -1052,6 +1053,7 @@ wss.on('connection', (ws, req) => {
   if (state.ops) send({ type: 'ops', ...state.ops });
   if (state.situation) send({ type: 'situation', ...state.situation });
   send({ type: 'stats', ...state.stats });
+  send({ type: 'brain', ...brainState() });   // honest from the first frame (move 33)
   for (const f of [...state.feedCache].reverse()) send({ type: 'feed', ...f });
   for (const w of [...state.wireCache].reverse()) send({ type: 'wire', ...w });
 
@@ -1259,6 +1261,34 @@ tick(pollActivity, 5000);
 tick(pollStats, 10000);
 tick(pollOrg, 15000);
 tick(pollOps, 15000);
+
+// ── Brain state → every client (2026-08-19, audit move 33) ──────────────────
+// For the 2026-08-16..19 outage the deck's link badge said LIVE LINK while the
+// brain was dead; a phone that connected mid-outage got only oddly dumb answers
+// (the one-shot noteBrainDegraded notice reaches whoever is on THAT socket at
+// THAT moment). Now the state is pushed on every connect and broadcast on every
+// change, so the badge can say BASIC MODE — honestly, from the first frame.
+function brainState() {
+  const ok = hasAgent();
+  const hold = ok ? null : authHold();
+  return {
+    ok,
+    provider: getBrainProvider(),
+    reason: ok ? null : (hold?.held ? 'auth' : 'unavailable'),
+    until: hold?.held ? hold.at : null,
+  };
+}
+let lastBrainKey = null;
+function pollBrain() {
+  const b = brainState();
+  const key = `${b.ok}|${b.provider}|${b.reason}|${b.until}`;
+  if (key === lastBrainKey) return Promise.resolve();
+  lastBrainKey = key;
+  broadcast({ type: 'brain', ...b });
+  console.log(`[deck] brain state → ${b.ok ? `${b.provider} ok` : `DOWN (${b.reason}${b.until ? `, re-probe ${b.until}` : ''})`}`);
+  return Promise.resolve();
+}
+tick(pollBrain, 5000);
 tick(pollPlatforms, 30000);
 
 server.listen(PORT, '127.0.0.1', () => {
