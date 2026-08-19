@@ -863,8 +863,16 @@ app.post('/pc/action', async (req, res) => {
   }
   logEvent('DISPATCH', `PC action ${jobId.slice(0, 8)} queued — ${plan.description}`);
 
-  const waitMs = Math.min(Math.max(Number(wait_seconds) || 0, 0), 120) * 1000;
+  let waitMs = Math.min(Math.max(Number(wait_seconds) || 0, 0), 120) * 1000;
   if (!waitMs) return res.json({ jobId, status: 'queued', action: plan.verb, description: plan.description });
+
+  // Short-circuit (2026-08-19, move 40): if the worker has not checked in for
+  // two minutes the PC is asleep or offline, and waiting the full window only
+  // burns half a brain turn (TURN_TIMEOUT is 90 s) on a certainty. Answer
+  // "pending" now; the late-result watcher below still speaks it if it lands.
+  const seenBefore = await pcWorkerLastSeen();
+  const workerOnline = !!(seenBefore && Date.now() - Date.parse(seenBefore) < 120_000);
+  if (!workerOnline) waitMs = Math.min(waitMs, 3000);
 
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
@@ -878,16 +886,55 @@ app.post('/pc/action', async (req, res) => {
       });
     }
   }
-  // Not a failure: the PC may simply be asleep. Say which it is.
+  // Not a failure: the PC may simply be asleep. Say which it is — and make sure
+  // the answer is never lost: until now a result landing after this window went
+  // nowhere (the caller had already been told "pending"). Watch it and speak it.
   const seen = await pcWorkerLastSeen();
+  watchPcAction(jobId, plan, (timeout_min ?? 5) * 60_000 + 60_000);
   return res.json({
     jobId, status: 'pending', action: plan.verb, description: plan.description,
     worker_last_seen: seen,
     note: seen && Date.now() - Date.parse(seen) < 120_000
-      ? 'the worker is online and should pick this up shortly'
-      : 'the PC has not checked in recently — it is probably asleep or offline; the job stays queued',
+      ? 'the worker is online and should pick this up shortly — I will speak the answer when it lands'
+      : 'the PC has not checked in recently — it is probably asleep or offline; the job stays queued and I will speak the answer when it lands',
   });
 });
+
+// Late-result delivery for PC actions (2026-08-19, move 40). Dispatch jobs
+// have watchJob() in the gateway; typed PC actions had nothing — once the
+// /pc/action wait window passed, the answer was silently lost to the
+// conversation. One watcher per job; ends on completion or after the job's own
+// timeout (+1 min for the lease to expire and the reaper to speak).
+const pcWatchers = new Set();
+function watchPcAction(jobId, plan, maxMs) {
+  if (pcWatchers.has(jobId)) return;
+  pcWatchers.add(jobId);
+  const deadline = Date.now() + Math.min(maxMs, 30 * 60_000);
+  (async () => {
+    try {
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 3000));
+        let row;
+        try { row = await dbGet(`/memory/jobs/${jobId}`); } catch { continue; }
+        if (row.status !== 'completed' && row.status !== 'failed') continue;
+        const out = String(row.output || row.error || '').trim();
+        const ok = row.status === 'completed' && (row.exit_code == null || row.exit_code === 0);
+        const flat = out.replace(/\s+/g, ' ').slice(0, 200);
+        await notify({
+          source: 'pc', level: ok ? 'info' : 'warn',
+          title: `${ok ? '✅' : '❌'} PC answer (late): ${plan.description.split(/\r?\n/)[0].slice(0, 90)}`,
+          body: out.slice(0, 3000) || '(no output)',
+          speech: ok
+            ? `Sir, the PC has answered about ${plan.speech || plan.description}: ${flat.length > 140 ? 'the result is on your screen.' : flat}`
+            : `Sir, the PC action — ${plan.speech || plan.description} — failed: ${flat || 'no detail'}`,
+        }).catch(() => {});
+        return;
+      }
+    } finally {
+      pcWatchers.delete(jobId);
+    }
+  })();
+}
 
 // GET /pc/status — is the PC there, and what can it do?
 app.get('/pc/status', async (req, res) => {

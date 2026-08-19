@@ -512,12 +512,41 @@ export const VERBS = {
     },
   },
 
+  // Read-only shell (2026-08-19, audit move 39): a question the verb table
+  // has no verb for used to become `shell` — staged, spoken as a mangled
+  // PowerShell one-liner, confirmed half-heard. This runs INSTANTLY, because it
+  // is provably read-only: a single pipeline of allow-listed query cmdlets,
+  // no statement separators, no sub-expressions, no redirection, no
+  // executables, no assignment. Anything the validator cannot prove is still
+  // `shell` and still gated. isReadOnlyShell() is exported and tested.
+  'shell.read': {
+    mutates: false, needsAdmin: false,
+    describe: (a) => `look something up on the PC with: ${String(a.command || '').slice(0, 160)}`,
+    build: (a) => {
+      const cmd = String(a.command || '').trim();
+      const v = isReadOnlyShell(cmd);
+      if (!v.ok) throw new Error(`not provably read-only (${v.reason}) — use the gated shell action instead`);
+      return `${cmd} | Out-String -Width 200`;
+    },
+  },
+
   // The escape hatch — "do anything he needs". Still gated, still logged, and
   // still never interpolated into a command line: the worker feeds this to
   // powershell over stdin verbatim.
+  //
+  // describe() carries the WHOLE command (it used to be clipped at 200 chars,
+  // so an 8,000-char payload was confirmed half-seen) — that text goes to the
+  // deck. speak() is the short spoken form: TTS of PowerShell is unintelligible,
+  // and Craig's "yes" must be to something he could actually follow.
   'shell': {
     mutates: true, needsAdmin: false,
-    describe: (a) => `run this on the PC: ${String(a.command || '').slice(0, 200)}`,
+    describe: (a) => `run this on the PC:\n${String(a.command || '').trim()}`,
+    speak: (a) => {
+      const cmd = String(a.command || '').trim();
+      const lines = cmd.split(/\r?\n/).filter(Boolean).length;
+      const head = cmd.split(/\r?\n/)[0].slice(0, 70);
+      return `run a ${lines}-line PowerShell command on the PC, starting "${head}${cmd.length > 70 ? '…' : ''}" — the full command is on your screen`;
+    },
     build: (a) => {
       const cmd = String(a.command || '').trim();
       if (!cmd) throw new Error('command required');
@@ -526,6 +555,33 @@ export const VERBS = {
     },
   },
 };
+
+// ── shell.read validator ─────────────────────────────────────────────────────
+// Deliberately conservative: false negatives send a query to the gated path
+// (annoying); a false positive runs a mutation unconfirmed (the thing the whole
+// gate exists to prevent). So: ONE pipeline, every stage a known query verb.
+const READ_VERBS = new Set(['Get', 'Test', 'Measure', 'Select', 'Where', 'Sort', 'Format', 'Group', 'Resolve', 'Compare', 'ConvertTo', 'Out', 'Find', 'Show']);
+const READ_OUT = new Set(['Out-String', 'Out-Default', 'Format-Table', 'Format-List', 'Format-Wide']);
+const READ_BLOCK_RE = /[;&`{}]|\$\(|@\(|\|\||>>|>|<|\.\w+\s*\(|\bInvoke-|\bStart-|\bStop-|\bSet-|\bRemove-|\bNew-|\bRestart-|\bAdd-|\bClear-|\bMove-|\bCopy-|\bRename-|\bWrite-|\bExport-|\bImport-|\bOut-File|\bSend-|\bEnable-|\bDisable-|\bInstall-|\bUninstall-|\bRegister-|\bUnregister-|\biex\b|\bicm\b|\.exe\b|\.ps1\b|\.bat\b|\.cmd\b|\[[A-Za-z.]+\]::|\bcmd\b|\bpowershell\b|\bpwsh\b/i;
+export function isReadOnlyShell(cmd) {
+  const s = String(cmd || '').trim();
+  if (!s) return { ok: false, reason: 'empty' };
+  if (s.length > 600) return { ok: false, reason: 'too long for a read' };
+  if (/\r|\n/.test(s)) return { ok: false, reason: 'multi-line' };
+  // Script blocks `{ }` are refused outright: inside one, aliases (kill, rm,
+  // del, sv…) and method calls would slip past a verb allow-list. Comparison
+  // statements (`Where-Object Name -like '*x*'`) need no braces.
+  if (READ_BLOCK_RE.test(s)) return { ok: false, reason: 'contains a separator, script block, sub-expression, method call, redirection, executable or a mutating verb' };
+  if (/=(?!=)/.test(s.replace(/-eq|-ne|-like|-match|-gt|-lt|-ge|-le|-in|-contains/gi, ''))) return { ok: false, reason: 'assignment' };
+  const stages = s.split('|').map(x => x.trim());
+  for (const st of stages) {
+    const m = /^([A-Za-z]+)-([A-Za-z]+)\b/.exec(st);
+    if (!m) return { ok: false, reason: `stage "${st.slice(0, 40)}" is not a cmdlet` };
+    const verb = m[1], full = `${m[1]}-${m[2]}`;
+    if (!READ_VERBS.has(verb) && !READ_OUT.has(full)) return { ok: false, reason: `"${full}" is not a read verb` };
+  }
+  return { ok: true, reason: null };
+}
 
 export const isKnownVerb = (verb) => Object.prototype.hasOwnProperty.call(VERBS, verb);
 
@@ -604,6 +660,9 @@ export function planAction(verb, args = {}) {
     mutates: spec.mutates !== false,
     needsAdmin: !!spec.needsAdmin,
     description: spec.describe(args || {}),
+    // Short spoken form where the description is too long to say (2026-08-19:
+    // `shell` carries the whole command on screen; the voice gets a summary).
+    speech: spec.speak ? spec.speak(args || {}) : spec.describe(args || {}),
   };
 }
 

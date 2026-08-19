@@ -23,6 +23,7 @@
 import { readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { authHold } from './claude-auth.js';
+import { notify } from './notify.js';
 
 // ── Roadmap (project-completion checklist — "are we done yet", not health) ──
 // Structured twin of docs/ROADMAP.md's "THE 20 MOVES". Kept in sync manually,
@@ -606,24 +607,49 @@ export function previewDispatch(gate, platform, task) {
  * halve the attention each half gets.
  */
 export function previewPcAction(gate, plan) {
+  // Text carries the FULL description (for `shell`, the whole command — it
+  // used to be clipped at 200 chars, so an 8,000-char payload was confirmed
+  // half-seen); speech carries the short form, because TTS of PowerShell is
+  // noise and a "yes" must be to something he could follow (2026-08-19).
   const m = `On the PC I'm ready to ${plan.description}. Shall I, sir? Say yes and I'll do it.`;
-  if (!gate) return { text: m, speech: m, previewed: true };
+  const s = `On the PC I'm ready to ${plan.speech || plan.description}. Shall I, sir? Say yes and I'll do it.`;
+  if (!gate) return { text: m, speech: s, previewed: true };
   const same = gate.pending && gate.pending.kind === 'pc' &&
     gate.pending.verb === plan.verb &&
     JSON.stringify(gate.pending.args || {}) === JSON.stringify(plan.args || {});
   if (same) {
     gate.pending.restaged = (gate.pending.restaged || 0) + 1;
     gate.pending.expiresTurn = gate.turn + GATE_TTL_TURNS;
-    return { text: m, speech: m, previewed: true, alreadyStaged: true };
+    return { text: m, speech: s, previewed: true, alreadyStaged: true };
   }
   gate.pending = {
     kind: 'pc', verb: plan.verb, args: plan.args, description: plan.description,
     // platform/task are kept so every existing reader of gate.pending
     // (statusDigest, gateNote, the lapse path) keeps working unchanged.
-    platform: 'craig-pc', task: plan.description,
+    platform: 'craig-pc', task: plan.description.split(/\r?\n/)[0].slice(0, 160),
     turn: gate.turn, expiresTurn: gate.turn + GATE_TTL_TURNS,
   };
-  return { text: m, speech: m, previewed: true };
+  return { text: m, speech: s, previewed: true };
+}
+
+/**
+ * What to SAY about a PC action's output. Pure; tested in
+ * test/pc-shell-read.test.js. Short plain output is spoken verbatim (whitespace
+ * collapsed); a table (the '----' underline PowerShell prints) or anything
+ * long gets a one-line summary and a pointer to the screen.
+ */
+export function spokenPcResult(description, detail) {
+  const d = String(detail || '').trim();
+  if (!d) return `Done, sir — ${description}.`;
+  const lines = d.split('\n').map(s => s.trimEnd());
+  const underline = lines.findIndex(l => /^\s*-{3,}/.test(l));
+  const isTable = underline > 0 || lines.length > 6;
+  const flat = d.replace(/\s+/g, ' ').trim();
+  if (!isTable && flat.length <= 220) return `Done, sir. ${flat}`;
+  // Lead with the first real line if it is prose (not a table header/underline).
+  const lead = lines.map(s => s.trim()).find((s, i) => s && i !== underline && i !== underline - 1) || '';
+  const prose = lead && lead.length <= 140 && /[a-z]/.test(lead) && !/\s{2,}/.test(lead);
+  return `Done, sir — ${description}. ${prose ? lead + ' — ' : ''}the full result is on your screen.`;
 }
 
 /** Run a confirmed PC action through the orchestrator and report it plainly. */
@@ -646,13 +672,28 @@ export async function handlePcAction(verb, args, onEvent = () => {}, waitSeconds
     }
     const failed = data.status === 'failed' || (data.exit_code != null && data.exit_code !== 0);
     const detail = String(data.output || data.error || '').trim();
+    // A confirmed `shell` is the most powerful thing this system does to the
+    // PC; until 2026-08-19 only its FAILURES reached the inbox. Every run is
+    // recorded now — command and the head of its output — success or not.
+    if (verb === 'shell') {
+      notify({
+        source: 'pc', level: failed ? 'warn' : 'info',
+        title: `${failed ? '❌' : '✅'} Ran on the PC: ${String(args?.command || '').trim().split(/\r?\n/)[0].slice(0, 90)}`,
+        body: `Command:\n${String(args?.command || '').trim().slice(0, 2000)}\n\nOutput (${data.status}${data.exit_code != null ? `, exit ${data.exit_code}` : ''}):\n${detail.slice(0, 1500) || '(none)'}`,
+      }).catch(() => {});
+    }
     if (failed) {
       const m = `That didn't work on the PC, sir. ${detail.slice(0, 600) || 'No detail came back.'}`;
       return { text: m, speech: m, data };
     }
+    // Spoken result (2026-08-19, move 40): "Done, sir." swallowed the answer —
+    // a confirmed shell's output only ever reached the text channel. Short
+    // output is spoken as-is; a table or a long dump is summarised with a
+    // pointer to the screen.
+    const spoken = spokenPcResult(data.description, detail);
     return {
       text: detail ? `Done on the PC — ${data.description}.\n\n${detail.slice(0, 3000)}` : `Done on the PC — ${data.description}.`,
-      speech: `Done, sir.`,
+      speech: spoken,
       data,
     };
   } catch (e) {
@@ -681,7 +722,16 @@ export async function resolveDispatchGate(gate, text, onEvent = () => {}) {
     // A staged PC action runs on Craig's machine, not through a fleet agent.
     if (p.kind === 'pc') {
       const res = await handlePcAction(p.verb, p.args, onEvent);
-      gate.launched = { platform: 'craig-pc', task: p.description, jobId: res.data?.jobId || null, ok: !!res.data?.jobId };
+      // Truth for the brain (2026-08-19, move 40): a PC action returns a jobId
+      // even when it FAILED, so `ok: !!jobId` told the model "NOW RUNNING" about
+      // a refusal. ok = it completed or is genuinely still running on the PC.
+      const st = res.data?.status;
+      const failed = st === 'failed' || (res.data?.exit_code != null && res.data.exit_code !== 0) || !!res.data?.error;
+      gate.launched = {
+        platform: 'craig-pc', task: p.description, jobId: res.data?.jobId || null,
+        ok: !!res.data?.jobId && !failed,
+        outcome: failed ? 'failed' : st === 'completed' ? 'completed' : st === 'pending' ? 'pending' : 'unknown',
+      };
       return { handled: true, ...res };
     }
     const res = await handleDispatch(p.task, p.platform, onEvent);
@@ -729,8 +779,12 @@ export function gateNote(gate) {
   if (gate.launched) {
     const l = gate.launched;
     parts.push(l.ok
-      ? `the ${l.platform} job you staged is NOW RUNNING — Craig confirmed it and the gate launched it${l.jobId ? ` (job ${String(l.jobId).slice(0, 8)})` : ''}; do not stage it again`
-      : `Craig confirmed the ${l.platform} job but the orchestrator refused it — say so plainly if he asks`);
+      ? (l.outcome === 'completed'
+        ? `the PC action you staged (${l.task}) has COMPLETED — Craig confirmed it and the result was spoken; do not stage it again`
+        : `the ${l.platform} job you staged is NOW RUNNING — Craig confirmed it and the gate launched it${l.jobId ? ` (job ${String(l.jobId).slice(0, 8)})` : ''}; do not stage it again`)
+      : (l.outcome === 'failed'
+        ? `Craig confirmed the ${l.platform} action (${l.task}) and it RAN BUT FAILED — say so plainly, never call it running`
+        : `Craig confirmed the ${l.platform} job but the orchestrator refused it — say so plainly if he asks`));
     gate.launched = null;
   }
   if (gate.lapsed) {
