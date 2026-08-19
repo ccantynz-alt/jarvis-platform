@@ -145,7 +145,8 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 #voice-badge{color:#ffb547;border:1px solid #ffb547;border-radius:3px;padding:2px 8px;font-size:10px;letter-spacing:1px}
 #btn-history{border:1px solid rgba(107,138,158,.4);color:#6b8a9e}
 #btn-voice{border:1px solid rgba(107,138,158,.4);color:#6b8a9e}
-#voice-sheet{width:min(520px,94vw);display:flex;flex-direction:column;gap:10px;padding:12px 14px;
+#voice-sheet{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:60;max-height:min(80vh,80dvh);overflow-y:auto;
+  width:min(520px,94vw);display:flex;flex-direction:column;gap:10px;padding:12px 14px;
   border:1px solid rgba(0,229,255,.25);border-radius:4px;background:rgba(6,14,22,.92);animation:riseIn .2s ease both}
 .vs-row{display:flex;align-items:center;gap:12px}
 .vs-row label{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:2px;color:#6b8a9e;min-width:120px}
@@ -249,7 +250,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
           <div id="latest-reply" aria-live="polite"></div>
           <div id="heard-line" aria-hidden="true"></div>
           <div id="voice-pending" class="hidden" role="button" tabindex="0"></div>
-          <div style="display:flex;gap:10px">
+          <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;padding:0 8px">
             <div id="btn-mic" class="btn" role="button" tabindex="0" aria-label="Toggle voice mode">🎙 ENABLE MIC</div>
             <div id="btn-demo" class="btn" role="button" tabindex="0" aria-label="Run briefing">▶ RUN BRIEFING</div>
             <div id="btn-history" class="btn" role="button" tabindex="0" aria-label="Toggle conversation history">☰ HISTORY</div>
