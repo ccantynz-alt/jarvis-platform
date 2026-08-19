@@ -267,6 +267,30 @@ db.exec(`
     outcome TEXT            -- ok | error | timeout
   );
   CREATE INDEX IF NOT EXISTS idx_brain_turns_ts ON brain_turns(ts);
+
+  -- The memory PEN (2026-08-19, audit move 14). Until now nothing Marco learned
+  -- in conversation survived the 24-message window: no way to remember a fact
+  -- Craig told him, recall it later, or set a reminder. Two additive tables.
+  CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'note',   -- note | preference | fact
+    text TEXT NOT NULL,
+    tags TEXT,
+    source TEXT DEFAULT 'brain',
+    archived_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_notes_ts ON notes(ts);
+  CREATE TABLE IF NOT EXISTS reminders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',  -- pending | fired | canceled
+    fired_at TEXT,
+    source TEXT DEFAULT 'brain'
+  );
+  CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
 `);
 
 // Additive migrations for columns added after a table first shipped.
@@ -337,6 +361,9 @@ export function runRetention(now = new Date()) {
       (SELECT id FROM proposals WHERE status IN ('rejected','withdrawn','executed') AND updated_at < ?)`, cutoff, cutoff);
   run('coding_sessions', 'DELETE FROM coding_sessions WHERE ended_at < ? AND distill_status IN (\'done\',\'skipped\',\'failed\')', cutoff);
   run('brain_turns', 'DELETE FROM brain_turns WHERE ts < ?', cutoff);
+  // Delivered/canceled reminders are telemetry once past; a pending one is
+  // never aged out however old. Notes are DURABLE memory — never aged.
+  run('reminders', "DELETE FROM reminders WHERE status IN ('fired','canceled') AND COALESCE(fired_at, created_at) < ?", cutoff);
   if (STALE_DAYS) {
     const staleCut = new Date(now.getTime() - STALE_DAYS * 86400_000).toISOString();
     run('findings_stale', `UPDATE code_findings SET status = 'stale', resolved_at = ?
@@ -372,6 +399,66 @@ PLATFORMS.forEach(p => {
     INSERT OR IGNORE INTO platform_state (platform, status, updated_at)
     VALUES (?, 'unknown', ?)
   `).run(p, new Date().toISOString());
+});
+
+// ── Notes + reminders: the memory pen (move 14) ──────────────────────────────
+// POST /memory/notes {text, kind?, tags?, source?}
+app.post('/memory/notes', (req, res) => {
+  const { text, kind = 'note', tags = null, source = 'brain' } = req.body || {};
+  if (!text || !String(text).trim()) return res.status(400).json({ error: 'text required' });
+  const k = ['note', 'preference', 'fact'].includes(kind) ? kind : 'note';
+  const info = db.prepare('INSERT INTO notes (ts, kind, text, tags, source) VALUES (?,?,?,?,?)')
+    .run(new Date().toISOString(), k, String(text).slice(0, 4000), tags ? String(tags).slice(0, 300) : null, source);
+  res.json({ ok: true, id: info.lastInsertRowid });
+});
+// GET /memory/notes?q=&kind=&limit= — recall (LIKE over text+tags, newest first)
+app.get('/memory/notes', (req, res) => {
+  const limit = clampLimit(req.query.limit, 20, 100);
+  const q = String(req.query.q || '').trim();
+  const kind = String(req.query.kind || '').trim();
+  const where = ['archived_at IS NULL'];
+  const params = {};
+  if (q) { where.push('(text LIKE @q OR tags LIKE @q)'); params.q = `%${q}%`; }
+  if (['note', 'preference', 'fact'].includes(kind)) { where.push('kind = @kind'); params.kind = kind; }
+  const rows = db.prepare(`SELECT id, ts, kind, text, tags FROM notes WHERE ${where.join(' AND ')} ORDER BY id DESC LIMIT ${limit}`).all(params);
+  res.json({ notes: rows });
+});
+// POST /memory/notes/:id/archive — forget a note
+app.post('/memory/notes/:id/archive', (req, res) => {
+  const info = db.prepare('UPDATE notes SET archived_at = ? WHERE id = ? AND archived_at IS NULL').run(new Date().toISOString(), req.params.id);
+  res.json({ ok: info.changes > 0 });
+});
+
+// POST /memory/reminders {due_at (ISO), text}
+app.post('/memory/reminders', (req, res) => {
+  const { due_at, text, source = 'brain' } = req.body || {};
+  if (!text || !String(text).trim()) return res.status(400).json({ error: 'text required' });
+  const due = Date.parse(due_at);
+  if (!Number.isFinite(due)) return res.status(400).json({ error: 'due_at must be an ISO timestamp' });
+  const info = db.prepare('INSERT INTO reminders (created_at, due_at, text, source) VALUES (?,?,?,?)')
+    .run(new Date().toISOString(), new Date(due).toISOString(), String(text).slice(0, 1000), source);
+  res.json({ ok: true, id: info.lastInsertRowid, due_at: new Date(due).toISOString() });
+});
+// GET /memory/reminders?status=pending&due=1&limit=
+app.get('/memory/reminders', (req, res) => {
+  const limit = clampLimit(req.query.limit, 20, 100);
+  const status = ['pending', 'fired', 'canceled'].includes(String(req.query.status)) ? String(req.query.status) : 'pending';
+  const dueOnly = String(req.query.due) === '1';
+  const where = ['status = @status'];
+  const params = { status };
+  if (dueOnly) { where.push('due_at <= @now'); params.now = new Date().toISOString(); }
+  const rows = db.prepare(`SELECT id, created_at, due_at, text, status FROM reminders WHERE ${where.join(' AND ')} ORDER BY due_at ASC LIMIT ${limit}`).all(params);
+  res.json({ reminders: rows });
+});
+// POST /memory/reminders/:id/fired — the poller marks a reminder delivered
+app.post('/memory/reminders/:id/fired', (req, res) => {
+  const info = db.prepare("UPDATE reminders SET status='fired', fired_at=? WHERE id=? AND status='pending'").run(new Date().toISOString(), req.params.id);
+  res.json({ ok: info.changes > 0 });
+});
+// POST /memory/reminders/:id/cancel
+app.post('/memory/reminders/:id/cancel', (req, res) => {
+  const info = db.prepare("UPDATE reminders SET status='canceled' WHERE id=? AND status='pending'").run(req.params.id);
+  res.json({ ok: info.changes > 0 });
 });
 
 // POST /memory/brain-turn — one row of brain telemetry (move 24).

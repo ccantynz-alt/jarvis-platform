@@ -1591,5 +1591,27 @@ app.listen(PORT, '127.0.0.1', async () => {
   console.log(`[orchestrator] listening on http://127.0.0.1:${PORT}`);
   await recoverInterruptedJobs();
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
+  setInterval(fireDueReminders, 30_000);   // the memory pen's alarm (move 14)
   console.log(`[orchestrator] scheduler running (tick ${SCHEDULER_TICK_MS}ms, max ${MAX_CONCURRENT_JOBS} concurrent)`);
 });
+
+// Deliver reminders that have come due (2026-08-19, move 14). The orchestrator
+// is always up and already owns notify(), which speaks + inboxes + pushes — so
+// a reminder reaches Craig even with no deck open. Marks each fired so it goes
+// out exactly once.
+async function fireDueReminders() {
+  let due;
+  try { due = await dbGet('/memory/reminders?status=pending&due=1&limit=20'); }
+  catch { return; }
+  for (const r of (due?.reminders || [])) {
+    try {
+      await notify({
+        source: 'reminder', level: 'warn',
+        title: `⏰ Reminder: ${String(r.text).slice(0, 100)}`,
+        body: r.text,
+        speech: `Sir, a reminder: ${r.text}`,
+      });
+      await dbPost(`/memory/reminders/${r.id}/fired`, {});
+    } catch (e) { console.error('[orchestrator] reminder fire failed:', e.message); }
+  }
+}

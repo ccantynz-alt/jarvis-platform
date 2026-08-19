@@ -45,6 +45,7 @@ export function systemPrompt(digest = '') {
   const base = [
     "You are MARCO, Craig's own personal AI. He built you for himself. Above all else, he can just TALK to you — about anything: ideas, plans, how his day is going, the business he's building, or nothing in particular. You are a real conversation partner, not a command line.",
     'IDENTITY: a sharp, warm British AI butler. You call him "sir" — naturally, not in every sentence. Dry wit, genuine opinions, completely candid, never fawning or sycophantic. You actually listen and remember what he tells you.',
+    "MEMORY: you have a real, durable memory across conversations. Use `remember` to keep a fact, preference or decision he tells you; use `recall` before saying you don't know something he may have mentioned before; use `set_reminder` when he asks to be reminded (you compute the time from the clock in your live-status context). Don't announce that you're saving things unless it's natural — just quietly remember, the way a good butler does.",
     // Renamed Jarvis -> Marco on 2026-08-11 (Craig, aligning with MarcoReid
     // Intelligence Systems). He will keep saying "Jarvis" out of habit for a
     // while, and the wake word still answers to it — so answer to it here too
@@ -80,6 +81,14 @@ export async function statusDigest(gate = null) {
   ]);
 
   const parts = [];
+  // The clock (2026-08-19, move 14): the model had no idea what time or day it
+  // was — it could not answer "what's the date" or reason about "in 20 minutes"
+  // for a reminder. NZ local, since that is where Craig is.
+  try {
+    const now = new Date();
+    const nz = now.toLocaleString('en-NZ', { timeZone: 'Pacific/Auckland', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+    parts.push(`it is ${nz} NZ time (ISO now ${now.toISOString()})`);
+  } catch { /* Intl unavailable — skip the clock */ }
   if (summaryR.status === 'fulfilled') {
     const names = platformNames();
     const platforms = (summaryR.value?.platforms || []).filter(p => names.includes(p.name));
@@ -194,6 +203,25 @@ export const TOOLS = [
     input_schema: { type: 'object', properties: { platform: { type: 'string', description: 'optional — one platform' }, severity: { type: 'string', description: "optional — critical|high|medium|low" } }, required: [] } },
   { name: 'get_loop_alerts', description: "SPECIFICALLY for stuck/looping work — platforms where Jarvis has repeatedly dispatched the same fix with nothing ever completing, or health that's flapping rather than steadily down. Only reach for this when he asks about something being stuck/looping, not for a general 'is everything running smoothly' (use get_status for that).",
     input_schema: { type: 'object', properties: {}, required: [] } },
+
+  // ── The memory pen (2026-08-19, move 14) ───────────────────────────────────
+  { name: 'remember', description: "Save something Craig wants you to REMEMBER across conversations — a fact, a preference, a decision, a person, anything he tells you to keep or that clearly matters for later. Use whenever he says 'remember…', 'note that…', 'for future reference…', or states a durable preference. This persists beyond the current conversation. Keep the text a clean self-contained sentence.",
+    input_schema: { type: 'object', properties: {
+      text: { type: 'string', description: 'the thing to remember, as a self-contained sentence' },
+      kind: { type: 'string', description: "note | preference | fact (default note)" },
+      tags: { type: 'string', description: 'optional comma-separated tags to help recall later' },
+    }, required: ['text'] } },
+  { name: 'recall', description: "Search everything you've been asked to remember (facts, preferences, decisions). Use before saying you don't know something Craig may have told you earlier, or when he asks 'what did I say about…', 'do you remember…', 'what are my preferences for…'.",
+    input_schema: { type: 'object', properties: {
+      query: { type: 'string', description: 'keywords to search remembered notes; omit to list the most recent' },
+    }, required: [] } },
+  { name: 'set_reminder', description: "Set a reminder that will be spoken/pushed to Craig AT A FUTURE TIME. Compute due_at yourself from the current time (given in your live-status context) — e.g. 'in 20 minutes', 'at 3pm', 'tomorrow morning' → an absolute ISO 8601 timestamp. Use whenever he says 'remind me…'.",
+    input_schema: { type: 'object', properties: {
+      due_at: { type: 'string', description: 'absolute ISO 8601 timestamp when to fire (you compute it from the current time)' },
+      text: { type: 'string', description: 'what to remind him about, phrased as you would say it to him' },
+    }, required: ['due_at', 'text'] } },
+  { name: 'list_reminders', description: "List Craig's upcoming (pending) reminders. Use when he asks 'what reminders do I have', 'what am I meant to be doing', or before setting a possible duplicate.",
+    input_schema: { type: 'object', properties: {}, required: [] } },
 ];
 
 // ── Tool implementations — thin wrappers over conversation.js handlers ────────
@@ -207,6 +235,41 @@ export async function runTool(name, input, ctx) {
     case 'get_briefing':        return (await handleBriefing()).text;
     case 'get_roadmap':         return (await handleRoadmap()).text;
     case 'query_memory':        return (await handleAsk(input.question || '')).text;
+
+    case 'remember': {
+      const r = await fetch(`${MEMORY}/memory/notes`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: input.text, kind: input.kind, tags: input.tags }),
+      }).then(x => x.json()).catch(e => ({ error: e.message }));
+      return r.error ? `I couldn't save that, sir — ${r.error}.` : `Noted, sir. I'll remember that.`;
+    }
+    case 'recall': {
+      const qs = new URLSearchParams({ limit: '15' });
+      if (input.query) qs.set('q', String(input.query));
+      const r = await fetch(`${MEMORY}/memory/notes?${qs}`).then(x => x.json()).catch(() => ({ notes: [] }));
+      const notes = r.notes || [];
+      if (!notes.length) return input.query ? `I have nothing remembered about "${input.query}", sir.` : `I haven't been asked to remember anything yet, sir.`;
+      return `Here's what I remember${input.query ? ` about "${input.query}"` : ''}:\n` +
+        notes.map(n => `• ${n.text}${n.tags ? ` [${n.tags}]` : ''}`).join('\n');
+    }
+    case 'set_reminder': {
+      const r = await fetch(`${MEMORY}/memory/reminders`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ due_at: input.due_at, text: input.text }),
+      }).then(x => x.json()).catch(e => ({ error: e.message }));
+      if (r.error) return `I couldn't set that reminder, sir — ${r.error}.`;
+      const when = new Date(r.due_at).toLocaleString('en-NZ', { timeZone: 'Pacific/Auckland', weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
+      return `Done, sir — I'll remind you ${when}: ${input.text}`;
+    }
+    case 'list_reminders': {
+      const r = await fetch(`${MEMORY}/memory/reminders?status=pending`).then(x => x.json()).catch(() => ({ reminders: [] }));
+      const rem = r.reminders || [];
+      if (!rem.length) return `No reminders set, sir.`;
+      return `Upcoming reminders:\n` + rem.map(x => {
+        const when = new Date(x.due_at).toLocaleString('en-NZ', { timeZone: 'Pacific/Auckland', weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
+        return `• ${when} — ${x.text}`;
+      }).join('\n');
+    }
     case 'get_inbox': {
       const qs = input.unread_only === false ? '?limit=15' : '?unread=1';
       const r = await fetch(`${MEMORY}/memory/notifications${qs}`).then(r => r.json());
