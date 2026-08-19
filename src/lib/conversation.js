@@ -22,6 +22,7 @@
 
 import { readFileSync } from 'fs';
 import { spawn } from 'child_process';
+import { authHold } from './claude-auth.js';
 
 // ── Roadmap (project-completion checklist — "are we done yet", not health) ──
 // Structured twin of docs/ROADMAP.md's "THE 20 MOVES". Kept in sync manually,
@@ -292,7 +293,11 @@ function runClaudeCli(prompt) {
 
 export async function classifyIntent(text) {
   const prompt = buildClassifyPrompt(text);
-  const output = (await runClaudeHttp(prompt)) ?? (await runClaudeCli(prompt));
+  // The CLI leg runs on the subscription login; while every login is inside
+  // its auth cooldown it is a guaranteed 2-second exit 1 after up to 20 s of
+  // dead air in the one mode where speed is all the fallback has (2026-08-19).
+  const cliOk = !authHold().held;
+  const output = (await runClaudeHttp(prompt)) ?? (cliOk ? await runClaudeCli(prompt) : null);
   if (!output) return null;
 
   // Defensive parse: strip markdown fences, isolate the first {...} object
@@ -996,7 +1001,7 @@ export function handleHelp() {
     `• \`check vapron\` — same\n` +
     `• \`briefing\` or \`morning\` — full morning summary\n` +
     `• \`what's left\` or \`roadmap\` — Jarvis project completion checklist\n` +
-    `• _anything else_ — passed through to orchestrator as a task\n\n` +
+    `• _anything else_ — in basic mode, nothing is dispatched without an action verb\n\n` +
     `Platforms: ${platforms}`;
   return {
     text: msg,
@@ -1023,7 +1028,24 @@ export async function runIntent(intent, rawText, onEvent = () => {}, gate = null
     case 'briefing':        return handleBriefing();
     case 'roadmap':         return handleRoadmap();
     case 'help':            return handleHelp();
+    // Nothing recognisable (2026-08-19). This pipeline only runs when the
+    // reasoning brain is unavailable, and "nothing matched" used to stage a
+    // DISPATCH of the raw utterance — the KV transcript shows "Ready to dispatch
+    // to auto: love you what. Shall I proceed, sir?" and "Ready to dispatch to
+    // auto: I just got a message from you saying okay baby have a safe flight"
+    // during the 2026-08-16..19 outage: a degraded assistant turning household
+    // speech into a production-agent preview one "yes" away from launch. A
+    // dispatch needs an action VERB (the 'dispatch' case above); free speech in
+    // basic mode gets an honest "I'm in basic mode" instead, and stages nothing.
     case 'passthrough':
-    default:                return previewDispatch(gate, matchPlatform(dispatchTask) || 'auto', dispatchTask);
+    default:                return handleBasicMode(dispatchTask);
   }
+}
+
+export function handleBasicMode(text = '') {
+  const heard = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const msg = `My reasoning brain is offline, sir — I'm in basic mode${heard ? ` and I didn't catch a command in "${heard}"` : ''}. ` +
+    `I can give you status, the jobs, a briefing, the roadmap, or check a platform by name; ` +
+    `to dispatch work, name the platform and say fix, build, update or deploy.`;
+  return { text: msg, speech: msg, basicMode: true };
 }

@@ -126,6 +126,54 @@ export function usageHold({ profiles: injected, now = Date.now(), state = exhaus
 }
 
 /**
+ * Is EVERY subscription login inside its AUTH cooldown — i.e. has each one been
+ * seen to fail authentication recently, with no recovery since?
+ *
+ * The twin of usageHold(), and missing until 2026-08-19. spawn-agent.js had set
+ * `authHeld` since 2026-08-16 and NOTHING consumed it: the orchestrator marked
+ * every auth-failed job FAILED (the task was lost and the next queued job was
+ * fed into the same dead login within one tick), code-health recorded "review
+ * failed" and put the platform into its 20-hour cooldown unreviewed, the
+ * harvester wrote `distill_status='failed'` permanently on the newest sessions,
+ * and the review-runner spawned anyway. Same shape as usageHold so the two
+ * gates can never drift apart: `profiles`/`now`/`state` injectable for tests.
+ *
+ * `until` is the EARLIEST cooldown expiry — a probe spawn is worth one attempt
+ * then, because `claude login` / a new token can land at any moment.
+ */
+export function authHold({ profiles: injected, now = Date.now(), state = authBroken } = {}) {
+  if (!injected) ensureRefreshLoop();
+  const profiles = injected || listProfiles();
+  if (!profiles.length) return { held: false, until: null, at: null };
+  const table = state;
+  const expiries = [];
+  for (const p of profiles) {
+    const until = table[p];
+    if (!until || until < now) return { held: false, until: null, at: null };  // one may work
+    expiries.push(until);
+  }
+  const until = Math.min(...expiries);
+  return { held: true, until, at: new Date(until).toISOString() };
+}
+
+/**
+ * The ONE pre-spawn question for every caller, daemon or oneshot: is there any
+ * point starting a `claude` right now? Refreshes the durable KV state first,
+ * because every timer is a fresh process whose in-memory maps are empty — the
+ * very reason the 2026-08-17 failover flapped between two dead logins.
+ *
+ * @returns {{held:boolean, kind:'usage'|'auth'|null, until:number|null, at:string|null}}
+ */
+export async function spawnHold() {
+  await refreshFromKV().catch(() => {});
+  const u = usageHold();
+  if (u.held) return { ...u, kind: 'usage' };
+  const a = authHold();
+  if (a.held) return { ...a, kind: 'auth' };
+  return { held: false, kind: null, until: null, at: null };
+}
+
+/**
  * Env for anything that talks to Claude on the subscription: sets
  * CLAUDE_CONFIG_DIR for non-default profiles and STRIPS the metered API key
  * (an inherited ANTHROPIC_API_KEY would override the subscription login and

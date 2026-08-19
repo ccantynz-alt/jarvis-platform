@@ -233,3 +233,38 @@ test('org_disabled never fails over — every login under that org is refused', 
   assert.equal(plan.next, null, 'a healthy-looking second account must NOT be tried');
   assert.equal(plan.announce, 'alert');
 });
+
+// ── authHold: the twin of usageHold, missing until 2026-08-19 ────────────────
+//
+// spawn-agent set `authHeld` from 2026-08-16 and nothing consumed it: the
+// orchestrator marked auth-failed jobs FAILED (task lost), code-health recorded
+// "review failed" and cooled the platform 20h unreviewed, the harvester wrote
+// `distill_status='failed'` permanently. These pin the gate's shape to
+// usageHold's so the two can never drift.
+import { authHold } from '../src/lib/claude-auth.js';
+
+test('authHold: no profiles is not a hold', () => {
+  assert.equal(authHold({ profiles: [], now: T, state: {} }).held, false);
+});
+
+test('authHold: one login not marked broken means work continues', () => {
+  const state = { default: T + 600_000 };
+  assert.equal(authHold({ profiles: ['default', 'second'], now: T, state }).held, false);
+});
+
+test('authHold: an expired auth cooldown counts as usable (a login may have landed)', () => {
+  const state = { default: T - 1, second: T + 600_000 };
+  assert.equal(authHold({ profiles: ['default', 'second'], now: T, state }).held, false);
+});
+
+test('THE 2026-08-19 CASE: every login seen failing → held until the EARLIEST cooldown expiry', () => {
+  const state = { default: T + 900_000, 'account-b': T + 300_000 };
+  const h = authHold({ profiles: ['default', 'account-b'], now: T, state });
+  assert.equal(h.held, true);
+  assert.equal(h.until, T + 300_000);
+  assert.equal(h.at, new Date(T + 300_000).toISOString());
+});
+
+test('authHold: a single-profile box holds on that one login', () => {
+  assert.equal(authHold({ profiles: ['default'], now: T, state: { default: T + 1 } }).held, true);
+});

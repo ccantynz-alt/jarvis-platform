@@ -37,6 +37,7 @@ import { loadPlatforms } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import { spawnClaude } from './lib/spawn-agent.js';
+import { spawnHold } from './lib/claude-auth.js';
 import { extractJsonObject } from './lib/findings.js';
 import {
   redactSecrets, parseSessionJsonl, isConversationSession, isTrivialSession,
@@ -332,6 +333,14 @@ async function distillOne(sess, registry) {
   }
   const prompt = distillPrompt({ platform: sess.platform }, buildExcerpt(parsed));
   const r = await spawnClaude({ prompt, cwd: WORK_DIR, timeoutMin: DISTILL_TIMEOUT });
+  // A held spawn (every login usage-limited or failing to authenticate) is not
+  // a failed distillation — the session was never looked at. Writing `failed`
+  // here was permanent (memory-server has no retry path), so during the
+  // 2026-08-16..19 auth outage the newest ten sessions per hour were being
+  // written off unread. Leave the row pending and stop the loop for this run.
+  if (r.limitHeld || r.authHeld) {
+    return { status: 'held', lessons: 0, note: r.authHeld ? 'no Claude login can authenticate' : 'every account usage-limited' };
+  }
   if (r.code !== 0 || r.timedOut) {
     await post('/memory/harvest/distilled', { session_id: sess.id, status: 'failed', lessons: [] });
     return { status: 'failed', lessons: 0, note: `exit ${r.code} timedOut=${r.timedOut}` };
@@ -368,13 +377,17 @@ async function main() {
 
   let distilled = 0, newLessons = 0;
   if (MODE === 'live') {
-    const pending = await fetch(`${MEMORY}/memory/harvest/pending?limit=${DISTILL_MAX}`)
+    // Don't start a distillation run that cannot authenticate (2026-08-19).
+    const hold = await spawnHold();
+    const pending = hold.held ? [] : await fetch(`${MEMORY}/memory/harvest/pending?limit=${DISTILL_MAX}`)
       .then(r => r.json()).catch(() => []);
+    if (hold.held) log(`distill: claude ${hold.kind} hold until ${hold.at} — nothing distilled this run, sessions stay pending`);
     for (const sess of pending) {
       const r = await distillOne(sess, registry).catch(e => ({ status: 'failed', lessons: 0, note: e.message }));
+      log(`distill #${sess.id} (${sess.platform || '?'}) → ${r.status}, ${r.lessons} new lesson(s)${r.note ? ` — ${r.note}` : ''}`);
+      if (r.status === 'held') break;   // the rest would hit the same wall
       distilled++;
       newLessons += r.lessons;
-      log(`distill #${sess.id} (${sess.platform || '?'}) → ${r.status}, ${r.lessons} new lesson(s)${r.note ? ` — ${r.note}` : ''}`);
     }
   }
 

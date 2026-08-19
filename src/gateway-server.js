@@ -382,6 +382,11 @@ wss.on('connection', (ws, req) => {
             const notice = noteBrainDegraded();
             if (notice) ws.send(JSON.stringify({ type: 'reply', text: notice, speech: notice, interim: true }));
           }
+        } else {
+          // Brain already known-unavailable (auth cooldown on every login) —
+          // announce basic mode once rather than quietly answering dumb (2026-08-19).
+          const notice = noteBrainDegraded();
+          if (notice) ws.send(JSON.stringify({ type: 'reply', text: notice, speech: notice, interim: true }));
         }
 
         // Intent pipeline (same engine as the frozen Slack bridge)

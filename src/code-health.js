@@ -41,6 +41,7 @@ import { hasSource } from './lib/checkout.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { spawnHold } from './lib/claude-auth.js';
 import {
   normalizeFinding, parseFindings, needsVerification, pickTarget, severityRank, lensFor, LENSES,
   extractJsonObject, boolish,
@@ -390,6 +391,15 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
       await notify({ source: 'code-health', level: 'warn', title: 'Code-health sweep held', body: `The claude CLI canary failed, so no review ran: ${canary.detail}`, speech: 'I held the code review — the claude binary needs checking.' });
       return { skipped: 'canary' };
     }
+    // Pre-spawn hold (2026-08-19): if every login is usage-limited or seen
+    // failing to authenticate, a review agent is a guaranteed exit 1 — which
+    // used to be recorded as "review failed", warn Craig, and push the platform
+    // into its 20-hour cooldown unreviewed. Hold the sweep; nothing is recorded.
+    const hold = await spawnHold();
+    if (hold.held) {
+      log(`claude ${hold.kind} hold (until ${hold.at}) — holding this sweep for the next tick`);
+      return { skipped: hold.kind };
+    }
   }
 
   if (!existsSync(WORK_DIR)) mkdirSync(WORK_DIR, { recursive: true });
@@ -410,9 +420,9 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     log(`remote ${remoteServer} claude login is usage-limited — sweep failed there, not here`);
   }
 
-  if (review.limitHeld) {
-    log('both subscription accounts are usage-limited — holding this sweep for the next tick');
-    return { skipped: 'usage-limit' };   // deliberately NOT recorded as swept
+  if (review.limitHeld || review.authHeld) {
+    log(`${review.authHeld ? 'no subscription login can authenticate' : 'both subscription accounts are usage-limited'} — holding this sweep for the next tick`);
+    return { skipped: review.authHeld ? 'auth' : 'usage-limit' };   // deliberately NOT recorded as swept
   }
   if (review.code !== 0) {
     log(`review agent exited ${review.code} (timedOut=${review.timedOut}) — stderr: ${review.stderr.slice(0, 300)}`);
@@ -548,13 +558,22 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     if (res.created && needsVerification(f) && verifications < MAX_VERIFICATIONS) {
       verifications++;
       const v = await spawnAgent({ prompt: verifyPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
+      // A held verifier (usage/auth) is "unproven", never "refuted": leave the
+      // finding open for the next sweep rather than spend the rest of the cap
+      // on more guaranteed failures (2026-08-19).
+      const held = v.limitHeld || v.authHeld;
+      if (held) { log(`verify: claude ${v.authHeld ? 'auth' : 'usage'} hold — leaving the rest unverified this sweep`); verifications = MAX_VERIFICATIONS; }
       // extractJsonObject, not a greedy brace regex. See its comment in
       // lib/findings.js: the regex it replaces lost THREE of four verdicts on the
       // 2026-07-30 jarvis sweep, and a lost verdict silently becomes "unproven".
-      const verdict = extractJsonObject(v.stdout, ['real']);
+      const verdict = held ? null : extractJsonObject(v.stdout, ['real']);
       const real = verdict ? boolish(verdict.real) : null;
 
-      if (real === true) {
+      if (held) {
+        entry.status = 'open';
+        await patchFinding(res.id, { verdict: withNote(`verifier held (${v.authHeld ? 'no Claude login could authenticate' : 'usage-limited'}) — unverified, not refuted`) }).catch(() => {});
+        log(`unverified (held) — left open: ${f.title}`);
+      } else if (real === true) {
         entry.status = 'confirmed';
         await patchFinding(res.id, { status: 'confirmed', verdict: withNote(String(verdict.why || '').slice(0, 800)), severity: verdict.severity });
         if (verdict.severity) entry.severity = verdict.severity;
@@ -624,7 +643,7 @@ async function recheckOldFindings(platform, cwd, spawnAgent = spawnClaude) {
 
   for (const f of staleFirst) {
     const v = await spawnAgent({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
-    if (v.limitHeld) { log('recheck: usage-limited, stopping re-checks for this sweep'); break; }
+    if (v.limitHeld || v.authHeld) { log(`recheck: claude ${v.authHeld ? 'auth' : 'usage'} hold, stopping re-checks for this sweep`); break; }
     const verdict = extractJsonObject(v.stdout, ['still_present']);
     const stillPresent = verdict ? boolish(verdict.still_present) : null;
 

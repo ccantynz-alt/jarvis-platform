@@ -137,6 +137,32 @@ export function hasAgent() {
 // every utterance) when the smart brain falls back to the keyword pipeline, and
 // once again when it recovers. Returns a string to speak, or null for silence.
 let brainHealthy = true;
+// Durable once-a-day limiter for the total-outage alert (2026-08-19). Lives in
+// KV rather than a module variable because the deck and the gateway are two
+// processes, each of which would otherwise alert separately — and because a
+// restart mid-outage must not re-alert.
+const OUTAGE_DAY_KEY = 'brain-outage-alert-day';
+const utcDay = () => new Date().toISOString().slice(0, 10);
+async function getKv(key) {
+  const r = await fetch(`${MEMORY}/memory/kv/${key}`, { signal: AbortSignal.timeout(3000) }).then(r => r.json());
+  return r?.value ?? null;
+}
+async function setKv(key, value) {
+  await fetch(`${MEMORY}/memory/kv`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value }), signal: AbortSignal.timeout(3000),
+  });
+}
+async function outageAlertedToday() {
+  try { return (await getKv(OUTAGE_DAY_KEY)) === utcDay(); } catch { return false; }
+}
+async function clearOutageMarker() {
+  // One loopback GET per healthy turn; written only when there is something to
+  // clear. Deliberately no in-process "known clear" cache — the deck and the
+  // gateway are separate processes and either may have set the marker.
+  if (await getKv(OUTAGE_DAY_KEY)) await setKv(OUTAGE_DAY_KEY, '');
+}
+
 export function noteBrainDegraded() {
   if (!brainHealthy) return null;
   brainHealthy = false;
@@ -254,6 +280,9 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
             : `Sir, my Claude brain is unavailable — running on ${label} until it returns.`,
         }).catch(() => {});
       }
+      // A turn worked: the daily total-outage marker must not outlive the
+      // outage it describes, or the next one stays quiet. Best-effort.
+      clearOutageMarker().catch(() => {});
       return out;
     } catch (e) {
       lastErr = e;
@@ -274,12 +303,21 @@ export async function runAgent(transcript, userText, onChunk = () => {}, gate = 
   // never durably records the outage or reaches Slack/the inbox. Confirmed
   // this gap is real: a 2026-07-25 incident (claude session stalling +
   // simultaneous OpenAI 429) hit exactly this path with zero durable alert.
-  await notify({
-    source: 'brain', level: 'alert',
-    title: 'Brain fully down — every provider failed',
-    body: `All configured brain providers failed this turn (last error: ${(lastErr && lastErr.message) || 'unknown'}). Falling back to basic keyword mode until a provider recovers.`,
-    speech: 'Sir, my reasoning brain is completely unavailable right now — every provider failed. Running in basic mode.',
-  }).catch(() => {});
+  //
+  // 2026-08-19: once per UTC day, DURABLY. This fired on EVERY utterance during
+  // an outage — `alert` is exempt from push dedupe, and the inbox got a row per
+  // turn (CLAUDE.md: an alert about something the monitor cannot fix needs a
+  // HUMAN's rate limit). The marker is cleared the next time a turn succeeds
+  // (below in runAgent's success path) so the next outage is loud again.
+  if (!(await outageAlertedToday())) {
+    await notify({
+      source: 'brain', level: 'alert',
+      title: 'Brain fully down — every provider failed',
+      body: `All configured brain providers failed this turn (last error: ${(lastErr && lastErr.message) || 'unknown'}). Falling back to basic keyword mode until a provider recovers. This alert is sent once a day; the deck shows BASIC MODE while it lasts.`,
+      speech: 'Sir, my reasoning brain is completely unavailable right now — every provider failed. Running in basic mode.',
+    }).catch(() => {});
+    await setKv(OUTAGE_DAY_KEY, utcDay()).catch(() => {});
+  }
   // Every provider failed. Leave the transcript exactly as this turn found it —
   // the callers used to do this themselves with `transcript.splice(before)`,
   // captured before runAgent ran, which is the same index-based hazard one

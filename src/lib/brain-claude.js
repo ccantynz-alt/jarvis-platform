@@ -25,7 +25,7 @@ import { TOOLS, runTool, systemPrompt, statusDigest } from './brain-tools.js';
 import { CONVERSATION_TAG } from './harvest.js';
 import { ownTurn } from './transcript.js';
 import {
-  hasClaudeAuth, getActiveProfile, profileEnv,
+  hasClaudeAuth, getActiveProfile, profileEnv, authHold, noteSpawnSuccess,
   classifyFailure, reportExhausted, reportAuthFailure, reportModelRejected,
 } from './claude-auth.js';
 
@@ -54,6 +54,21 @@ let modelChoice = null; // voice-selected tier, persisted in memory KV
   } catch { /* KV empty or memory down */ }
 })();
 const MODEL = () => modelChoice || process.env.BRAIN_CLAUDE_MODEL || 'claude-opus-5';
+
+// Effort per tier (2026-08-19). The SDK's `effort` is a SESSION option (no
+// runtime setter), so it rides on the tier: the everyday Opus 5 session runs at
+// `medium` — this is a VOICE assistant, and the default `high` spends its
+// first seconds thinking while the room hears silence — and the escalated
+// Fable 5 session, which exists precisely for the hard turn, keeps `high`.
+// Env-tunable so the 20 s / 35 s first-token watchdogs can be re-fitted against
+// measured turns rather than guessed. Valid: low | medium | high | xhigh | max.
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const effortFor = (model) => {
+  const want = model === TIERS[0]
+    ? (process.env.BRAIN_EFFORT || 'medium')
+    : (process.env.BRAIN_EFFORT_HEAVY || 'high');
+  return EFFORT_LEVELS.has(want) ? want : (model === TIERS[0] ? 'medium' : 'high');
+};
 const nextTierUp = (m) => TIERS[Math.min(TIERS.indexOf(m) + 1, TIERS.length - 1)];
 
 /** Voice/model selection: accepts opus/fable, returns spoken label. */
@@ -90,9 +105,19 @@ export async function setBrainModel(word) {
 const FIRST_TOKEN_MS = Number(process.env.BRAIN_FIRST_TOKEN_TIMEOUT_MS) || 20_000;
 const TURN_TIMEOUT_MS = Number(process.env.BRAIN_TURN_TIMEOUT_MS) || 90_000;
 const MAX_TURNS = 12; // SDK-internal tool round-trips per user turn
+let lastHeartbeatAt = 0; // last time a successful turn wrote claude-last-spawn-ok
 
+// Liveness, not file-exists (2026-08-19). `hasClaudeAuth()` only asks whether
+// a .credentials.json is on disk, so for the whole 2026-08-16..19 outage
+// hasAgent() stayed true and EVERY utterance paid a cold SDK spawn, a
+// classification, three KV writes and an inbox row before degrading to keyword
+// mode — and the deck showed "ORCHESTRATING" while the brain was dead. The
+// durable auth-broken markers (claude-auth, refreshed from KV every 60 s and
+// set in-process the instant a turn fails) already know. When every login is
+// inside its auth cooldown the brain is simply "not available" — instantly,
+// honestly, and for exactly the 15 minutes after which one probe is worth it.
 export function hasClaudeBrain() {
-  return process.env.BRAIN_CLAUDE_DISABLED !== '1' && hasClaudeAuth();
+  return process.env.BRAIN_CLAUDE_DISABLED !== '1' && hasClaudeAuth() && !authHold().held;
 }
 
 // ── Tool bridge: our schemas → SDK MCP tools running the shared runTool() ────
@@ -150,12 +175,21 @@ function startSession(model = MODEL()) {
     prompt: input(),
     options: {
       model,
+      effort: effortFor(model),
       systemPrompt: systemPrompt(),
       maxTurns: MAX_TURNS,
       includePartialMessages: true,
       mcpServers: { jarvis: buildMcpServer() },
-      allowedTools: TOOLS.map(t => `mcp__jarvis__${t.name}`),
-      disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task', 'TodoWrite', 'NotebookEdit'],
+      // WebSearch (2026-08-19): Claude's native web search is performed on
+      // Anthropic's side — ranked, current, and with NO egress from this box —
+      // and it works on the subscription (verified on 158's CLI the day it was
+      // enabled). Until now it was disallowed and "research" was a DuckDuckGo
+      // HTML scrape clipped to 4,000 chars. WebFetch stays OFF on purpose: the
+      // CLI fetches that URL FROM THIS BOX, bypassing browser-service's SSRF
+      // guard, and the URL comes from a model that reads untrusted pages —
+      // fetch_url / render_page remain the guarded way to read a page.
+      allowedTools: [...TOOLS.map(t => `mcp__jarvis__${t.name}`), 'WebSearch'],
+      disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch', 'Task', 'TodoWrite', 'NotebookEdit'],
       permissionMode: 'bypassPermissions',
       env,
       cwd: '/opt/jarvis',
@@ -189,7 +223,7 @@ function startSession(model = MODEL()) {
     if (session === s) session = null;
   })();
 
-  console.log(`[brain-claude] session started — model ${model}, profile ${profile.name}`);
+  console.log(`[brain-claude] session started — model ${model} (effort ${effortFor(model)}), profile ${profile.name}`);
   return s;
 }
 
@@ -358,6 +392,15 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
         const text = await runTurn(s, CONVERSATION_TAG + ' ' + (fresh ? recapFrom(transcript) : '') + (digest ? digest + ' ' : '') + userText, onChunk, fresh);
         transcript.push(ownTurn({ role: 'assistant', content: text }, turnId));
         if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
+        // Heartbeat (2026-08-19): a brain turn that authenticated is exactly as
+        // good a proof of life as an agent spawn, but only spawnClaude wrote
+        // `claude-last-spawn-ok` — so jarvis-experience said "no agent spawn has
+        // ever authenticated" while Marco was talking, and a brain recovery never
+        // cleared the standing auth alert. Best-effort; never fails the turn.
+        if (Date.now() - lastHeartbeatAt > 60_000) {   // four KV writes; once a minute is plenty
+          lastHeartbeatAt = Date.now();
+          noteSpawnSuccess(s.profile).catch(() => {});
+        }
         // An escalated session served its one hard turn — drop back to the
         // everyday tier afterwards so usage limits aren't burned on chit-chat.
         if (escalateTo) disposeSession('de-escalate after escalated turn');

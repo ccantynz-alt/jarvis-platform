@@ -6,7 +6,7 @@ import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
 import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
-import { usageHold } from './lib/claude-auth.js';
+import { usageHold, authHold } from './lib/claude-auth.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
 import { planAction, encodeActionJob, workerKnowsVerb } from './lib/pc-actions.js';
@@ -316,6 +316,19 @@ async function runLocalJob(row) {
     }).catch((e) => console.error('[orchestrator] re-queue after usage limit failed:', e.message));
     return;
   }
+  // Same for a dead login (2026-08-19). spawn-agent has set authHeld since
+  // 2026-08-16; this was the first consumer. The 136 "failed" jobs on the box
+  // that week were mostly this: never attempted, task lost, Craig pushed a
+  // "❌ Job failed" blaming the agent.
+  if (result.authHeld) {
+    const hold = authHold();
+    console.warn(`[orchestrator] job ${row.id} held — no Claude login can authenticate${hold.at ? `; re-probe ${hold.at}` : ''}`);
+    logEvent('ERR', `Job ${row.id.slice(0, 8)} HELD — no Claude login can authenticate`);
+    await jobTransition(row.id, 'queued', 'held: no Claude login can authenticate', {
+      started_at: null,
+    }).catch((e) => console.error('[orchestrator] re-queue after auth failure failed:', e.message));
+    return;
+  }
   await finishJob(row, result);
 }
 
@@ -471,6 +484,9 @@ let gateHeld = false;
 // When the usage-limit hold started, so "held" and "resumed" are each logged
 // once rather than every 30-second tick.
 let usageHeldSince = null;
+// Same, for the auth hold (2026-08-19): every login seen failing to
+// authenticate → dispatch parks until the earliest cooldown expiry.
+let authHeldSince = null;
 let lastCanaryAt = 0;
 let tickInFlight = false;
 
@@ -527,6 +543,26 @@ async function schedulerTick() {
       console.log(`[orchestrator] Claude accounts usable again after ${Math.round((Date.now() - usageHeldSince) / 60000)}m — resuming dispatch`);
       logEvent('JOB', 'Claude usage limits reset — dispatch resumed');
       usageHeldSince = null;
+    }
+
+    // Auth gate (2026-08-19): while EVERY login has been seen failing to
+    // authenticate, a spawn is a guaranteed 2-second exit 1 — and until today
+    // that exit marked the job FAILED and lost the task. Park instead. The
+    // cooldown is short (15 min) so a `claude login` is picked up promptly;
+    // claude-auth owns the alerting, this gate only stops the burn.
+    const ahold = authHold();
+    if (ahold.held) {
+      if (!authHeldSince) {
+        authHeldSince = Date.now();
+        logEvent('ERR', `No Claude login can authenticate — dispatch HELD, next probe ${ahold.at}`);
+        console.warn(`[orchestrator] dispatch held: no Claude login authenticates; re-probe at ${ahold.at}`);
+      }
+      return;
+    }
+    if (authHeldSince) {
+      console.log(`[orchestrator] a Claude login is usable again after ${Math.round((Date.now() - authHeldSince) / 60000)}m — resuming dispatch`);
+      logEvent('JOB', 'Claude login usable again — dispatch resumed');
+      authHeldSince = null;
     }
 
     // Canary gate: a changed claude CLI must pass a probe before ANY job

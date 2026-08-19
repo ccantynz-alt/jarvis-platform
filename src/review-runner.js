@@ -19,7 +19,9 @@
  * described, which is a far easier judgement than writing the fix.
  *
  * MODE (env REVIEW_RUNNER_MODE): 'off' | 'dry-run' | 'live'
- *   dry-run — spawn reviewers and LOG their verdicts, apply nothing.
+ *   dry-run — spawn reviewers and LOG their verdicts, apply nothing. ONCE per
+ *             proposal per artifact (KV `review-verdict:<id>` + an info inbox
+ *             row), never on a loop — see needsReview().
  *
  * Escalation is never a failure state. An officer that is unsure escalates, and
  * the proposal waits for Craig. A reviewer that cannot reach a verdict at all
@@ -30,6 +32,7 @@ import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import { requiresHuman, DOMAINS } from './lib/proposals.js';
 import { spawnClaude } from './lib/spawn-agent.js';
+import { spawnHold } from './lib/claude-auth.js';
 import { readFileSync } from 'fs';
 import { pathToFileURL } from 'url';
 
@@ -132,6 +135,32 @@ export function parseVerdict(text) {
 
 const TO_STATE = { approve: 'approved', reject: 'rejected', escalate: 'escalated' };
 
+/**
+ * Does this proposal need a (fresh) reviewer turn, given the verdict we already
+ * hold for it?
+ *
+ * 2026-08-19: in dry-run nothing transitions, so `pickForReview`'s rotation —
+ * correct as far as it goes — still wrapped around the same 16 `proposed` rows
+ * forever: 3 per tick × 72 ticks = up to 216 ten-minute subscription turns a
+ * day re-deciding proposals whose artifact had not changed, while the brain
+ * and every repair agent drew from the same window. The dry-run's PURPOSE is
+ * to give Craig verdicts to read before he flips the mode live; re-deciding
+ * the same diff every two hours adds nothing to that. So a verdict is
+ * recorded durably (KV `review-verdict:<id>`, with the artifact it was for) and
+ * a proposal is re-reviewed only when its artifact moved. Live mode never
+ * reaches this: a decided proposal leaves `proposed`.
+ *
+ * @param {{artifact_url?:string}} p
+ * @param {{artifact?:string}|null} prior  the stored verdict, if any
+ */
+export function needsReview(p, prior) {
+  if (!p?.artifact_url) return false;
+  if (!prior) return true;
+  return String(prior.artifact || '') !== String(p.artifact_url);
+}
+
+const VERDICT_PREFIX = 'review-verdict:';
+
 async function reviewOne(p) {
   const officer = DOMAINS[p.domain]?.officer;
   if (!officer) { log(`#${p.id}: unknown domain ${p.domain} — skipping`); return; }
@@ -157,6 +186,22 @@ async function reviewOne(p) {
     return;
   }
 
+  // Already decided for this exact artifact? Then the turn is pure burn.
+  const priorKv = await jget(`${MEMORY}/memory/kv/${VERDICT_PREFIX}${p.id}`);
+  let prior = null;
+  try { prior = priorKv?.value ? JSON.parse(priorKv.value) : null; } catch { prior = null; }
+  if (!needsReview(p, prior)) {
+    log(`#${p.id}: already reviewed for this artifact (${prior.verdict.toUpperCase()} at ${prior.at}) — not spending a turn`);
+    return;
+  }
+
+  // Nothing to spend the turn on if every login is limited or dead (2026-08-19).
+  const hold = await spawnHold();
+  if (hold.held) {
+    log(`#${p.id}: claude ${hold.kind} hold until ${hold.at} — holding for the next tick`);
+    return;
+  }
+
   if (MODE === 'live') await transition(p.id, 'under_review', officer, `review by ${officer}`);
 
   const cwd = checkoutFor(p.platform);
@@ -166,12 +211,12 @@ async function reviewOne(p) {
     timeoutMin: TIMEOUT_MIN,
   }).catch(e => ({ code: 1, stdout: '', stderr: e.message }));
 
-  // Both subscription accounts exhausted: hold, do not decide. A proposal left
-  // in `proposed` is retried next tick; a proposal wrongly rejected because we
-  // could not afford to look at it is a real loss.
-  if (review.limitHeld) {
-    log(`#${p.id}: both accounts usage-limited — holding for the next tick`);
-    if (MODE === 'live') await transition(p.id, 'proposed', officer, 'held: review capacity exhausted').catch(() => {});
+  // Both subscription accounts exhausted, or no login authenticates: hold, do
+  // not decide. A proposal left in `proposed` is retried next tick; a proposal
+  // wrongly rejected because we could not afford to look at it is a real loss.
+  if (review.limitHeld || review.authHeld) {
+    log(`#${p.id}: ${review.authHeld ? 'no login can authenticate' : 'both accounts usage-limited'} — holding for the next tick`);
+    if (MODE === 'live') await transition(p.id, 'proposed', officer, `held: ${review.authHeld ? 'no Claude login can authenticate' : 'review capacity exhausted'}`).catch(() => {});
     return;
   }
   if (review.code !== 0) {
@@ -187,7 +232,23 @@ async function reviewOne(p) {
   const { verdict, reason } = parseVerdict(review.stdout);
   log(`#${p.id} (${p.platform}) → ${verdict.toUpperCase()}: ${reason}`);
 
-  if (MODE !== 'live') return;
+  // Record the verdict durably against the artifact it judged, so the next
+  // tick (and the next 71) skip it unless the diff moves — and so Craig can
+  // actually READ the dry-run verdicts, which is what dry-run is for.
+  const at = new Date().toISOString();
+  await fetch(`${MEMORY}/memory/kv`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: VERDICT_PREFIX + p.id, value: JSON.stringify({ verdict, reason, officer, artifact: p.artifact_url, at, mode: MODE }) }),
+  }).catch(() => {});
+
+  if (MODE !== 'live') {
+    await notify({
+      source: 'review-runner', level: 'info',
+      title: `⚖️ dry-run ${verdict.toUpperCase()} #${p.id}: ${String(p.title || '').slice(0, 90)}`,
+      body: `${officer} would ${verdict} — ${reason}\n${p.artifact_url}\n(REVIEW_RUNNER_MODE=dry-run: nothing was applied.)`,
+    }).catch(() => {});
+    return;
+  }
 
   const to = TO_STATE[verdict];
   try {

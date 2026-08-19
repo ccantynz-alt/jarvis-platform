@@ -129,7 +129,7 @@ oneshot MUST set `TimeoutStartSec` explicitly (the default is no timeout).
 | jarvis-self-heal | 5 min | `src/self-heal.js`: on `status==='error'`, auto-dispatches a repair agent. Debounce, cooldown, daily cap, concurrency cap, no-other-job-in-flight check, DNS pre-check (nxdomain → alert + dispatch nothing) | **live** |
 | jarvis-code-health | 3 h | `src/code-health.js`: the only CODE-defect finder. Least-recently-swept platform × 1 of 9 lenses → one read-only review agent → adversarial verifier on critical/high → `code_findings` by fingerprint (dismissed sticky, severity only escalates, reappeared-fixed = regression). Fixes NOTHING. Requires `hasSource(path)`. Spec docs/CODE-HEALTH.md; logic src/lib/findings.js | **live** |
 | jarvis-fix-runner | 30 min | `src/fix-runner.js`: closes the loop — worst CONFIRMED, pushable, unclaimed findings → opens a proposal → ONE repair agent each (max 1/platform/tick), branch `jarvis/fix-<id>` only. Gates in src/lib/fix-dispatch.js (confirmed-only, git remote required, no dupes, denied platforms, CAUTION_RE — prose beats enum). Never marks findings fixed | **live** |
-| jarvis-review-runner | 20 min | `src/review-runner.js`: spawns the OWNING officer to review open proposals | **dry-run** |
+| jarvis-review-runner | 20 min | `src/review-runner.js`: spawns the OWNING officer to review open proposals — ONCE per proposal per artifact (KV `review-verdict:<id>` + an info inbox row; 2026-08-19: the rotation was re-deciding the same 16 diffs forever, up to 216 turns/day) | **dry-run** |
 | jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. **Phase 2 (2026-08-08):** also pulls 158 transcripts (tailnet rsync, `HARVEST_REMOTE`) and Craig's PC (read-only `harvest.list`/`harvest.get` PC verbs, cursor in KV `harvest-pc-cursor`). PC dispatch is single-flight with fate tracking (2026-08-10): a queued/running harvester PC job blocks new dispatch, and a permanent refusal — even one landing after the wait window (KV `harvest-pc-last-list-job`) — trips the daily stale-worker back-off (KV `harvest-pc-stale-worker-day`; `pcListPlan()` in lib/harvest.js). Backlog burn at `HARVEST_DISTILL_MAX=10` newest-first until the ~458-session backlog clears, then RESTORE to 3. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`, `test/pc-actions.test.js` | **live** |
 | jarvis-experience | 30 min | `src/experience-check.js`: **the only thing watching what CRAIG notices**, as opposed to what the machine notices (2026-08-11, from "how do we keep improving" — for a week every real fault was found by him while 12 services stayed green). Seven checks, each citing the incident that earned it: deploy drift (production ran two days on an agent branch while pulls said "up to date"), voice honesty (`/health` said `tts:true` for a day while every synthesis 503'd), brain on a SUBSCRIPTION provider (2026-07-25 silent metered billing), notification flood rate (235 pushes in 48h), PC-worker silence >4h, the `show_me` capture path, and **agent spawns** — 2026-08-16: both claude.ai logins expired, every box-local spawn failed in ~2s, and all eight autonomous timers did nothing for THREE DAYS while twelve services stayed green; the only symptom was an absence (no new code findings). Reads KV `claude-last-spawn-ok`, written by spawn-agent.js on every spawn that authenticates. **Announces on CHANGE, once daily while unchanged, once on recovery — never at `alert` level**, because a timer that can reach push.js's alert exemption IS the flood. Read-only; repairs nothing. Logic + tests: `src/lib/experience.js`, `test/experience.test.js` | **live** |
 | jarvis-backup / jarvis-vapron-backup | daily 03:30 / 04:17 UTC | SQLite backup; pull + verify off-box copy of box 158's Vapron DB | — |
@@ -150,6 +150,20 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
   `BRAIN_ALLOW_METERED=1`, default OFF; both accounts exhausted → throw,
   degrade to keyword-intent, loud total-outage notify. Any automatic failover
   away from `claude` fires a spoken notify().
+- **Liveness, not file-exists (2026-08-19):** `hasClaudeBrain()` is false while
+  EVERY login is inside its auth cooldown (`authHold()`, the twin of
+  `usageHold()`), so the deck drops to an announced BASIC MODE instantly
+  instead of a cold spawn per utterance; one probe after 15 min. Basic mode
+  stages NOTHING from free speech (needs an action verb) and the total-outage
+  alert is once per UTC day (KV `brain-outage-alert-day`). A successful brain
+  turn writes `claude-last-spawn-ok` (once a minute). `authHeld` is consumed
+  everywhere `limitHeld` is (orchestrator re-queues, code-health/harvester/
+  review-runner hold; `spawnHold()` is the one pre-spawn question).
+- **Native WebSearch is ON for the brain (2026-08-19)** — Anthropic-side,
+  no egress from the box, verified on the subscription; `web_search` (DDG
+  scrape) is the fallback. **WebFetch stays OFF**: the CLI would fetch from
+  this box, bypassing browser-service's SSRF guard. Effort rides on the tier
+  (`BRAIN_EFFORT`=medium for Opus 5, `BRAIN_EFFORT_HEAVY`=high for Fable 5).
 - **Tiers: Opus 5 everyday, Fable 5 heavy** (voice: "switch model to Fable";
   auto one-turn escalation on non-limit/non-timeout failure). Sonnet is not a
   tier. Changing a tier = re-fit its timeouts in the SAME commit (warm

@@ -121,3 +121,32 @@ test('a batch never contains the same proposal twice', () => {
   assert.equal(new Set(batch.map(p => p.id)).size, batch.length);
   assert.equal(batch.length, 8);
 });
+
+// ── needsReview: dry-run decides each artifact ONCE (2026-08-19) ─────────────
+//
+// pickForReview's rotation still wrapped around the same `proposed` rows forever
+// in dry-run (nothing transitions), so 16 proposals cost up to 216 ten-minute
+// subscription turns a day restating verdicts. A durable verdict keyed to the
+// artifact it judged ends that; a moved artifact is reviewed again.
+import { needsReview } from '../src/review-runner.js';
+
+test('needsReview: no artifact → nothing to review (the agent must attach one first)', () => {
+  assert.equal(needsReview({ id: 1, artifact_url: '' }, null), false);
+  assert.equal(needsReview({ id: 1 }, { artifact: 'x', verdict: 'approve' }), false);
+});
+
+test('needsReview: never reviewed → review', () => {
+  assert.equal(needsReview({ id: 1, artifact_url: 'jarvis/fix-1@abc' }, null), true);
+});
+
+test('THE BURN: same artifact already judged → do NOT spend another turn', () => {
+  assert.equal(needsReview({ id: 1, artifact_url: 'jarvis/fix-1@abc' }, { artifact: 'jarvis/fix-1@abc', verdict: 'reject' }), false);
+});
+
+test('needsReview: the artifact moved → review again', () => {
+  assert.equal(needsReview({ id: 1, artifact_url: 'jarvis/fix-1@def' }, { artifact: 'jarvis/fix-1@abc', verdict: 'reject' }), true);
+});
+
+test('needsReview: a corrupt prior (no artifact recorded) is treated as stale, not trusted', () => {
+  assert.equal(needsReview({ id: 1, artifact_url: 'jarvis/fix-1@abc' }, { verdict: 'approve' }), true);
+});

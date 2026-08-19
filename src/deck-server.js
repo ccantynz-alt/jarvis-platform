@@ -923,6 +923,7 @@ async function pollOps() {
 // still retries at once. `authHeld` is honoured like `limitHeld` — the
 // claude-auth layer has already alerted, the deck must not add to it.
 const SITUATION_RETRY_MS = 10 * 60 * 1000;
+const SITUATION_MIN_GAP_MS = 10 * 60 * 1000;   // ≤ 144 syntheses/day however busy the fleet gets
 let situationBusy = false;
 let situationLastFail = { fp: null, at: 0 };
 async function refreshSituation() {
@@ -936,6 +937,12 @@ async function refreshSituation() {
   const fp = situationFingerprint(facts);
   if (fp === state.situation?.fingerprint) return;   // nothing worth re-thinking
   if (fp === situationLastFail.fp && Date.now() - situationLastFail.at < SITUATION_RETRY_MS) return;
+  // Floor between syntheses regardless of how the picture moves (2026-08-19):
+  // the fingerprint includes every failed job id, so a run of failures (42 in
+  // three days during the auth outage) was 42 changed pictures and 42 turns. A
+  // changed picture still gets re-thought — at most once per SITUATION_MIN_GAP_MS,
+  // picked up by the next 15-second ops tick once the gap has passed.
+  if (state.situation?.at && Date.now() - Date.parse(state.situation.at) < SITUATION_MIN_GAP_MS) return;
   // Nothing at all to synthesise yet (first boot, memory unreachable).
   if (!facts.findings.length && !facts.proposals.length) return;
 
@@ -1217,6 +1224,13 @@ wss.on('connection', (ws, req) => {
           const notice = noteBrainDegraded();
           if (notice) send({ type: 'notify', level: 'warn', title: notice, speech: notice });
         }
+      } else {
+        // hasAgent() is already false (every login inside its auth cooldown —
+        // lib/brain-claude.js hasClaudeBrain, 2026-08-19). Say so ONCE, the
+        // same way the failure path does; silently answering in keyword mode
+        // is how "basic mode" passed for a stupid brain for three days.
+        const notice = noteBrainDegraded();
+        if (notice) send({ type: 'notify', level: 'warn', title: notice, speech: notice });
       }
       const { intent } = await resolveIntent(text);
       const result = await runIntent(intent, text, (m) => send({ type: 'chat', text: m.speech || m.text }), dispatchGate);
