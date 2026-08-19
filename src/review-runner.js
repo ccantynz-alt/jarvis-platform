@@ -199,7 +199,7 @@ async function reviewOne(p) {
   const hold = await spawnHold();
   if (hold.held) {
     log(`#${p.id}: claude ${hold.kind} hold until ${hold.at} — holding for the next tick`);
-    return;
+    return 'held';
   }
 
   if (MODE === 'live') await transition(p.id, 'under_review', officer, `review by ${officer}`);
@@ -217,7 +217,7 @@ async function reviewOne(p) {
   if (review.limitHeld || review.authHeld) {
     log(`#${p.id}: ${review.authHeld ? 'no login can authenticate' : 'both accounts usage-limited'} — holding for the next tick`);
     if (MODE === 'live') await transition(p.id, 'proposed', officer, `held: ${review.authHeld ? 'no Claude login can authenticate' : 'review capacity exhausted'}`).catch(() => {});
-    return;
+    return 'held';
   }
   if (review.code !== 0) {
     log(`#${p.id}: reviewer exited ${review.code}${review.timedOut ? ' (timed out)' : ''} — escalating rather than guessing`);
@@ -320,8 +320,13 @@ async function tick() {
   log(`mode=${MODE} · ${rows.length} awaiting review · ${withArtifact.length} with an artifact · resuming after #${cursor} · this tick: ${batch.map(p => '#' + p.id).join(' ') || 'none'}`);
 
   for (const p of batch) {
-    try { await reviewOne(p); }
+    let outcome;
+    try { outcome = await reviewOne(p); }
     catch (e) { log(`#${p.id} review failed: ${e.message}`); }
+    // A hold (usage/auth) spent no turn on this proposal and the rest of the
+    // batch would hit the same wall: stop WITHOUT moving the cursor, so the
+    // held proposals are the first picked up when a login works again.
+    if (outcome === 'held') { log('holding the rest of this tick; cursor not advanced'); break; }
     // Advance PER PROPOSAL, not at the end: a tick that dies halfway must not
     // replay the ones it already spent turns on.
     await fetch(`${MEMORY}/memory/kv`, {
