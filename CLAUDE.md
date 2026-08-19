@@ -99,7 +99,7 @@ Network/Fetch interception, tested against private-IP egress first.
 
 | Service | File | Port | Purpose |
 |---|---|---|---|
-| jarvis-memory | src/memory-server.js | 9200 | SQLite memory + KV + notifications inbox + durable job queue + agent reports + proposals |
+| jarvis-memory | src/memory-server.js | 9200 | SQLite memory + KV + notifications inbox + durable job queue + agent reports + proposals + brain_turns telemetry. Indexed `notifications`; hourly `runRetention()` ages telemetry >`MEMORY_RETENTION_DAYS`(90); `FINDINGS_STALE_DAYS`(0=off) ages open low/med findings to `stale`. Platform names/seeds come from the registry (`registryPlatforms()`), not hardcoded lists. `/memory/session/end` 404s an unknown id (was silent ok) |
 | jarvis-screenshot | src/screenshot-service.js | 9201 | CDP screenshot capture |
 | jarvis-metrics | src/metrics-collector.js | 9202 | Server metrics + WebSocket; **the only thing that alerts when a Jarvis service dies** — probes all 12 ports/30s, classifies why a port is quiet (`src/lib/service-verdict.js`: restarting=silent, failed=first-probe alert, stopped=warn ~2min, notlistening=alert ~60s) |
 | jarvis-audit | src/audit-runner.js | 9204 | Daily build/test/screenshot audit; repeat-identical results go quiet (`src/lib/audit-noise.js`) |
@@ -108,7 +108,7 @@ Network/Fetch interception, tested against private-IP egress first.
 | jarvis-deploy-gate | src/deploy-gate.js | 9207 | GateTest scan gating platform deploys |
 | jarvis-gateway | src/gateway-server.js | 9208 | **THE interface** — voice/text control + inbox; tailnet `--https=8443`; token JARVIS_GATEWAY_TOKEN; spec docs/GATEWAY.md |
 | jarvis-agents | src/agent-scheduler.js | 9209 | Agent-org scheduler: 44 role agents (CEO → C-suite → per-platform/per-jurisdiction specialists) from config/agents.json on cron, budget-capped; reports route up the ladder (ok→inbox, action_needed→warn, escalate→alert). `AGENTS_MODE=live` since 2026-07-19 |
-| jarvis-deck | src/deck-server.js | 9210 | **Command Deck v2.2** (public/command-deck.html): CORE brain + HUD/Hierarchy/Flow/Platforms/OPS tabs, PWA, briefings, raw WS `/jarvis`; tailnet `--https=8444`. Deck mints its OWN token — `config/deck.token` (env `JARVIS_DECK_TOKEN`); the gateway token does NOT unlock it. Cookie re-stamps on every authed load (sliding 30-day). **Tailscale identity ALSO unlocks it (2026-08-19):** an allowlisted login in `DECK_TAILNET_USERS` (secrets.env; currently Craig's) arriving through `tailscale serve` is authed for HTTP + WS and gets the cookie stamped — the deck had refused his iPhone ten times (`403 for 100.111.46.68 (ccantynz@gmail.com)`) for want of a token that lived in a file on the box; `src/lib/tailnet-identity.js`. Tagged nodes (boxes, the PC) carry no login and still use the token. Situation synthesis backs off 10 min per failed fingerprint and honours `authHeld` (it was spawning `claude` every 15 s during the auth outage). OPS tab = inbox (mark-read via `POST /api/ops/inbox-read`) + Craig's proposal verdicts via `POST /api/ops/review`, which picks a `proposed` proposal up into `under_review` BEFORE applying the decision — `TRANSITIONS.proposed` has no edge to a verdict, so without that step every APPROVE/REJECT tap returned 409 (they had never once worked; fixed 2026-08-16) + findings + agent reports + job queue; data via 15s `{type:'ops'}` broadcast + `GET /api/ops` (the only path virtual-time captures see). QA: `?demo-alert=1` / `?demo-briefing=1` / `?view=hud\|org\|flow\|plat\|ops`. Voice: wake word "Jarvis" (fuzzy); **the free Google browser voice is THE voice** (see VOICE), `GET /tts` = ElevenLabs, OFF by ruling (`TTS_DISABLED=1`). Evidence: docs/DECK-AUDIT-2026-07-16.md |
+| jarvis-deck | src/deck-server.js | 9210 | **Command Deck v2.2** (public/command-deck.html): CORE brain + HUD/Hierarchy/Flow/Platforms/OPS tabs, PWA, briefings, raw WS `/jarvis`; tailnet `--https=8444`. Deck mints its OWN token — `config/deck.token` (env `JARVIS_DECK_TOKEN`); the gateway token does NOT unlock it. Cookie re-stamps on every authed load (sliding 30-day). **Tailscale identity ALSO unlocks it (2026-08-19):** an allowlisted login in `DECK_TAILNET_USERS` (secrets.env; currently Craig's) arriving through `tailscale serve` is authed for HTTP + WS and gets the cookie stamped — the deck had refused his iPhone ten times (`403 for 100.111.46.68 (ccantynz@gmail.com)`) for want of a token that lived in a file on the box; `src/lib/tailnet-identity.js`. Tagged nodes (boxes, the PC) carry no login and still use the token. Situation synthesis backs off 10 min per failed fingerprint and honours `authHeld` (it was spawning `claude` every 15 s during the auth outage). **Phone-ready (2026-08-19):** manifest/icons/`sw.js` are PUBLIC (were behind auth → no real install); `sw.js` shows an "open Tailscale" page off-tailnet; reconnects on foreground (`visibilitychange`/`pageshow`/`online`, `nudgeLink`) and greets once per load, not per reconnect; `100dvh` + safe-area insets + 16px input + bottom tab bar under 700px + tap-to-expand OPS rows; ⚙ VOICE sheet (pick/rate/pitch/mic-lang/test, `u.lang` always set so iOS stops using the US voice); the link badge shows **LIVE · BASIC MODE** honestly via `{type:'brain'}` broadcast when every login is down. QA: `?voicesheet=1`, `?demo-brain=down`. OPS tab = inbox (mark-read via `POST /api/ops/inbox-read`) + Craig's proposal verdicts via `POST /api/ops/review`, which picks a `proposed` proposal up into `under_review` BEFORE applying the decision — `TRANSITIONS.proposed` has no edge to a verdict, so without that step every APPROVE/REJECT tap returned 409 (they had never once worked; fixed 2026-08-16) + findings + agent reports + job queue; data via 15s `{type:'ops'}` broadcast + `GET /api/ops` (the only path virtual-time captures see). QA: `?demo-alert=1` / `?demo-briefing=1` / `?view=hud\|org\|flow\|plat\|ops`. Voice: wake word "Jarvis" (fuzzy); **the free Google browser voice is THE voice** (see VOICE), `GET /tts` = ElevenLabs, OFF by ruling (`TTS_DISABLED=1`). Evidence: docs/DECK-AUDIT-2026-07-16.md |
 | jarvis-browser | src/browser-service.js | 9211 | SSRF-guarded web search/fetch/render bridge |
 
 Health paths are namespaced: `/memory/health`, `/screenshot/health`,
@@ -240,12 +240,26 @@ Pull-based worker `craig-pc` (`executor:"pc"` in the registry):
 `src/pc-worker.js` under Task Scheduler `JarvisPcWorker` polls the gateway's
 `/worker/claim` (scoped `JARVIS_WORKER_TOKEN`), runs `claude --print` on the
 PC's own subscription, reports to `/worker/result`; expired lease re-queues.
-Jarvis can also OPERATE the PC: `src/lib/pc-actions.js` — 10 typed verbs as
+Jarvis can also OPERATE the PC: `src/lib/pc-actions.js` — ~28 typed verbs as
 PowerShell via `-EncodedCommand` (never stdin — `powershell -Command -` runs
 NOTHING and exits 0; never interpolation — `psQuote()` only). Read-only verbs
 run instantly; **anything mutating goes through the SAME dispatch confirmation
 gate as a fleet job** (`mutates` defaults TRUE for undeclared verbs). Rides
-the jobs table on the `runtime` column (`'action'` vs `'claude'`). Elevation
+the jobs table on the `runtime` column (`'action'` vs `'claude'`).
+**Read-only question set (2026-08-19, move 38):** `pc.snapshot`, `cpu.top`
+(a SAMPLED %CPU — `process.list` reports lifetime CPU-seconds), `disk.usage`,
+`gpu.info`, `net.info`, `apps.list`, `windows.list`, `battery`,
+`updates.status`, `sessions.who`, `files.find`/`files.recent`, `startup.list`,
+`tasks.list`, `screen.capture` (PNG → gateway `POST /worker/shot` → deck show),
+and `shell.read` (a provably read-only pipeline via `isReadOnlyShell()` — no
+`; & \` { } $( @(`, method calls, executables, assignment, aliases or mutating
+verbs; else it stays gated `shell`). `shell`'s deck text now carries the WHOLE
+command with a short spoken summary; every confirmed `shell` is logged to the
+inbox. A PC answer landing after the wait window is watched and spoken
+(`watchPcAction`); an offline worker short-circuits the wait. The fast lane
+LONG-POLLS `/worker/claim` (`wait`≤25 s, woken on enqueue): ~1 s round-trip,
+~2 idle req/min. **After editing pc-actions.js, restart the JarvisPcWorker task
+AND jarvis-orchestrator** — both hold their own copy of the verb table. Elevation
 is measured and shipped in heartbeats (KV `pc-worker-capability`), along with
 the worker's VERB LIST (2026-08-10): `/pc/action` refuses a verb the connected
 worker hasn't got (409 + remedy, `workerKnowsVerb()`) instead of manufacturing
