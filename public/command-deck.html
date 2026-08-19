@@ -1880,8 +1880,11 @@ fetch('/health').then(r => r.json()).then(h => {
   console.log('[deck] build', h.build);
   const tag = document.createElement('div');
   tag.textContent = 'build ' + h.build;
-  tag.style.cssText = 'position:fixed;bottom:4px;right:8px;z-index:50;font-size:10px;color:#3d5a6b;font-family:monospace;pointer-events:none';
-  document.body.appendChild(tag);
+  // Lives INSIDE the command bar (flows after the input; the ENTER hint hides
+  // on phones) rather than fixed over it — the fixed version sat on top of the
+  // input's last characters on a 390px screen (2026-08-19).
+  tag.style.cssText = 'flex:none;font-size:10px;color:#3d5a6b;font-family:monospace;pointer-events:none;align-self:flex-end';
+  (document.querySelector('.cmdbar') || document.body).appendChild(tag);
 }).catch(() => {});
 
 $('btn-mic').onclick = () => {
