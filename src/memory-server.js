@@ -277,6 +277,58 @@ try { db.exec('ALTER TABLE code_findings ADD COLUMN commit_sha TEXT'); } catch {
 // level up. Re-check candidates are ordered by COALESCE(last_checked, first_seen).
 try { db.exec('ALTER TABLE code_findings ADD COLUMN last_checked TEXT'); } catch { /* already present */ }
 
+// ── Indexes + retention (2026-08-19, audit move 10) ──────────────────────────
+// `notifications` had NO index: the 10-minute dedupe in POST /memory/notifications
+// (source, level, title, ts) and the deck's 15-second unread polls were full
+// scans of a table nothing ever pruned. And nothing in this file DELETEd
+// anything, ever — notifications, job_transitions, agent_reports, proposal_audit
+// and coding_sessions grew forever (16 MB on 2026-08-19 and climbing).
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_notifications_dedupe ON notifications(source, level, title, ts);
+  CREATE INDEX IF NOT EXISTS idx_notifications_ts ON notifications(ts);
+  CREATE INDEX IF NOT EXISTS idx_job_transitions_ts ON job_transitions(ts);
+`);
+
+// Retention: a daily age-out of the append-only telemetry tables. Days via
+// guardrail-style env (NaN/0 never means "delete everything": < 7 is refused
+// and falls back). Jobs, findings, proposals, lessons and platform_state are
+// NOT touched — they are state, not telemetry.
+//
+// `FINDINGS_STALE_DAYS` ages untouched `open` low/medium findings to the
+// `stale` status the schema already allows and nothing ever set (debt #8: 371
+// rows with no exit path). OFF by default (0) — turning it on changes what the
+// backlog number means, which is Craig's call.
+const envDays = (k, dflt) => { const n = Number(process.env[k]); return Number.isFinite(n) && n >= 7 ? Math.floor(n) : dflt; };
+const RETENTION_DAYS = envDays('MEMORY_RETENTION_DAYS', 90);
+const STALE_DAYS = (() => { const n = Number(process.env.FINDINGS_STALE_DAYS); return Number.isFinite(n) && n >= 14 ? Math.floor(n) : 0; })();
+export function runRetention(now = new Date()) {
+  const cutoff = new Date(now.getTime() - RETENTION_DAYS * 86400_000).toISOString();
+  const out = {};
+  const run = (label, sql, ...params) => { try { out[label] = db.prepare(sql).run(...params).changes; } catch (e) { out[label] = `ERR ${e.message}`; } };
+  run('notifications', 'DELETE FROM notifications WHERE ts < ?', cutoff);
+  run('job_transitions', 'DELETE FROM job_transitions WHERE ts < ?', cutoff);
+  run('agent_reports', 'DELETE FROM agent_reports WHERE ts < ?', cutoff);
+  // proposal_audit is the governance trail: only rows of proposals that are
+  // themselves terminal AND older than the window; never the trail of a live one.
+  run('proposal_audit', `DELETE FROM proposal_audit WHERE at < ? AND proposal_id IN
+      (SELECT id FROM proposals WHERE status IN ('rejected','withdrawn','executed') AND updated_at < ?)`, cutoff, cutoff);
+  run('coding_sessions', 'DELETE FROM coding_sessions WHERE ended_at < ? AND distill_status IN (\'done\',\'skipped\',\'failed\')', cutoff);
+  if (STALE_DAYS) {
+    const staleCut = new Date(now.getTime() - STALE_DAYS * 86400_000).toISOString();
+    run('findings_stale', `UPDATE code_findings SET status = 'stale', resolved_at = ?
+        WHERE status = 'open' AND severity IN ('low','medium') AND COALESCE(last_checked, last_seen) < ?`, now.toISOString(), staleCut);
+  }
+  try { db.pragma('wal_checkpoint(PASSIVE)'); } catch { /* best effort */ }
+  return out;
+}
+// Once an hour after boot (cheap when there is nothing to do), so a restart
+// never skips a day and a long-running process still prunes.
+setTimeout(() => {
+  const tick = () => { const r = runRetention(); const n = Object.values(r).filter(v => typeof v === 'number' && v > 0); if (n.length) console.log(`[memory] retention (${RETENTION_DAYS}d): ${JSON.stringify(r)}`); };
+  tick();
+  setInterval(tick, 3600_000).unref?.();
+}, 60_000).unref?.();
+
 const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
 PLATFORMS.forEach(p => {
   db.prepare(`
