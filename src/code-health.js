@@ -42,6 +42,7 @@ import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { spawnHold } from './lib/claude-auth.js';
+import { modelFor } from './lib/model-routing.js';
 import {
   normalizeFinding, parseFindings, needsVerification, pickTarget, severityRank, lensFor, LENSES,
   extractJsonObject, boolish,
@@ -415,6 +416,7 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     prompt: reviewPrompt(platform, lens, outFile),
     cwd,
     timeoutMin: REVIEW_TIMEOUT_MIN,
+    model: modelFor('code_review'),   // the finder: standard tier (move 17)
   });
   // Remote spawns bypass two-account failover — name a usage-limit for what it
   // is instead of letting it wear a generic failure's clothes.
@@ -559,7 +561,7 @@ export async function runOnce({ platform: forcePlatform, lensKey } = {}) {
     // finding never comes back round to be argued about again.
     if (res.created && needsVerification(f) && verifications < MAX_VERIFICATIONS) {
       verifications++;
-      const v = await spawnAgent({ prompt: verifyPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
+      const v = await spawnAgent({ prompt: verifyPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN, model: modelFor('verify') });
       // A held verifier (usage/auth) is "unproven", never "refuted": leave the
       // finding open for the next sweep rather than spend the rest of the cap
       // on more guaranteed failures (2026-08-19).
@@ -644,7 +646,7 @@ async function recheckOldFindings(platform, cwd, spawnAgent = spawnClaude) {
   if (!staleFirst.length) { log('recheck: nothing old enough to be worth re-checking'); return closed; }
 
   for (const f of staleFirst) {
-    const v = await spawnAgent({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN });
+    const v = await spawnAgent({ prompt: recheckPrompt(platform, f), cwd, timeoutMin: VERIFY_TIMEOUT_MIN, model: modelFor('recheck') });
     if (v.limitHeld || v.authHeld) { log(`recheck: claude ${v.authHeld ? 'auth' : 'usage'} hold, stopping re-checks for this sweep`); break; }
     const verdict = extractJsonObject(v.stdout, ['still_present']);
     const stillPresent = verdict ? boolish(verdict.still_present) : null;

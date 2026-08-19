@@ -179,9 +179,13 @@ function stopHeartbeat() { if (heartbeatTimer) { clearInterval(heartbeatTimer); 
 // documented as "useful for pipes" — this also sidesteps the earlier
 // cmd.exe re-tokenization bug (punctuation in the prompt no longer touches
 // the shell's argument parser at all, since it never becomes an argument).
-function runClaude(prompt, cwd, timeoutMin) {
+function runClaude(prompt, cwd, timeoutMin, model) {
   return new Promise((resolve) => {
-    const cmdStr = 'claude --dangerously-skip-permissions --print';
+    // Honour the model the dispatcher chose (2026-08-19, move 17) — the claim
+    // has always carried `job.model` and this ignored it. Model ids are
+    // [a-z0-9.-]; validate before it reaches the shell string.
+    const modelFlag = model && /^[a-z0-9.-]+$/i.test(model) ? ` --model ${model}` : '';
+    const cmdStr = `claude --dangerously-skip-permissions${modelFlag} --print`;
     const proc = spawn(cmdStr, {
       cwd, shell: true,
       env: { ...process.env, DISABLE_AUTOUPDATER: '1' },
@@ -392,7 +396,7 @@ async function runJob(job) {
   }
 
   const before = snapshotFiles(cwd);
-  const result = await runClaude(job.prompt || job.task, cwd, job.timeout_min || DEFAULT_TIMEOUT_MIN);
+  const result = await runClaude(job.prompt || job.task, cwd, job.timeout_min || DEFAULT_TIMEOUT_MIN, job.model);
   const changed = diffChangedFiles(before, snapshotFiles(cwd));
   log(`job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}${changed.length ? `, ${changed.length} file(s) touched` : ''}`);
 

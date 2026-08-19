@@ -45,6 +45,7 @@ import { synthesize, ttsEnabled } from './lib/tts.js';
 import { openTtsStream } from './lib/tts-stream.js';
 import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
 import { spawnClaude } from './lib/spawn-agent.js';
+import { modelFor } from './lib/model-routing.js';
 import { situationFingerprint, situationPrompt, parseSituation, needsAttention } from './lib/situation.js';
 import { installInternalAuth } from './lib/internal-http.js';
 installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
@@ -963,6 +964,7 @@ async function refreshSituation() {
       prompt: situationPrompt(facts),
       cwd: '/opt/jarvis',
       timeoutMin: 4,
+      model: modelFor('situation'),   // a ranking, not deep reasoning: cheap tier (move 17)
     });
     if (out.limitHeld || out.authHeld || out.code !== 0) {
       situationLastFail = { fp, at: Date.now() };

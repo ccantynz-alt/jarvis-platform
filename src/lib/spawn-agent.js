@@ -188,11 +188,15 @@ export async function spawnClaude({ prompt, cwd, model, extraEnv = {}, timeoutMi
 // no two-account failover (the remote box has its own login; a usage-limit
 // there is visible in stderr and must be logged distinctly by the caller), and
 // the env is the remote root's, not workerEnv().
-export function spawnClaudeRemote({ prompt, server, cwd, timeoutMin = 30, extraEnv = {} }) {
+export function spawnClaudeRemote({ prompt, server, cwd, timeoutMin = 30, extraEnv = {}, model }) {
   const safePrompt = prompt.replace(/'/g, "'\\''");
   const envStr = Object.entries({ IS_SANDBOX: '1', DISABLE_AUTOUPDATER: '1', ...extraEnv })
     .map(([k, v]) => `${k}=${v}`).join(' ');
-  const sshCmd = `cd ${cwd} && ${envStr} claude --dangerously-skip-permissions --print '${safePrompt}'`;
+  // Model routing reaches the remote box too (2026-08-19, move 17) — it was
+  // hardcoded to the remote CLI's default. Model ids are [a-z0-9-] so they are
+  // shell-safe unquoted, but validate to be certain nothing odd is interpolated.
+  const modelFlag = model && /^[a-z0-9.-]+$/i.test(model) ? ` --model ${model}` : '';
+  const sshCmd = `cd ${cwd} && ${envStr} claude --dangerously-skip-permissions${modelFlag} --print '${safePrompt}'`;
   return spawnProcess('ssh', [
     '-o', 'StrictHostKeyChecking=no',
     '-o', 'ConnectTimeout=10',

@@ -7,6 +7,7 @@ import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
 import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
+import { modelFor } from './lib/model-routing.js';
 import { usageHold, authHold } from './lib/claude-auth.js';
 import { verifyConfirm } from './lib/pc-confirm.js';
 import { internalGuard } from './lib/internal-http.js';
@@ -82,7 +83,7 @@ const CLOUD_MODEL = 'claude-fable-5';
 // Default model for dispatched build/design work when the job doesn't name one
 // (Craig, 2026-07-16: Fable 5 creates the frontend/backend — role agents keep
 // their explicit per-agent models from config/agents.json, unchanged).
-const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || 'claude-fable-5';
+const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || modelFor('repair');   // Opus everyday-heavy, was Fable (move 17)
 
 // ── Durable job queue (memory-server :9200 is the system of record) ──────────
 // Jobs live in the SQLite `jobs` table, not in this process, so they survive

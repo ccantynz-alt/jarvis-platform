@@ -37,6 +37,7 @@ import { loadPlatforms } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import { spawnClaude } from './lib/spawn-agent.js';
+import { modelFor } from './lib/model-routing.js';
 import { spawnHold } from './lib/claude-auth.js';
 import { extractJsonObject } from './lib/findings.js';
 import {
@@ -334,7 +335,7 @@ async function distillOne(sess, registry) {
     return { status: 'skipped', lessons: 0, note: 'conversation session' };
   }
   const prompt = distillPrompt({ platform: sess.platform }, buildExcerpt(parsed));
-  const r = await spawnClaude({ prompt, cwd: WORK_DIR, timeoutMin: DISTILL_TIMEOUT });
+  const r = await spawnClaude({ prompt, cwd: WORK_DIR, timeoutMin: DISTILL_TIMEOUT, model: modelFor('distill') });
   // A held spawn (every login usage-limited or failing to authenticate) is not
   // a failed distillation — the session was never looked at. Writing `failed`
   // here was permanent (memory-server has no retry path), so during the

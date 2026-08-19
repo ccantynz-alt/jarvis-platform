@@ -32,6 +32,7 @@ import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import { requiresHuman, DOMAINS } from './lib/proposals.js';
 import { spawnClaude } from './lib/spawn-agent.js';
+import { modelFor } from './lib/model-routing.js';
 import { spawnHold } from './lib/claude-auth.js';
 import { readFileSync } from 'fs';
 import { pathToFileURL } from 'url';
@@ -211,6 +212,7 @@ async function reviewOne(p) {
     prompt: reviewPrompt(p),
     cwd,
     timeoutMin: TIMEOUT_MIN,
+    model: modelFor('review_verdict'),   // one-line judgement: cheap tier (move 17)
   }).catch(e => ({ code: 1, stdout: '', stderr: e.message }));
 
   // Both subscription accounts exhausted, or no login authenticates: hold, do
