@@ -895,7 +895,7 @@ app.post('/pc/action', async (req, res) => {
 
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 200));
     let row;
     try { row = await dbGet(`/memory/jobs/${jobId}`); } catch { continue; }
     if (row.status === 'completed' || row.status === 'failed') {
