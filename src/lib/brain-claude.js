@@ -331,6 +331,7 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
     ]);
 
     let escalateTo = null; // set when a turn fails non-fatally → retry on a higher tier
+    let noRewarm = false;  // set when every login is dead — don't spawn another child on one
     for (let attempt = 0; attempt < 2; attempt++) {
       const want = escalateTo || undefined;
       // A session warmed in the background can be on the WRONG tier for this
@@ -379,7 +380,17 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
           const next = await reportExhausted(s.profile, cls.resetAt);
           if (next) continue;             // retry once on the other login
         } else if (cls.kind === 'auth') {
-          await reportAuthFailure(s.profile, e.message, { reason: cls.reason });
+          // 2026-08-19: this branch recorded the dead login and flipped the
+          // active profile, then fell through to `throw` — so the turn Craig
+          // was waiting on degraded to keyword mode even when the OTHER account
+          // was perfectly fine, and only the NEXT utterance used it. Same shape
+          // as usage_limit above: retry once on the other login while there is
+          // budget. With no usable login left (`next` null), don't re-warm a
+          // session on a profile we just proved dead — that was a cold CLI
+          // spawn per utterance for the whole outage.
+          const next = await reportAuthFailure(s.profile, e.message, { reason: cls.reason });
+          if (next && attempt === 0 && budgetLeft) continue;
+          if (!next) { noRewarm = true; }
         } else if (cls.kind === 'model') {
           // This box's `claude` binary doesn't know the tier we asked for.
           // Escalating UP would hand the same stale binary a model it knows
@@ -411,7 +422,7 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
         // Giving up on this turn: warm a session now so the NEXT one doesn't pay
         // a cold start on top of whatever just went wrong (the 2026-07-21 point
         // of re-warming at all).
-        warmupClaudeBrain().catch(() => {});
+        if (!noRewarm) warmupClaudeBrain().catch(() => {});
         throw e;                          // agent.js fails over (and announces)
       } finally {
         currentCtx = null;

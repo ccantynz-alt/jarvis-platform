@@ -31,6 +31,7 @@
 
 import express from 'express';
 import { parseCookies } from './lib/cookies.js';
+import { parseAllowlist, tailnetIdentity } from './lib/tailnet-identity.js';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual, randomBytes } from 'crypto';
@@ -102,8 +103,20 @@ function isLocalDirect(req) {
     && !req.headers['x-forwarded-for'];
 }
 
+// Tailnet identity (2026-08-19): an allowlisted Tailscale login arriving
+// through `tailscale serve` is authenticated — see lib/tailnet-identity.js for
+// why this adds no trust beyond what isLocalDirect() already grants. This is
+// what lets Craig's PHONE in without typing a token from a file on the box
+// (the deck had logged "403 for 100.111.46.68 (ccantynz@gmail.com)" ten times).
+// `DECK_TAILNET_USERS` (secrets.env), comma-separated; unset = off.
+const TAILNET_USERS = parseAllowlist(process.env.DECK_TAILNET_USERS);
+
+function identityLogin(req) {
+  return tailnetIdentity(req.headers, TAILNET_USERS);
+}
+
 function isAuthed(req) {
-  return tokenMatches(requestToken(req));
+  return tokenMatches(requestToken(req)) || !!identityLogin(req);
 }
 
 // ── Fetch helpers ─────────────────────────────────────────────────────────────
@@ -382,6 +395,9 @@ app.get('/', (req, res) => {
   }
   if (!isAuthed(req) && !isLocalDirect(req)) {
     console.log(`[deck] 403 for ${req.headers['x-forwarded-for'] || req.socket.remoteAddress} (${req.headers['tailscale-user-login'] || 'unknown user'})`);
+    const hint = TAILNET_USERS.length
+      ? `<br>Or connect this device to the tailnet as <b style="color:#00e5ff">${TAILNET_USERS[0]}</b> — Tailscale identity unlocks the Deck on its own.`
+      : '';
     return res.status(403).send(`<!DOCTYPE html><html lang="en"><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>JARVIS — locked</title></head>
 <body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#04060c;color:#d7e7f0;font-family:monospace;text-align:center">
 <div>
@@ -398,7 +414,7 @@ app.get('/', (req, res) => {
 <div style="font-size:22px;letter-spacing:6px;color:#00e5ff">JARVIS</div>
 <p style="color:#8fb3c4;max-width:34em;line-height:1.6">This device isn't signed in yet.<br>
 Append <b style="color:#00e5ff">/?token=&lt;deck token&gt;</b> to this address one time<br>
-(the deck token lives in <b style="color:#00e5ff">config/deck.token</b> on the box — Gateway logins no longer unlock the Deck).</p></div></body></html>`);
+(the deck token lives in <b style="color:#00e5ff">config/deck.token</b> on the box — Gateway logins no longer unlock the Deck).${hint}</p></div></body></html>`);
   }
   res.set('Cache-Control', 'no-cache, must-revalidate');
   // Sliding session (2026-08-05): the cookie was stamped ONCE at ?token= login
@@ -408,6 +424,16 @@ Append <b style="color:#00e5ff">/?token=&lt;deck token&gt;</b> to this address o
   // page load: a device only expires after 30 days of not visiting at all.
   const tok = requestToken(req);
   if (tok && tokenMatches(tok)) res.setHeader('Set-Cookie', authCookieHeader(tok));
+  else {
+    // Identity-authed load with no valid cookie: stamp one, so the WebSocket
+    // upgrade and an installed home-screen PWA (its own cookie jar on iOS)
+    // keep working. Logged so the first phone login is visible in the journal.
+    const who = identityLogin(req);
+    if (who && AUTH_TOKEN) {
+      res.setHeader('Set-Cookie', authCookieHeader(AUTH_TOKEN));
+      console.log(`[deck] tailnet identity login: ${who} from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
+    }
+  }
   res.sendFile('/opt/jarvis/public/command-deck.html');
 });
 
@@ -888,7 +914,17 @@ async function pollOps() {
 // spawnClaude, deliberately NOT runAgent: runAgent writes to the shared
 // conversation transcript, and a background synthesis every time a finding
 // lands would pollute the thing Craig is actually talking to.
+// Failure back-off (2026-08-19): a failed synthesis left `state.situation`
+// untouched, so the SAME fingerprint was retried on every 15-second ops tick —
+// a `claude` spawn every 15 s, each dying in ~2 s, 34,821 journal lines in
+// three days while both logins were dead (and each attempt re-touching the
+// shared credentials file). Remember the last failed fingerprint and sit out
+// SITUATION_RETRY_MS before trying that exact picture again; a CHANGED picture
+// still retries at once. `authHeld` is honoured like `limitHeld` — the
+// claude-auth layer has already alerted, the deck must not add to it.
+const SITUATION_RETRY_MS = 10 * 60 * 1000;
 let situationBusy = false;
+let situationLastFail = { fp: null, at: 0 };
 async function refreshSituation() {
   if (situationBusy) return;
   const facts = {
@@ -899,6 +935,7 @@ async function refreshSituation() {
   };
   const fp = situationFingerprint(facts);
   if (fp === state.situation?.fingerprint) return;   // nothing worth re-thinking
+  if (fp === situationLastFail.fp && Date.now() - situationLastFail.at < SITUATION_RETRY_MS) return;
   // Nothing at all to synthesise yet (first boot, memory unreachable).
   if (!facts.findings.length && !facts.proposals.length) return;
 
@@ -910,8 +947,13 @@ async function refreshSituation() {
       cwd: '/opt/jarvis',
       timeoutMin: 4,
     });
-    if (out.limitHeld) { console.warn('[deck] situation held — accounts usage-limited'); return; }
-    if (out.code !== 0) { console.warn(`[deck] situation agent exited ${out.code}`); return; }
+    if (out.limitHeld || out.authHeld || out.code !== 0) {
+      situationLastFail = { fp, at: Date.now() };
+      if (out.limitHeld) console.warn('[deck] situation held — accounts usage-limited; retry in 10 min');
+      else if (out.authHeld) console.warn('[deck] situation held — no Claude login can authenticate; retry in 10 min');
+      else console.warn(`[deck] situation agent exited ${out.code}; retry in 10 min`);
+      return;
+    }
     const parsed = parseSituation(out.stdout);
     state.situation = {
       fingerprint: fp,
@@ -938,7 +980,7 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
   const cookies = parseCookies(req.headers.cookie);
-  const authed = tokenMatches(cookies[AUTH_COOKIE]);
+  const authed = tokenMatches(cookies[AUTH_COOKIE]) || !!identityLogin(req);
   if (!authed && !(req.socket.remoteAddress?.includes('127.0.0.1') && !req.headers['x-forwarded-for'])) {
     socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
     socket.destroy();
