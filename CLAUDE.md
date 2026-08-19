@@ -144,6 +144,19 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
 
 ## THE BRAIN
 
+- **Model routing (2026-08-19, `src/lib/model-routing.js`).** `modelFor(purpose)`:
+  Haiku (`cheap`) for verify/recheck/distill/situation/review_verdict/canary,
+  Sonnet (`standard`) for role agents + the code-health finder, Opus (`heavy`)
+  for repair/build/fix (the orchestrator default was Fable — the most expensive —
+  now Opus), Fable (`escalation`) reserved. Env-overridable (`MODEL_CHEAP` etc.);
+  IDs validated live. `spawnClaudeRemote` and the PC worker (`job.model`) honour it.
+- **Memory pen (2026-08-19, move 14).** `notes` + `reminders` tables; tools
+  `remember`/`recall`/`set_reminder`/`list_reminders`; the NZ clock (+ISO now) is
+  in `statusDigest` so the model can compute a due time; the orchestrator's
+  `fireDueReminders` (30 s) speaks/pushes a due reminder via `notify()`.
+- **Cross-surface continuity (move 15).** A warm brain session gets the turns
+  another surface interleaved since its last reply (`missedSinceLastReply` in
+  transcript.js); a fresh one still gets the full recap.
 - **Subscription-only.** Provider `claude` = persistent Claude Agent SDK
   session (src/lib/brain-claude.js) on Craig's claude.ai subscriptions.
   Metered providers (openai/anthropic/gemini) gated behind
@@ -324,6 +337,24 @@ master's `:9212/health` on BOTH the public IP and the tailnet IP every 5 min,
 `/var/log/jarvis-watchdog.log` on 158.
 Leftover `/opt/jarvis` clone on 158 (holds a secrets.env) awaits Craig's
 deletion.
+
+## CONTROL-PLANE AUTH (2026-08-19, audit moves 37 + 11)
+
+Two secrets in `secrets.env`, both held by the deck/gateway/orchestrator and
+**stripped from every spawned agent** (`claude-auth.js profileEnv`):
+- **`JARVIS_PC_CONFIRM_SECRET`** — a mutating PC verb (`shell`, `service.restart`,
+  `process.kill`) reaching `/pc/action` must carry an HMAC confirmation token
+  bound to that exact verb+args, single-use, minted only where a human confirms
+  (deck/gateway). No token = 403; fails CLOSED if the secret is unset. Read-only
+  verbs need none. `src/lib/pc-confirm.js`.
+- **`JARVIS_INTERNAL_TOKEN`** — the loopback control plane is NOT open to
+  co-tenants. `src/lib/internal-http.js` patches each service's `fetch` to carry
+  `X-Jarvis-Internal`, and `internalGuard` gates the sensitive mutations:
+  `POST /memory/findings`, `.../:id/reattribute`, `PATCH /memory/findings/:id`,
+  `POST /memory/proposals/:id/transition`, orchestrator `POST /dispatch`. GETs and
+  benign writes (kv, notifications, logs) stay open. Fails OPEN when unset (deploy
+  code first, set token second). **Every new service entrypoint must
+  `installInternalAuth()`; a new sensitive mutation route must add `internalGuard`.**
 
 ## GOVERNANCE — how autonomous work gets authorised
 
