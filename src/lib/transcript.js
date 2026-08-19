@@ -104,6 +104,37 @@ export function rollbackTurn(transcript, turnId) {
 /** Test seam: which turn owns this message. */
 export function turnIdOf(msg) { return msg ? msg[TURN] : undefined; }
 
+// Text of a transcript message, whether it's a plain string or content blocks.
+export function msgText(m) {
+  return typeof m.content === 'string'
+    ? m.content
+    : (m.content || []).filter(b => b.type === 'text').map(b => b.text).join(' ');
+}
+
+/**
+ * What another surface said since THIS warm brain session last replied
+ * (2026-08-19, audit move 15). The deck and gateway each hold their own warm
+ * SDK session; a turn on one only reaches this shared transcript, not the
+ * other's live model context. runAgent has already pushed the current user
+ * message as the LAST entry, so everything between this session's last reply
+ * and that final message arrived from the other surface (or the fallback) and
+ * this session never saw it. Empty when there is nothing to bridge or the
+ * watermark can't be found (then we add nothing — no worse than before).
+ */
+export function missedSinceLastReply(transcript, s) {
+  if (!s || !s.lastReply || !Array.isArray(transcript) || transcript.length < 2) return '';
+  let idx = -1;
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    if (transcript[i].role === 'assistant' && msgText(transcript[i]) === s.lastReply) { idx = i; break; }
+  }
+  if (idx < 0) return '';
+  const between = transcript.slice(idx + 1, transcript.length - 1); // exclude the current user turn
+  if (!between.length) return '';
+  const lines = between.map(m => `${m.role === 'assistant' ? 'YOU' : 'CRAIG'}: ${msgText(m).slice(0, 200)}`);
+  return `[Since your last reply, on another of Craig's devices: ${lines.join(' — ')}. Carry on naturally; do not mention this note.] `;
+}
+
+
 /**
  * The shared conversation. Safe to call concurrently — the first call owns the
  * fetch and everyone else awaits it, so two utterances landing together can't

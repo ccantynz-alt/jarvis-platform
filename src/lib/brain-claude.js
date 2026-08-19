@@ -23,7 +23,7 @@ import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod';
 import { TOOLS, runTool, systemPrompt, statusDigest } from './brain-tools.js';
 import { CONVERSATION_TAG } from './harvest.js';
-import { ownTurn } from './transcript.js';
+import { ownTurn, missedSinceLastReply } from './transcript.js';
 import {
   hasClaudeAuth, getActiveProfile, profileEnv, authHold, noteSpawnSuccess,
   classifyFailure, reportExhausted, reportAuthFailure, reportModelRejected,
@@ -414,7 +414,15 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
         // fetches fail, and then the turn is unmarked. Position matters as much
         // as presence — the classifier uses startsWith, and on a FRESH session
         // the recap would otherwise sit in front of the marker.
-        const text = await runTurn(s, CONVERSATION_TAG + ' ' + (fresh ? recapFrom(transcript) : '') + (digest ? digest + ' ' : '') + userText, onChunk, fresh);
+        // Cross-surface continuity (2026-08-19, move 15): the deck and the
+        // gateway each hold their OWN warm SDK session, so a turn spoken on one
+        // is invisible to the other's live model context — it only reaches the
+        // shared KV transcript. A FRESH session gets the whole recap; a WARM one
+        // gets just the turns another surface interleaved since this session's
+        // last reply, so both stay in step without a cold restart.
+        const bridge = fresh ? recapFrom(transcript) : missedSinceLastReply(transcript, s);
+        const text = await runTurn(s, CONVERSATION_TAG + ' ' + bridge + (digest ? digest + ' ' : '') + userText, onChunk, fresh);
+        s.lastReply = text;   // watermark for the next warm turn's cross-surface delta
         transcript.push(ownTurn({ role: 'assistant', content: text }, turnId));
         if (transcript.length > 24) transcript.splice(0, transcript.length - 24);
         // Heartbeat (2026-08-19): a brain turn that authenticated is exactly as
