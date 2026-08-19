@@ -33,6 +33,8 @@ import { lookup, Resolver } from 'dns/promises';
 import { loadPlatforms } from './lib/conversation.js';
 import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const MEMORY       = 'http://127.0.0.1:9200';
 const ORCHESTRATOR = 'http://127.0.0.1:9205';

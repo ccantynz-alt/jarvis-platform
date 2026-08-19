@@ -32,6 +32,8 @@ import {
   checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe, checkPcWorker, checkAgentSpawns,
   fingerprint, announcement, summarize, speech,
 } from './lib/experience.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const MEMORY = 'http://127.0.0.1:9200';
 const DECK = 'http://127.0.0.1:9210';

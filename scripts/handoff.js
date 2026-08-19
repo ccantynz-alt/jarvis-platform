@@ -21,6 +21,9 @@
  * that quietly goes nowhere still surfaces instead of vanishing.
  */
 
+import { installInternalAuth } from '../src/lib/internal-http.js';
+installInternalAuth();   // carry the internal token on its :9200 finding writes (move 11)
+
 const MEMORY = process.env.JARVIS_MEMORY || 'http://127.0.0.1:9200';
 const RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 

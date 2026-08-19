@@ -9,6 +9,8 @@ import { checkoutProblem } from './lib/checkout.js';
 import {
   auditFingerprint, nextRepeat, auditNotifyLevel, repeatSuffix,
 } from './lib/audit-noise.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 mkdirSync('/opt/jarvis/reports', { recursive: true });
 

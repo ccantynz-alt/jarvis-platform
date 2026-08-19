@@ -35,6 +35,8 @@ import { spawnClaude } from './lib/spawn-agent.js';
 import { spawnHold } from './lib/claude-auth.js';
 import { readFileSync } from 'fs';
 import { pathToFileURL } from 'url';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 /**
  * Where the reviewer runs. The officer needs to READ the branch diff, so it

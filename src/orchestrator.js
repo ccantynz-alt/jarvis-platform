@@ -9,10 +9,13 @@ import { notify } from './lib/notify.js';
 import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { usageHold, authHold } from './lib/claude-auth.js';
 import { verifyConfirm } from './lib/pc-confirm.js';
+import { internalGuard } from './lib/internal-http.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
 import { planAction, encodeActionJob, workerKnowsVerb } from './lib/pc-actions.js';
 import { jobWritesPlatformHealth } from './lib/health-status.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const SLACK_BRIDGE  = 'http://127.0.0.1:9203';
 const AUDIT         = 'http://127.0.0.1:9204';
@@ -1118,7 +1121,7 @@ async function recoverInterruptedJobs() {
 
 // POST /dispatch  { platform, task }
 // platform="auto" → scan task text for a known platform name, fall back to "vapron"
-app.post('/dispatch', async (req, res) => {
+app.post('/dispatch', internalGuard, async (req, res) => {
   let { platform, task, agent, executor: requestedExecutor } = req.body || {};
 
   // ── Role-agent dispatch: prompt comes from the agent registry, not the

@@ -40,6 +40,8 @@ import { fixEligibility, selectForDispatch, buildFixTask, fixBranchName, DENIED_
 import { hasSource } from './lib/checkout.js';
 import { execFileSync } from 'child_process';
 import { readFileSync } from 'fs';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const MEMORY       = 'http://127.0.0.1:9200';
 const ORCHESTRATOR = 'http://127.0.0.1:9205';

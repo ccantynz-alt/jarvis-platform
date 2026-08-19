@@ -46,6 +46,8 @@ import { openTtsStream } from './lib/tts-stream.js';
 import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
 import { spawnClaude } from './lib/spawn-agent.js';
 import { situationFingerprint, situationPrompt, parseSituation, needsAttention } from './lib/situation.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const PORT      = 9210;
 const SCHEDULER = 'http://127.0.0.1:9209';

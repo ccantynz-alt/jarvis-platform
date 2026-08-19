@@ -44,6 +44,8 @@ import { resolveIntent, runIntent, resolveDispatchGate, platformNames, loadRoadm
 import { runAgent, hasAgent, maybeBrainSwitch, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { notify } from './lib/notify.js';
 import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const PORT         = 9208;
 const ORCHESTRATOR = 'http://127.0.0.1:9205';

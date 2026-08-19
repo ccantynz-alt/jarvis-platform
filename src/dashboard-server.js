@@ -28,6 +28,8 @@ import { spawnSync } from 'child_process';
 import { createHash, timingSafeEqual } from 'crypto';
 import { readdirSync, existsSync, statSync } from 'fs';
 import { readFileSync } from 'fs';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

@@ -35,6 +35,8 @@ import { detectIntent, matchPlatform, normalizeText } from './intent.js';
 import { parseAllowlist, senderAllowed } from './lib/slack-auth.js';
 import { auditSlackLevel } from './lib/audit-noise.js';
 import { createHash } from 'crypto';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 // ── Config ──────────────────────────────────────────────────────────────────
 

@@ -46,6 +46,8 @@ import {
   normalizeFinding, parseFindings, needsVerification, pickTarget, severityRank, lensFor, LENSES,
   extractJsonObject, boolish,
 } from './lib/findings.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const MEMORY = 'http://127.0.0.1:9200';
 const OWN_IP = process.env.OWN_IP || '66.42.121.161';

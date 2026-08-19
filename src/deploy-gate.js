@@ -46,6 +46,8 @@ function stripAnsi(text) {
   return String(text || '').replace(ANSI_RE, '');
 }
 import Database from 'better-sqlite3';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const PORT = 9207;
 const POLL_INTERVAL_MS = 60_000;

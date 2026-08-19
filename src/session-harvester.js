@@ -44,6 +44,8 @@ import {
   platformFromCwd, buildExcerpt, distillPrompt, eligibleFiles,
   PC_VERBS, isStaleWorkerRefusal, pcListPlan,
 } from './lib/harvest.js';
+import { installInternalAuth } from './lib/internal-http.js';
+installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
 const MEMORY = 'http://127.0.0.1:9200';
 const MACHINE = process.env.HARVEST_MACHINE || 'vultr';

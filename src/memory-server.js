@@ -9,6 +9,7 @@ import { validateProposal, canTransition, describeDecision } from './lib/proposa
 // Lesson identity is computed server-side, same reasoning as finding
 // fingerprints: the field that decides new-vs-recurring must not be a caller's.
 import { normalizeLesson, lessonFingerprint } from './lib/harvest.js';
+import { internalGuard } from './lib/internal-http.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
@@ -854,7 +855,7 @@ const FINDING_STATUSES = ['open', 'confirmed', 'dismissed', 'fixed', 'stale'];
  *   - `dismissed` is sticky. A verifier refuted it once; re-reporting it every
  *     sweep is exactly the noise that gets a channel muted.
  */
-app.post('/memory/findings', (req, res) => {
+app.post('/memory/findings', internalGuard, (req, res) => {
   const f = req.body || {};
   if (!f.platform || !f.title) {
     return res.status(400).json({ error: 'platform and title required' });
@@ -1129,7 +1130,7 @@ app.get('/memory/proposals/:id', (req, res) => {
 // columns: `status` must never be settable directly, or the gate becomes
 // advisory. A refusal returns 409 with the reason, so the caller learns WHY
 // rather than retrying blindly.
-app.post('/memory/proposals/:id/transition', (req, res) => {
+app.post('/memory/proposals/:id/transition', internalGuard, (req, res) => {
   const { to, actor_id, actor_kind = 'agent', notes } = req.body || {};
   const row = db.prepare('SELECT * FROM proposals WHERE id = ?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'proposal not found' });
@@ -1206,7 +1207,7 @@ app.get('/memory/proposals-summary', (req, res) => {
 // the correct platform files a duplicate of a finding already in the table.
 // A collision means the correct row already exists, so this reports rather than
 // clobbering it: UNIQUE on fingerprint would throw, and a 409 is the honest answer.
-app.post('/memory/findings/:id/reattribute', (req, res) => {
+app.post('/memory/findings/:id/reattribute', internalGuard, (req, res) => {
   const { platform, file_path } = req.body || {};
   if (!platform && !file_path) return res.status(400).json({ error: 'platform and/or file_path required' });
   const row = db.prepare('SELECT * FROM code_findings WHERE id = ?').get(req.params.id);
@@ -1226,7 +1227,7 @@ app.post('/memory/findings/:id/reattribute', (req, res) => {
 });
 
 // PATCH /memory/findings/:id — a verifier's verdict, or a fix landing
-app.patch('/memory/findings/:id', (req, res) => {
+app.patch('/memory/findings/:id', internalGuard, (req, res) => {
   const { status, verdict, fix_job_id, severity, checked } = req.body || {};
   if (status && !FINDING_STATUSES.includes(status)) {
     return res.status(400).json({ error: `status must be one of ${FINDING_STATUSES.join('|')}` });
