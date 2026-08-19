@@ -106,6 +106,10 @@ const FIRST_TOKEN_MS = Number(process.env.BRAIN_FIRST_TOKEN_TIMEOUT_MS) || 20_00
 const TURN_TIMEOUT_MS = Number(process.env.BRAIN_TURN_TIMEOUT_MS) || 90_000;
 const MAX_TURNS = 12; // SDK-internal tool round-trips per user turn
 let lastHeartbeatAt = 0; // last time a successful turn wrote claude-last-spawn-ok
+// Which server process this is (deck | gateway | …), for the brain_turns row.
+// Derived from the running script name; overridable for tests.
+const BRAIN_SURFACE = process.env.BRAIN_SURFACE
+  || (/(deck|gateway|dashboard)/.exec(process.argv[1] || '')?.[1]) || 'brain';
 
 // Liveness, not file-exists (2026-08-19). `hasClaudeAuth()` only asks whether
 // a .credentials.json is on disk, so for the whole 2026-08-16..19 outage
@@ -281,10 +285,17 @@ function recapFrom(transcript) {
     : '';
 }
 
+// Telemetry of the LAST turn (2026-08-19, move 24): timing + the SDK result
+// message's usage/cost. runClaudeBrain reads it after a turn and posts a row.
+let lastTurnMetrics = null;
+export function takeLastTurnMetrics() { const m = lastTurnMetrics; lastTurnMetrics = null; return m; }
+
 function runTurn(s, text, onChunk, fresh = false) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let streamed = '';
+    const t0 = Date.now();
+    let firstTokenMs = null;
     const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(firstT); clearTimeout(totalT); s.turn = null; fn(v); } };
 
     // 2026-07-24: a COLD session (CLI child just spawned) legitimately takes
@@ -300,15 +311,29 @@ function runTurn(s, text, onChunk, fresh = false) {
       disposeSession('turn watchdog'); finish(reject, new Error('claude brain: turn timed out'));
     }, TURN_TIMEOUT_MS);
 
+    const recordMetrics = (m, outcome) => {
+      const u = m?.usage || {};
+      lastTurnMetrics = {
+        model: s.model, effort: effortFor(s.model),
+        first_token_ms: firstTokenMs, total_ms: Date.now() - t0,
+        input_tokens: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) || null,
+        output_tokens: u.output_tokens ?? null,
+        cost_usd: m?.total_cost_usd ?? null,
+        tools_used: m?.num_turns != null ? Math.max(0, m.num_turns - 1) : null,
+        outcome,
+      };
+    };
     s.turn = {
       lastText: '',
-      onText: (t) => { streamed += t; try { onChunk(t); } catch {} },
+      onText: (t) => { if (firstTokenMs == null) firstTokenMs = Date.now() - t0; streamed += t; try { onChunk(t); } catch {} },
       done: (m) => {
         if (m.is_error) {
+          recordMetrics(m, 'error');
           const err = new Error(String(m.result || m.subtype || 'claude brain error'));
           err.resultMessage = m;
           return finish(reject, err);
         }
+        recordMetrics(m, 'ok');
         finish(resolve, String(m.result ?? s.turn?.lastText ?? streamed ?? '').trim());
       },
       fail: (e) => finish(reject, e),
@@ -401,6 +426,13 @@ export async function runClaudeBrain(transcript, onChunk = () => {}, gate = null
           lastHeartbeatAt = Date.now();
           noteSpawnSuccess(s.profile).catch(() => {});
         }
+        // Telemetry row (move 24): timing + tokens + cost for this turn.
+        const tm = takeLastTurnMetrics();
+        if (tm) fetch('http://127.0.0.1:9200/memory/brain-turn', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...tm, surface: BRAIN_SURFACE, provider: 'claude' }),
+          signal: AbortSignal.timeout(2000),
+        }).catch(() => {});
         // An escalated session served its one hard turn — drop back to the
         // everyday tier afterwards so usage limits aren't burned on chit-chat.
         if (escalateTo) disposeSession('de-escalate after escalated turn');

@@ -244,6 +244,28 @@ db.exec(`
     last_seen TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_lessons_platform ON lessons(platform, status, seen_count);
+
+  -- Brain turn telemetry (2026-08-19, audit move 24). Every "faster/smarter"
+  -- claim about the brain was unmeasured, and the subscription→metered-API move
+  -- (product path) is blind without per-turn latency and token counts. One row
+  -- per conversational turn; subject to the same retention sweep as the other
+  -- telemetry tables.
+  CREATE TABLE IF NOT EXISTS brain_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    surface TEXT,           -- deck | gateway
+    provider TEXT,          -- claude | openai | …
+    model TEXT,
+    effort TEXT,
+    first_token_ms INTEGER,
+    total_ms INTEGER,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    cost_usd REAL,
+    tools_used INTEGER,
+    outcome TEXT            -- ok | error | timeout
+  );
+  CREATE INDEX IF NOT EXISTS idx_brain_turns_ts ON brain_turns(ts);
 `);
 
 // Additive migrations for columns added after a table first shipped.
@@ -313,6 +335,7 @@ export function runRetention(now = new Date()) {
   run('proposal_audit', `DELETE FROM proposal_audit WHERE at < ? AND proposal_id IN
       (SELECT id FROM proposals WHERE status IN ('rejected','withdrawn','executed') AND updated_at < ?)`, cutoff, cutoff);
   run('coding_sessions', 'DELETE FROM coding_sessions WHERE ended_at < ? AND distill_status IN (\'done\',\'skipped\',\'failed\')', cutoff);
+  run('brain_turns', 'DELETE FROM brain_turns WHERE ts < ?', cutoff);
   if (STALE_DAYS) {
     const staleCut = new Date(now.getTime() - STALE_DAYS * 86400_000).toISOString();
     run('findings_stale', `UPDATE code_findings SET status = 'stale', resolved_at = ?
@@ -348,6 +371,40 @@ PLATFORMS.forEach(p => {
     INSERT OR IGNORE INTO platform_state (platform, status, updated_at)
     VALUES (?, 'unknown', ?)
   `).run(p, new Date().toISOString());
+});
+
+// POST /memory/brain-turn — one row of brain telemetry (move 24).
+app.post('/memory/brain-turn', (req, res) => {
+  const b = req.body || {};
+  const num = (v) => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+  try {
+    const info = db.prepare(`INSERT INTO brain_turns
+      (ts, surface, provider, model, effort, first_token_ms, total_ms, input_tokens, output_tokens, cost_usd, tools_used, outcome)
+      VALUES (@ts,@surface,@provider,@model,@effort,@first_token_ms,@total_ms,@input_tokens,@output_tokens,@cost_usd,@tools_used,@outcome)`).run({
+      ts: new Date().toISOString(),
+      surface: b.surface || null, provider: b.provider || null, model: b.model || null, effort: b.effort || null,
+      first_token_ms: num(b.first_token_ms), total_ms: num(b.total_ms),
+      input_tokens: num(b.input_tokens), output_tokens: num(b.output_tokens), cost_usd: num(b.cost_usd),
+      tools_used: num(b.tools_used), outcome: b.outcome || null,
+    });
+    res.json({ ok: true, id: info.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /memory/brain-turns/summary?hours=24 — rollup for the deck / a quick check.
+app.get('/memory/brain-turns/summary', (req, res) => {
+  const hours = Math.min(Math.max(Number(req.query.hours) || 24, 1), 720);
+  const since = new Date(Date.now() - hours * 3600_000).toISOString();
+  try {
+    const byModel = db.prepare(`SELECT model, provider, COUNT(*) turns,
+        ROUND(AVG(first_token_ms)) avg_first_token_ms, ROUND(AVG(total_ms)) avg_total_ms,
+        SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
+        ROUND(SUM(COALESCE(cost_usd,0)),4) cost_usd,
+        SUM(CASE WHEN outcome='ok' THEN 1 ELSE 0 END) ok
+      FROM brain_turns WHERE ts >= ? GROUP BY model, provider ORDER BY turns DESC`).all(since);
+    const total = db.prepare('SELECT COUNT(*) turns FROM brain_turns WHERE ts >= ?').get(since);
+    res.json({ hours, turns: total.turns, by_model: byModel });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /memory/health
