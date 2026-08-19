@@ -185,6 +185,12 @@ export function profileEnv(extraEnv = {}) {
   if (p?.configDir) env.CLAUDE_CONFIG_DIR = p.configDir;
   else delete env.CLAUDE_CONFIG_DIR;
   delete env.ANTHROPIC_API_KEY;
+  // The PC-mutation confirmation secret (audit move 37) must NEVER reach a
+  // spawned agent: it is what proves a HUMAN confirmed a shell/restart/kill on
+  // Craig's PC. Every CLI spawn goes through here (workerEnv → profileEnv, and
+  // brain-claude's startSession), so this one deletion covers them all — a
+  // fleet agent cannot mint a confirmation token.
+  delete env.JARVIS_PC_CONFIRM_SECRET;
   return env;
 }
 

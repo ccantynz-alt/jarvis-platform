@@ -8,6 +8,7 @@ import { pickExecutor } from './executors.js';
 import { notify } from './lib/notify.js';
 import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { usageHold, authHold } from './lib/claude-auth.js';
+import { verifyConfirm } from './lib/pc-confirm.js';
 import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
 import { planAction, encodeActionJob, workerKnowsVerb } from './lib/pc-actions.js';
@@ -101,6 +102,11 @@ const PC_LEASE_MS = 120_000;
 // Wakes long-polling /worker/claim requests the instant a PC job is enqueued.
 const pcWake = new EventEmitter();
 pcWake.setMaxListeners(50);
+const PC_CONFIRM_SECRET = process.env.JARVIS_PC_CONFIRM_SECRET || '';
+// Spent confirmation nonces → their exp, for single-use enforcement (move 37).
+// Swept opportunistically so it can't grow unbounded.
+const pcConfirmSpent = new Map();
+setInterval(() => { const now = Date.now(); for (const [n, exp] of pcConfirmSpent) if (exp < now) pcConfirmSpent.delete(n); }, 60_000).unref?.();
 
 async function dbGet(path) {
   const r = await fetch(`${MEMORY_URL}${path}`);
@@ -831,12 +837,38 @@ app.post('/worker/heartbeat', async (req, res) => {
 // confirmation gate lives in lib/conversation.js and is the brain's job — see
 // brain-tools.js `pc_control`. Anything reaching here is already authorised.
 app.post('/pc/action', async (req, res) => {
-  const { verb, args, wait_seconds, timeout_min } = req.body || {};
+  const { verb, args, wait_seconds, timeout_min, confirm } = req.body || {};
   let plan;
   try {
     plan = planAction(verb, args || {});
   } catch (e) {
     return res.status(400).json({ error: e.message });
+  }
+
+  // Server-side confirmation gate (audit move 37). A MUTATING verb must carry a
+  // valid, unexpired, unreplayed token bound to this exact {verb, args}, minted
+  // by a process that holds JARVIS_PC_CONFIRM_SECRET — the deck/gateway, where a
+  // human confirmed it. Spawned agents don't have the secret (claude-auth.js
+  // profileEnv strips it), so a prompt-injected fleet agent can no longer POST a
+  // shell/restart/kill here. Read-only verbs carry no token and skip this. If
+  // the secret is unset the gate fails CLOSED for mutations (verifyConfirm →
+  // no-secret) rather than silently allowing them.
+  if (plan.mutates) {
+    const v = verifyConfirm(PC_CONFIRM_SECRET, confirm, verb, args || {});
+    if (!v.ok) {
+      logEvent('ERR', `PC action ${verb} REFUSED — ${v.reason} (no valid confirmation)`);
+      return res.status(403).json({
+        error: `mutating PC action refused: ${v.reason}`,
+        remedy: v.reason === 'no-secret'
+          ? 'set JARVIS_PC_CONFIRM_SECRET in secrets.env on the deck/gateway/orchestrator'
+          : 'a mutating PC action must be confirmed through the conversation gate, not called directly',
+      });
+    }
+    if (pcConfirmSpent.has(v.nonce)) {
+      logEvent('ERR', `PC action ${verb} REFUSED — confirmation token replayed`);
+      return res.status(409).json({ error: 'mutating PC action refused: confirmation already used' });
+    }
+    pcConfirmSpent.set(v.nonce, v.exp);
   }
 
   const capability = await pcWorkerCapability();

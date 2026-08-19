@@ -24,6 +24,8 @@ import { readFileSync } from 'fs';
 import { spawn } from 'child_process';
 import { authHold } from './claude-auth.js';
 import { notify } from './notify.js';
+import { planAction } from './pc-actions.js';
+import { mintConfirm } from './pc-confirm.js';
 
 // ── Roadmap (project-completion checklist — "are we done yet", not health) ──
 // Structured twin of docs/ROADMAP.md's "THE 20 MOVES". Kept in sync manually,
@@ -674,10 +676,20 @@ export function spokenPcResult(description, detail) {
 /** Run a confirmed PC action through the orchestrator and report it plainly. */
 export async function handlePcAction(verb, args, onEvent = () => {}, waitSeconds = 45) {
   try {
+    // Server-side gate (audit move 37): a MUTATING verb reaching the
+    // orchestrator must carry a confirmation token proving a human confirmed
+    // it. Only this process (deck/gateway) holds the secret; a fleet agent does
+    // not, so it cannot forge one. Read-only verbs carry no token and need
+    // none. handlePcAction is the single funnel for both the gate-confirmed
+    // mutating path and the brain's instant read-only path, so minting here
+    // covers exactly the confirmed calls.
+    let confirm;
+    try { if (planAction(verb, args).mutates) confirm = mintConfirm(process.env.JARVIS_PC_CONFIRM_SECRET, verb, args); }
+    catch { /* unknown verb — the orchestrator will reject it with the remedy */ }
     const r = await fetch(`${ORCHESTRATOR}/pc/action`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verb, args, wait_seconds: waitSeconds, enqueued_by: 'brain' }),
+      body: JSON.stringify({ verb, args, wait_seconds: waitSeconds, enqueued_by: 'brain', confirm }),
     });
     const data = await r.json();
     if (data.error) {
