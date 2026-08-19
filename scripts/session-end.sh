@@ -28,19 +28,23 @@ print(json.dumps(files))
 
 echo "Recording session end..."
 
-curl -sf -X POST http://127.0.0.1:9200/memory/session/end \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"session_id\": $SESSION_ID,
-    \"summary\": \"$SUMMARY\",
-    \"files_changed\": $FILES_CHANGED_JSON,
-    \"proof\": \"session-end.sh called at $(date)\"
-  }" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✅ Session recorded' if d.get('ok') else '❌ Failed to record')" 2>/dev/null \
-  || echo "❌ Memory service not responding"
+# Body built by python's json.dumps (2026-08-19): the old inline JSON left
+# session_id UNQUOTED and the summary unescaped, so a non-numeric id or a quote
+# in the summary made invalid JSON — memory-server 400'd, the session was never
+# recorded, and this script still printed "closed". Numeric ids stay numbers.
+BODY=$(python3 - "$SESSION_ID" "$SUMMARY" "$FILES_CHANGED_JSON" <<'PY'
+import json, sys
+sid, summary, files = sys.argv[1], sys.argv[2], json.loads(sys.argv[3] or '[]')
+try: sid = int(sid)
+except ValueError: pass
+print(json.dumps({"session_id": sid, "summary": summary, "files_changed": files, "proof": "session-end.sh"}))
+PY
+)
+RESULT=$(curl -sf -X POST http://127.0.0.1:9200/memory/session/end   -H "Content-Type: application/json" -d "$BODY" 2>/dev/null)
+if echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null; then
+  echo "✅ Session recorded"
+else
+  echo "❌ Failed to record session $SESSION_ID (memory said: ${RESULT:-no response}) — the summary below is NOT in memory"
+fi
 
-echo ""
-echo "Session $SESSION_ID closed for $PLATFORM"
-echo "Summary: $SUMMARY"
-echo ""
-echo "The next Claude Code session will see this context."
-rm -f /tmp/jarvis-session.env
+
