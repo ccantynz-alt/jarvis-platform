@@ -7,7 +7,13 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { installInternalAuth, internalGuard, internalAuthConfigured } from '../src/lib/internal-http.js';
+import { installInternalAuth, internalGuard, internalAuthConfigured, _resetTokenCache } from '../src/lib/internal-http.js';
+
+// Point the secrets.env fallback at a path that does not exist, so these tests
+// are deterministic on the BOX too (where /opt/jarvis/config/secrets.env now
+// holds a real token that would otherwise defeat the "fails open" case).
+process.env.JARVIS_SECRETS_PATH = '/nonexistent/jarvis-secrets.env';
+const clear = () => { delete process.env.JARVIS_INTERNAL_TOKEN; _resetTokenCache(); };
 
 function res() {
   return { code: null, body: null, status(c) { this.code = c; return this; }, json(b) { this.body = b; return this; } };
@@ -15,7 +21,7 @@ function res() {
 const req = (headers = {}) => ({ method: 'POST', path: '/x', headers, socket: { remoteAddress: '127.0.0.1' } });
 
 test('with no token set the guard fails OPEN (a rollout cannot brick the fleet)', () => {
-  delete process.env.JARVIS_INTERNAL_TOKEN;
+  clear();
   assert.equal(internalAuthConfigured(), false);
   let called = false;
   internalGuard(req(), res(), () => { called = true; });
@@ -23,33 +29,33 @@ test('with no token set the guard fails OPEN (a rollout cannot brick the fleet)'
 });
 
 test('with a token set, a request WITHOUT it is refused', () => {
-  process.env.JARVIS_INTERNAL_TOKEN = 'secret-xyz';
+  process.env.JARVIS_INTERNAL_TOKEN = 'secret-xyz'; _resetTokenCache();
   const r = res();
   let called = false;
   internalGuard(req({}), r, () => { called = true; });
   assert.equal(called, false);
   assert.equal(r.code, 403);
-  delete process.env.JARVIS_INTERNAL_TOKEN;
+  clear();
 });
 
 test('with a token set, the matching header passes', () => {
-  process.env.JARVIS_INTERNAL_TOKEN = 'secret-xyz';
+  process.env.JARVIS_INTERNAL_TOKEN = 'secret-xyz'; _resetTokenCache();
   let called = false;
   internalGuard(req({ 'x-jarvis-internal': 'secret-xyz' }), res(), () => { called = true; });
   assert.equal(called, true);
-  delete process.env.JARVIS_INTERNAL_TOKEN;
+  clear();
 });
 
 test('a wrong token is refused', () => {
-  process.env.JARVIS_INTERNAL_TOKEN = 'secret-xyz';
+  process.env.JARVIS_INTERNAL_TOKEN = 'secret-xyz'; _resetTokenCache();
   const r = res();
   internalGuard(req({ 'x-jarvis-internal': 'guessed' }), r, () => {});
   assert.equal(r.code, 403);
-  delete process.env.JARVIS_INTERNAL_TOKEN;
+  clear();
 });
 
 test('the outgoing patch injects the header for loopback :9200/:9205 only', async () => {
-  process.env.JARVIS_INTERNAL_TOKEN = 'tok-123';
+  process.env.JARVIS_INTERNAL_TOKEN = 'tok-123'; _resetTokenCache();
   const seen = [];
   globalThis.fetch = async (input, init) => { seen.push({ url: String(input), h: new Headers(init?.headers || {}) }); return { ok: true }; };
   installInternalAuth();
@@ -61,5 +67,5 @@ test('the outgoing patch injects the header for loopback :9200/:9205 only', asyn
   assert.equal(seen[1].h.get('x-jarvis-internal'), 'tok-123');
   assert.equal(seen[2].h.get('x-jarvis-internal'), null);
   assert.equal(seen[3].h.get('x-jarvis-internal'), null);
-  delete process.env.JARVIS_INTERNAL_TOKEN;
+  clear();
 });

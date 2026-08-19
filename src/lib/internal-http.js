@@ -44,12 +44,15 @@ function token() {
   if (process.env.JARVIS_INTERNAL_TOKEN) return process.env.JARVIS_INTERNAL_TOKEN;
   if (secretsToken === undefined) {
     try {
-      const m = /^JARVIS_INTERNAL_TOKEN=(.+)$/m.exec(readFileSync('/opt/jarvis/config/secrets.env', 'utf8'));
+      const path = process.env.JARVIS_SECRETS_PATH || '/opt/jarvis/config/secrets.env';
+      const m = /^JARVIS_INTERNAL_TOKEN=(.+)$/m.exec(readFileSync(path, 'utf8'));
       secretsToken = m ? m[1].trim() : '';
     } catch { secretsToken = ''; }
   }
   return secretsToken;
 }
+/** Tests only: clear the cached secrets.env fallback so env changes take effect. */
+export function _resetTokenCache() { secretsToken = undefined; }
 
 // Loopback Jarvis control-plane ports that get the header injected.
 const GUARDED_PORTS = new Set(['9200', '9205']);
