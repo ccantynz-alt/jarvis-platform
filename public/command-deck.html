@@ -1384,6 +1384,7 @@ function renderVoiceSheet() {
   $('vs-lang').onchange = (e) => { try { localStorage.setItem('jarvis_lang', e.target.value); } catch {} $('vs-note').textContent = 'Mic language saved — reload the deck to apply.'; };
   $('vs-test').onclick = () => { voiceEngine === 'neural' ? speak('Voice check, sir.') : speakBrowserAsync('Voice check, sir. This is the voice you will hear.'); };
   $('vs-reset').onclick = () => { save('name', null); save('rate', null); save('pitch', null); open(); };
+  if (qs.get('voicesheet') === '1') setTimeout(open, 300);   // QA hook, like ?demo-alert=1
 })();
 
 function updateOrbLabel() {
