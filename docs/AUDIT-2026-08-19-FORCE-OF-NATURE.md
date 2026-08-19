@@ -37,6 +37,10 @@
 
 ---
 
+## 1b. Progress log
+
+- **2026-08-19 (later), commits `00b2188` + `f4d6894` — moves 2, 3, 4, 6, 43, 13, 16 DONE and verified live.** `authHold()`/`spawnHold()` consumed by orchestrator (re-queue + park), code-health, harvester, review-runner; `hasClaudeBrain()` is liveness; brain heartbeat writes `claude-last-spawn-ok`; basic mode is safe (the "love you what" utterance now gets an instant honest "basic mode" reply and stages nothing — measured 0.0 s on the live deck); total-outage alert once per UTC day; review-runner decides each artifact once (KV + info inbox row) and a hold stops the tick without moving the cursor; situation synthesis has a 10-min floor; native WebSearch ON for the brain (verified `used_search=yes` on the subscription), WebFetch deliberately still off; effort `medium` on Opus 5 / `high` on Fable 5. 512 tests green on the box, lint clean.
+
 ## 2. The 50 moves
 
 Legend — **Effort:** S (≤½ day) · M (1–3 days) · L (a week+). **Who:** J = Jarvis/Claude can do it unattended; **C** = needs Craig (credential, ruling, admin, money). Every move cites the code it changes.
