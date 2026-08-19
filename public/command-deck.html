@@ -37,7 +37,10 @@ input::placeholder{color:#3d5566}
 
 body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .mono{font-family:'IBM Plex Mono',monospace}
-#app{height:100vh;display:grid;grid-template-rows:auto 1fr auto;position:relative;
+/* 100vh on iOS is the height UNDER the Safari toolbar, so the command bar sat
+   beneath it (2026-08-19, audit move 31). dvh tracks the visible viewport;
+   -webkit-fill-available is the fallback for Safari before dvh. Order matters. */
+#app{height:100vh;height:-webkit-fill-available;height:100dvh;display:grid;grid-template-rows:auto 1fr auto auto;position:relative;
   background:radial-gradient(1200px 700px at 50% -10%, rgba(0,90,120,.22), transparent 60%),
              radial-gradient(900px 600px at 85% 110%, rgba(60,0,120,.18), transparent 55%), #04060c}
 .scan1{pointer-events:none;position:absolute;inset:0;z-index:9;
@@ -46,7 +49,8 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   background:linear-gradient(180deg,transparent,rgba(0,229,255,.03),transparent);animation:scanline 9s linear infinite}
 
 .topbar{display:flex;align-items:center;gap:18px;padding:12px 18px;border-bottom:1px solid rgba(0,229,255,.14);
-  background:rgba(6,10,18,.72);backdrop-filter:blur(8px);flex-wrap:wrap}
+  background:rgba(6,10,18,.72);backdrop-filter:blur(8px);flex-wrap:wrap;
+  padding-top:calc(12px + env(safe-area-inset-top));padding-left:calc(18px + env(safe-area-inset-left));padding-right:calc(18px + env(safe-area-inset-right))}
 .brand-dot{width:12px;height:12px;border-radius:50%;background:#00e5ff;animation:pulseRing 2.4s ease-out infinite}
 .tab{cursor:pointer;padding:13px 14px;font-weight:600;font-size:13px;letter-spacing:1.5px;text-transform:uppercase;
   white-space:nowrap;color:#6b8a9e;border-bottom:2px solid transparent;transition:color .2s;min-height:44px;display:flex;align-items:center}
@@ -89,10 +93,33 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .plat-card{border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.72);border-radius:4px;
   padding:14px;display:flex;flex-direction:column;gap:8px}
 
-.cmdbar{display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid rgba(0,229,255,.14);background:rgba(6,10,18,.85)}
+.cmdbar{display:flex;align-items:center;gap:12px;padding:12px 18px;border-top:1px solid rgba(0,229,255,.14);background:rgba(6,10,18,.85);
+  padding-bottom:calc(12px + env(safe-area-inset-bottom));padding-left:calc(18px + env(safe-area-inset-left));padding-right:calc(18px + env(safe-area-inset-right))}
 .cmd-prompt{font-family:'IBM Plex Mono',monospace;color:#00e5ff;font-size:14px;animation:blink 1.6s infinite}
+/* 16px, not 14: iOS Safari zooms the whole page into any input smaller than
+   16px on focus, and never zooms back out cleanly. */
 #cmd{flex:1;background:transparent;border:none;outline:none;color:#dcedf6;
-  font-family:'IBM Plex Mono',monospace;font-size:14px;min-width:0}
+  font-family:'IBM Plex Mono',monospace;font-size:16px;min-width:0}
+/* Phone tab bar: under 700px #tabs is reparented (layout()) into #tabbar, a
+   row above the command bar — thumb-reachable, one row, no wrapping topbar. */
+#tabbar{display:none;border-top:1px solid rgba(0,229,255,.14);background:rgba(6,10,18,.85);
+  padding:0 env(safe-area-inset-right) 0 env(safe-area-inset-left)}
+#tabbar.on{display:block}
+#tabbar #tabs{display:flex;gap:0;width:100%}
+#tabbar .tab{flex:1;justify-content:center;padding:10px 2px;font-size:10px;letter-spacing:.8px;min-height:40px;
+  white-space:normal;text-align:center;line-height:1.1;border-bottom:none;border-top:2px solid transparent}
+#tabbar .tab.active{border-top-color:#00e5ff}
+@media (max-width:699px){
+  .topbar{gap:10px;padding-top:calc(8px + env(safe-area-inset-top));padding-bottom:8px}
+  .phone-hide{display:none !important}
+  #latest-reply{font-size:15px}
+  /* five OPS panels stacked, each its own scroller: give each more room than
+     44vh of a short screen, and let the page scroll between them */
+  #ops-inbox,#ops-findings,#ops-reports,#ops-jobs,#ops-review{max-height:60vh !important}
+}
+/* Tap to expand a clamped OPS row (hover `title=` is unreachable on touch) */
+.ops-row{cursor:pointer}
+.ops-row.expanded .om{-webkit-line-clamp:unset !important;display:block !important}
 .view{height:100%;animation:viewFade .18s ease}
 @keyframes viewFade{from{opacity:0}to{opacity:1}}
 .hidden{display:none !important}
@@ -178,12 +205,14 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
     <div style="display:flex;align-items:center;gap:10px">
       <div class="brand-dot"></div>
       <div style="font-family:'Michroma',sans-serif;font-size:16px;letter-spacing:5px;color:#eaffff">MARCO</div>
-      <div class="mono" style="font-size:11px;color:#6b8a9e;letter-spacing:2px;padding-top:2px">COMMAND&nbsp;DECK&nbsp;v2.2</div>
+      <div class="mono phone-hide" style="font-size:11px;color:#6b8a9e;letter-spacing:2px;padding-top:2px">COMMAND&nbsp;DECK&nbsp;v2.2</div>
     </div>
-    <div id="tabs" role="tablist" aria-label="Deck views" style="display:flex;gap:2px;flex:1;justify-content:center;flex-wrap:wrap"></div>
-    <div style="display:flex;align-items:center;gap:16px;font-family:'IBM Plex Mono',monospace;font-size:12px">
-      <div style="color:#3dffa0">◉ <span id="online-count">0</span> AGENTS ONLINE</div>
-      <div style="color:#8fb3c4" id="clock"></div>
+    <div id="tabs-slot" style="display:flex;flex:1;justify-content:center;min-width:0">
+      <div id="tabs" role="tablist" aria-label="Deck views" style="display:flex;gap:2px;justify-content:center;flex-wrap:wrap"></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;font-family:'IBM Plex Mono',monospace;font-size:12px;margin-left:auto">
+      <div style="color:#3dffa0">◉ <span id="online-count">0</span><span class="phone-hide"> AGENTS ONLINE</span></div>
+      <div style="color:#8fb3c4" id="clock" class="phone-hide"></div>
       <div id="voice-badge" class="hidden"></div>
       <div id="link-badge" style="color:#ffb547;border:1px solid #ffb547;border-radius:3px;padding:2px 8px;font-size:10px;letter-spacing:1px">⬡ SIMULATION</div>
     </div>
@@ -307,11 +336,14 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
     </div>
   </div>
 
+  <!-- PHONE TAB BAR — #tabs is reparented here under 700px (layout()) -->
+  <div id="tabbar"></div>
+
   <!-- COMMAND LINE -->
   <div class="cmdbar">
     <div class="cmd-prompt">❯</div>
     <input id="cmd" aria-label="Command input" placeholder="Speak or type a command… try: status · deploy zoobicon · approve ad budget · scan contracts">
-    <div class="mono" style="font-size:10px;color:#40606f;letter-spacing:1px">ENTER ⏎ TO EXECUTE</div>
+    <div class="mono phone-hide" style="font-size:10px;color:#40606f;letter-spacing:1px">ENTER ⏎ TO EXECUTE</div>
   </div>
 </div>
 
@@ -385,6 +417,15 @@ $('clock').textContent = ts();
 function layout() {
   const w = window.innerWidth, h = window.innerHeight;
   const narrow = w < 1180, mid = w >= 1180 && w < 1400;
+  // Phone (< 700px, 2026-08-19): the six tabs wrapped the topbar to ~3 rows
+  // and ate 150px of a 390px screen. Move #tabs into the bottom bar above the
+  // command line — thumb-reachable, one row. Same reparenting trick as
+  // #center-stack between CORE and HUD; the tab elements and their handlers
+  // travel with it, so nothing else changes.
+  const phone = w < 700;
+  const tabs = $('tabs'), bar = $('tabbar'), slot = $('tabs-slot');
+  if (phone && tabs.parentElement !== bar) { bar.appendChild(tabs); bar.classList.add('on'); }
+  else if (!phone && tabs.parentElement !== slot) { slot.appendChild(tabs); bar.classList.remove('on'); }
   $('view-hud').style.gridTemplateColumns = narrow ? '1fr'
     : (mid ? 'minmax(240px,280px) minmax(360px,1fr) minmax(260px,320px)'
            : 'minmax(280px,340px) minmax(420px,1fr) minmax(300px,380px)');
@@ -707,6 +748,11 @@ function opsRow(color, main, meta, dim) {
   el.querySelector('.om').textContent = main;
   el.querySelector('.ot').textContent = meta;
   el.title = main;   // the full text on hover, since the clamp is visual only
+  // …and on TAP, since there is no hover on a phone (2026-08-19): a tap toggles
+  // the clamp off so the whole finding/report is readable in place. Buttons
+  // inside a row (proposal verdicts) still get their click first.
+  el.classList.add('ops-row');
+  el.addEventListener('click', (e) => { if (e.target.closest('[role="button"],button,a')) return; el.classList.toggle('expanded'); });
   return el;
 }
 
