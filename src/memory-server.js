@@ -388,7 +388,7 @@ app.post('/memory/session/start', (req, res) => {
 app.post('/memory/session/end', (req, res) => {
   const { session_id, summary, files_changed, issues_found, issues_fixed, issues_open, proof } = req.body;
   if (!session_id) return res.status(400).json({ error: 'session_id required' });
-  db.prepare(`
+  const info = db.prepare(`
     UPDATE sessions SET
       ended_at = ?,
       summary = ?,
@@ -408,6 +408,10 @@ app.post('/memory/session/end', (req, res) => {
     proof || 'none',
     session_id
   );
+  // Honest about a miss (2026-08-19): an UPDATE that matched no row returned
+  // ok:true, so session-end.sh printed "recorded" for an id that did not exist
+  // — the summary was gone and nobody knew.
+  if (!info.changes) return res.status(404).json({ ok: false, error: `no session ${session_id}` });
   res.json({ ok: true, session_id });
 });
 
