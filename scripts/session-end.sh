@@ -40,7 +40,7 @@ except ValueError: pass
 print(json.dumps({"session_id": sid, "summary": summary, "files_changed": files, "proof": "session-end.sh"}))
 PY
 )
-RESULT=$(curl -sf -X POST http://127.0.0.1:9200/memory/session/end   -H "Content-Type: application/json" -d "$BODY" 2>/dev/null)
+RESULT=$(curl -s -X POST http://127.0.0.1:9200/memory/session/end   -H "Content-Type: application/json" -d "$BODY" 2>/dev/null)
 if echo "$RESULT" | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('ok') else 1)" 2>/dev/null; then
   echo "✅ Session recorded"
 else
