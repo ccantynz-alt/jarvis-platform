@@ -2328,32 +2328,58 @@ function setLink(mode) {
   else if (mode === 'SIM') { b.textContent = '⬡ SIMULATION'; b.style.color = '#ffb547'; b.style.borderColor = '#ffb547'; }
   else { b.textContent = '⬡ RECONNECTING'; b.style.color = '#ff5d5d'; b.style.borderColor = '#ff5d5d'; }
 }
+// What to say when the socket (re)opens — pure, tested in test/deck-link.test.js.
+// 2026-08-19: "Live link established, sir. You are seeing real telemetry." was
+// SPOKEN on every onopen. On a phone whose VPN flaps, or that sleeps and wakes,
+// that is the greeting every few minutes. Rules: speak the greeting ONCE per
+// page load; a reconnect after a real gap (≥ 60 s) gets a quiet chat line with
+// the gap named; a blip says nothing at all.
+//   greeted  — has this page load already greeted?
+//   downAt   — epoch-ms the link was last lost, or 0
+//   now      — epoch-ms
+// Returns null (say nothing) or { text, speech } where speech === null = silent.
+function linkNotice(greeted, downAt, now) {
+  if (!greeted) return { text: 'Live link established, sir. You are seeing real telemetry.', speech: undefined };
+  const gapMs = downAt ? now - downAt : 0;
+  if (gapMs < 60000) return null;
+  const mins = Math.round(gapMs / 60000);
+  return { text: `Link restored after ${mins} minute${mins === 1 ? '' : 's'}.`, speech: null };
+}
+let linkGreeted = false, linkDownAt = 0;
+
 function connectWS() {
   if (WS_DISABLED) {
     if (SIM_MODE) { setLink('SIM'); } else { setLink('DOWN'); markStale(true); }
     return;
   }
   try { ws = new WebSocket(WS_URL); } catch (e) { scheduleReconnect(); return; }
-  ws.binaryType = 'arraybuffer'; // Voice v2: binary frames = streamed mp3 chunks
-  ws.onopen = () => {
+  const sock = ws;            // handlers belong to THIS socket; a superseded one must not steer the link
+  sock.binaryType = 'arraybuffer'; // Voice v2: binary frames = streamed mp3 chunks
+  sock.onopen = () => {
+    if (sock !== ws) return;
     stopSim();
     retryDelay = 1000;
     lastMsgAt = Date.now();
     markStale(false);
     setLink('LIVE');
-    addChat('MARCO', 'Live link established, sir. You are seeing real telemetry.');
+    const notice = linkNotice(linkGreeted, linkDownAt, Date.now());
+    linkGreeted = true; linkDownAt = 0;
+    if (notice) addChat('MARCO', notice.text, notice.speech);
   };
-  ws.onmessage = (ev) => {
+  sock.onmessage = (ev) => {
+    if (sock !== ws) return;
     lastMsgAt = Date.now();
     if (ev.data instanceof ArrayBuffer) return v2AudioChunk(ev.data); // v2 mp3 chunk
     try { handleMsg(JSON.parse(ev.data)); } catch (e) {}
   };
-  ws.onclose = () => {
+  sock.onclose = () => {
+    if (sock !== ws) return;           // a socket we already replaced — its death is old news
+    if (!linkDownAt) linkDownAt = Date.now();
     if (SIM_MODE) { setLink('SIM'); startSim(); }
     else if (S.link !== 'DOWN') { setLink('DOWN'); markStale(true); }
     scheduleReconnect();
   };
-  ws.onerror = () => {};
+  sock.onerror = () => {};
 }
 function scheduleReconnect() {
   if (WS_DISABLED) return;
@@ -2361,6 +2387,34 @@ function scheduleReconnect() {
   retryTimer = setTimeout(connectWS, retryDelay);
   retryDelay = Math.min(retryDelay * 2, 30000);
 }
+// Foreground nudge (2026-08-19). iOS kills the socket when the deck goes to the
+// background; on return, nothing here reacted — the page waited for the 15 s
+// watchdog tick, then up to 60 s of "idle", then the current backoff (≤ 30 s):
+// up to ~105 s of RECONNECTING after unlocking the phone, with every command
+// answered "I have lost the link to the box". Now a return to the foreground,
+// a bfcache restore, or the network coming back does one of two things at once:
+//   - socket closed/closing → reconnect NOW with the backoff reset;
+//   - socket claims to be open → ping it, and if nothing answers inside 5 s the
+//     socket is a zombie (the OS dropped it without telling us) → close() so
+//     onclose → reconnect fires immediately.
+function nudgeLink() {
+  if (WS_DISABLED || SIM_MODE) return;
+  if (ws && ws.readyState === 0) return;                 // already connecting
+  if (ws && ws.readyState === 1) {
+    const seen = lastMsgAt;
+    try { ws.send(JSON.stringify({ type: 'ping' })); } catch (e) { try { ws.close(); } catch (_) {} return; }
+    setTimeout(() => { if (ws && ws.readyState === 1 && lastMsgAt === seen) { try { ws.close(); } catch (e) {} } }, 5000);
+    return;
+  }
+  if (!linkDownAt) linkDownAt = Date.now();   // a socket found dead on return counts from now
+  retryDelay = 1000;
+  clearTimeout(retryTimer);
+  connectWS();
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) nudgeLink(); });
+window.addEventListener('pageshow', (e) => { if (e.persisted) nudgeLink(); });
+window.addEventListener('online', nudgeLink);
+window.addEventListener('focus', nudgeLink);
 // Heartbeat watchdog: a silent-but-open socket is a dead link. 45s idle →
 // app-level ping; 60s idle → close so onclose/reconnect fire immediately.
 setInterval(() => {
