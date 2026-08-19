@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import express from 'express';
-import { writeFileSync, mkdirSync } from 'fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'fs';
 import { clampLimit } from './lib/guardrail.js';
 // The one definition of a finding's identity, shared with code-health.js so the
 // producer and the store cannot disagree about what counts as the same defect.
@@ -329,7 +329,20 @@ setTimeout(() => {
   setInterval(tick, 3600_000).unref?.();
 }, 60_000).unref?.();
 
-const PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'marcoreid', 'gatetest', 'esim'];
+// Platform names from the registry (2026-08-19, audit move 21): two hardcoded
+// lists here drifted from config/platforms.json — the seed still named the
+// retired `esim` and omitted every platform added since, and the query router's
+// list omitted davenroe and gluecron. One loader, read at boot; falls back to a
+// minimal seed only if the registry is unreadable.
+function registryPlatforms() {
+  try {
+    const reg = JSON.parse(readFileSync('/opt/jarvis/config/platforms.json', 'utf8')).platforms || {};
+    return Object.keys(reg).filter(k => k !== 'craig-pc');   // craig-pc is the PC worker, not a platform_state row
+  } catch {
+    return ['zoobicon', 'vapron', 'alecrae', 'gatetest'];
+  }
+}
+const PLATFORMS = registryPlatforms();
 PLATFORMS.forEach(p => {
   db.prepare(`
     INSERT OR IGNORE INTO platform_state (platform, status, updated_at)
@@ -1225,8 +1238,9 @@ app.post('/memory/query', (req, res) => {
 
   const q = question.toLowerCase();
 
-  // Extract platform name from question
-  const KNOWN_PLATFORMS = ['zoobicon', 'vapron', 'alecrae', 'gatetest', 'voxlen', 'bookaride', 'jarvis'];
+  // Extract platform name from question — from the registry, plus 'jarvis'
+  // (this box; not a registry product entry). One source, no drift (move 21).
+  const KNOWN_PLATFORMS = [...registryPlatforms(), 'jarvis'];
   const platform = KNOWN_PLATFORMS.find(p => q.includes(p)) || null;
 
   // Extract time window

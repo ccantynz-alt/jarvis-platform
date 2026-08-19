@@ -22,7 +22,8 @@
         "React",
         "Node.js"
       ],
-      "status": "active"
+      "status": "active",
+      "site_url": "https://zoobicon.com"
     },
     "vapron": {
       "name": "vapron",
@@ -54,7 +55,8 @@
         "TypeScript",
         "React"
       ],
-      "status": "active"
+      "status": "active",
+      "site_url": "https://www.bookaride.co.nz"
     },
     "gatetest": {
       "name": "gatetest",
@@ -69,7 +71,8 @@
         "Node.js"
       ],
       "status": "active",
-      "notes": "Registry truth pass 2026-08-08: path corrected /root/gatetest -> /opt/gatetest (the newer checkout, the one deploy-gate uses, per CLAUDE.md). repo corrected to crclabs-hq/GateTest — BOTH on-box checkouts point there; the old ccantynz-alt/gatetest value was the roadmap move-8 mismatch. /root/gatetest is a stale Aug-5 duplicate awaiting Craig's deletion. gatetest.ai is in .ai redemption since 2026-07-29 — registry-level, only Craig can fix."
+      "notes": "Registry truth pass 2026-08-08: path corrected /root/gatetest -> /opt/gatetest (the newer checkout, the one deploy-gate uses, per CLAUDE.md). repo corrected to crclabs-hq/GateTest — BOTH on-box checkouts point there; the old ccantynz-alt/gatetest value was the roadmap move-8 mismatch. /root/gatetest is a stale Aug-5 duplicate awaiting Craig's deletion. gatetest.ai is in .ai redemption since 2026-07-29 — registry-level, only Craig can fix.",
+      "site_url": "https://gatetest.ai"
     },
     "alecrae": {
       "name": "alecrae",
@@ -90,7 +93,8 @@
         "alecrae-mta",
         "alecrae-web"
       ],
-      "port": 4100
+      "port": 4100,
+      "site_url": "https://alecrae.com"
     },
     "jarvis": {
       "name": "jarvis",

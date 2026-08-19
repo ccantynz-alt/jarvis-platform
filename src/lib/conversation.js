@@ -56,8 +56,13 @@ export const MEMORY       = 'http://127.0.0.1:9200';
 export const SCREENSHOT   = 'http://127.0.0.1:9201';
 export const METRICS      = 'http://127.0.0.1:9202';
 
-// Known live URLs for screenshot — derive from platform name when not listed
-export const PLATFORM_URLS = {
+// Public URLs come from the registry's `site_url` (2026-08-19, audit move 21):
+// this literal was one of FOUR copies in code (here, deck-server, deploy-gate,
+// metrics-collector) that drifted from config/platforms.json — davenroe and
+// gluecron were invisible to the deck's screenshots and half the tools. The
+// registry is the one source now; this map is only a last-resort fallback for a
+// platform whose entry has no site_url yet.
+const FALLBACK_URLS = {
   zoobicon: 'https://zoobicon.com',
   vapron:   'https://vapron.ai',
   alecrae:  'https://alecrae.com',
@@ -65,6 +70,20 @@ export const PLATFORM_URLS = {
   voxlen:   'https://www.voxlen.ai',
   bookaride:'https://www.bookaride.co.nz',
 };
+/** The public URL for a platform — registry site_url first, then the fallback. */
+export function platformUrl(name) {
+  try { const u = loadPlatforms()[name]?.site_url; if (u) return u; } catch { /* registry unreadable */ }
+  return FALLBACK_URLS[name] || null;
+}
+/** Every platform that has a public URL: { name: url }. Registry ∪ fallback. */
+export function platformUrls() {
+  const out = { ...FALLBACK_URLS };
+  try { for (const [k, v] of Object.entries(loadPlatforms())) if (v.site_url) out[k] = v.site_url; } catch { /* registry unreadable */ }
+  return out;
+}
+// Back-compat: a live snapshot of the merged map for the few readers that index
+// it directly. Prefer platformUrl()/platformUrls() — this is not hot-reloaded.
+export const PLATFORM_URLS = platformUrls();
 
 // ── Platform registry ────────────────────────────────────────────────────────
 
@@ -914,7 +933,7 @@ export async function handlePlatformStatus(platform) {
   }
 
   // 2. Screenshot — only for platforms with a known public URL
-  const url = PLATFORM_URLS[platform];
+  const url = platformUrl(platform);
   if (url) {
     try {
       const shot = await fetch(`${SCREENSHOT}/screenshot/capture`, {

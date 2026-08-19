@@ -38,7 +38,7 @@ import { createHash, timingSafeEqual, randomBytes } from 'crypto';
 import { readFileSync, writeFileSync, existsSync, createReadStream } from 'fs';
 import { basename, join } from 'path';
 import { execSync } from 'child_process';
-import { resolveIntent, runIntent, resolveDispatchGate, platformNames, PLATFORM_URLS, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
+import { resolveIntent, runIntent, resolveDispatchGate, platformNames, platformUrl, ORCHESTRATOR, MEMORY, handleBriefing } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { authHold } from './lib/claude-auth.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
@@ -780,13 +780,10 @@ const PLATFORM_DESC = {
 };
 // The metrics collector only probes 5 hardcoded sites — the deck probes every
 // registered platform that has a URL so no live site ever shows as unknown.
-const EXTRA_URLS = {
-  gluecron: 'https://gluecron.com',
-  davenroe: 'https://davenroe.com',
-  marcoreid: 'https://marcoreid.com',
-  jarvis: 'http://127.0.0.1:9206/health', // this box — dashboard health
-};
-const platURL = (name) => PLATFORM_URLS[name] || EXTRA_URLS[name] || null;
+// Registry site_url is the source (move 21); jarvis is the local dashboard,
+// which has no public site_url, so it stays here.
+const LOCAL_URLS = { jarvis: 'http://127.0.0.1:9206/health' };
+const platURL = (name) => platformUrl(name) || LOCAL_URLS[name] || null;
 
 async function probe(url) {
   const ctl = new AbortController();
@@ -816,7 +813,7 @@ async function pollPlatforms() {
 
   state.platforms = Object.values(registry).map(p => {
     const h = byName[p.name];
-    const url = PLATFORM_URLS[p.name];
+    const url = platURL(p.name);
     const host = url ? url.replace(/^https?:\/\/(www\.)?/, '') : p.name;
     const agentCount = Object.values(agentsCfg).filter(a => a.platform === p.name).length;
     const platJobs = (Array.isArray(memJobs) ? memJobs : [])

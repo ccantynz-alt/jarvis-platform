@@ -38,6 +38,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'fs'
 import { join } from 'path';
 import { tmpdir } from 'os';
 import express from 'express';
+import { platformUrl } from './lib/conversation.js';
 
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
@@ -61,18 +62,9 @@ const ORCHESTRATOR = 'http://127.0.0.1:9205';
 // elsewhere gets caught here instead of repeating it.
 const AUTO_FIX_MAX_ATTEMPTS = 2;
 
-// Same platform → live-URL map orchestrator.js's cronDailyScreenshots
-// already uses — single source of truth would need a shared config file,
-// tracked as a known small duplication (both are ~6-line literals) rather
-// than a bigger refactor of an already-running service for this session.
-const PLATFORM_URLS = {
-  zoobicon:  'https://zoobicon.com',
-  vapron:    'https://vapron.ai',
-  alecrae:   'https://alecrae.com',
-  gatetest:  'https://gatetest.ai',
-  voxlen:    'https://www.voxlen.ai',
-  bookaride: 'https://www.bookaride.co.nz',
-};
+// Public URLs come from the registry now (2026-08-19, audit move 21) — this was
+// the "known small duplication" the old comment described; platformUrl() reads
+// config/platforms.json's site_url.
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
@@ -224,7 +216,7 @@ function mktempWorkspace() {
 
 async function processSession(session) {
   const platform = session.platform;
-  const url = PLATFORM_URLS[platform];
+  const url = platformUrl(platform);
 
   if (!hasRealFileChanges(session)) {
     logEvent('SKIP', `session ${session.id} (${platform}) — no files changed, not a deploy`);

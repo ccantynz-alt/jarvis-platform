@@ -101,14 +101,25 @@ function collectMetrics() {
   };
 }
 
+// Public-site probe targets come from the registry (2026-08-19, audit move 21):
+// this was a hardcoded five that drifted from config/platforms.json — voxlen,
+// gluecron and davenroe have public sites and were never probed here. Every
+// active platform with a site_url, read fresh each sweep (the registry
+// hot-reloads). Reads the file directly to avoid coupling this collector to
+// conversation.js's heavier surface.
+function platformTargets() {
+  try {
+    const reg = JSON.parse(readFileSync('/opt/jarvis/config/platforms.json', 'utf8')).platforms || {};
+    return Object.entries(reg)
+      .filter(([, v]) => v.site_url && v.status === 'active')
+      .map(([name, v]) => ({ name: name.toUpperCase(), url: v.site_url }));
+  } catch {
+    return [{ name: 'ZOOBICON', url: 'https://zoobicon.com' }, { name: 'VAPRON', url: 'https://vapron.ai' }];
+  }
+}
+
 async function checkPlatformHealthAsync() {
-  const targets = [
-    { name: 'ZOOBICON', url: 'https://zoobicon.com' },
-    { name: 'VAPRON', url: 'https://vapron.ai' },
-    { name: 'ALECRAE', url: 'https://alecrae.com' },
-    { name: 'MARCOREID', url: 'https://marcoreid.com' },
-    { name: 'GATETEST', url: 'https://gatetest.ai' },
-  ];
+  const targets = platformTargets();
 
   const results = await Promise.allSettled(
     targets.map(async (t) => {
