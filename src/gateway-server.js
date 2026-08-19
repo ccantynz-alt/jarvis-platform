@@ -38,6 +38,8 @@ import { parseCookies } from './lib/cookies.js';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import { createHash, timingSafeEqual } from 'crypto';
+import { mkdirSync, writeFileSync } from 'fs';
+import { join } from 'path';
 import { resolveIntent, runIntent, resolveDispatchGate, platformNames, loadRoadmap } from './lib/conversation.js';
 import { runAgent, hasAgent, maybeBrainSwitch, noteBrainDegraded, noteBrainHealthy } from './lib/agent.js';
 import { notify } from './lib/notify.js';
@@ -88,7 +90,10 @@ function isAuthed(req) {
 // ── App ──────────────────────────────────────────────────────────────────────
 
 const app = express();
-app.use(express.json());
+// 4 MB, not the 100 KB default: /worker/shot carries a screenshot PNG from the
+// PC worker (2026-08-19). Tailnet-only + token-authed surface; express.json's
+// own limit is what bounds it.
+app.use(express.json({ limit: '4mb' }));
 
 // GET /health — open (mirrors dashboard convention)
 app.get('/health', (_req, res) => {
@@ -170,6 +175,40 @@ function workerAuthed(req) {
   const b = createHash('sha256').update(WORKER_TOKEN).digest();
   return a.length === b.length && timingSafeEqual(a, b);
 }
+// POST /worker/shot — the PC worker hands over a screenshot of Craig's screen
+// (pc-actions.js `screen.capture`, 2026-08-19 move 38). A PNG cannot ride the
+// 8 KB job output, so it comes here: worker-token authed, size-capped, magic-
+// bytes checked, written under the deck's SHOT_DIR with a fixed name prefix,
+// then put ON THE DECK through the same /internal/show path as show_me. Only
+// the filename ever crosses to a client.
+const SHOT_DIR = '/opt/jarvis/screenshots';
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+app.post('/worker/shot', async (req, res) => {
+  if (!workerAuthed(req)) return res.status(403).json({ error: 'forbidden' });
+  const b64 = String(req.body?.png_b64 || '');
+  if (!b64 || b64.length > 3_500_000) return res.status(400).json({ error: 'png_b64 missing or too large (3.5 MB cap)' });
+  let buf;
+  try { buf = Buffer.from(b64, 'base64'); } catch { return res.status(400).json({ error: 'bad base64' }); }
+  if (buf.length < 64 || !buf.subarray(0, 8).equals(PNG_MAGIC)) return res.status(400).json({ error: 'not a PNG' });
+  const name = `pc-screen-${new Date().toISOString().replace(/[:.]/g, '-')}.png`;
+  try {
+    mkdirSync(SHOT_DIR, { recursive: true });
+    writeFileSync(join(SHOT_DIR, name), buf, { mode: 0o600 });
+  } catch (e) {
+    return res.status(500).json({ error: `could not store capture: ${e.message}` });
+  }
+  let shown = false;
+  try {
+    const r = await fetch('http://127.0.0.1:9210/internal/show', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ screenshot: name, title: "Craig's PC — screen", note: `captured ${new Date().toLocaleTimeString('en-NZ', { timeZone: 'Pacific/Auckland' })} NZT` }),
+      signal: AbortSignal.timeout(5000),
+    });
+    shown = !!(await r.json().catch(() => ({}))).shown;
+  } catch { /* deck down — the file is still there */ }
+  res.json({ ok: true, name, bytes: buf.length, shown });
+});
+
 app.post('/worker/:action(claim|heartbeat|result)', async (req, res) => {
   if (!workerAuthed(req)) return res.status(403).json({ error: 'forbidden' });
   try {

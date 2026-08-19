@@ -241,7 +241,10 @@ function powershell(script, timeoutMin) {
       settled = true;
       clearTimeout(killTimer);
       const cleaned = cleanStderr(err ? err + '\n' + stderr : stderr);
-      resolve({ code, stdout: stdout.slice(-8000), stderr: cleaned.slice(-2000), timedOut });
+      // stdoutFull is kept ONLY for the screenshot hand-off (never posted as a
+      // result); the result itself stays bounded at 8 KB.
+      const full = stdout.includes('SCREENSHOT_PNG_B64:') ? stdout.slice(-4_000_000) : undefined;
+      resolve({ code, stdout: stdout.slice(-8000), stderr: cleaned.slice(-2000), timedOut, ...(full ? { stdoutFull: full } : {}) });
     };
     proc.on('close', code => settle(code));
     proc.on('error', err => settle(null, err.message));
@@ -311,10 +314,26 @@ function diffChangedFiles(before, after, cap = 25) {
   return changed;
 }
 
+// A screenshot (pc-actions `screen.capture`) cannot ride the 8 KB job output:
+// it goes to the gateway's /worker/shot, which stores it and puts it on the
+// deck; the job output becomes one line saying so (2026-08-19, move 38).
+async function handOffScreenshot(result) {
+  const m = /SCREENSHOT_PNG_B64:([A-Za-z0-9+/=]+)/.exec(result.stdoutFull || result.stdout || '');
+  if (!m) { const { stdoutFull, ...rest } = result; return rest; }
+  const { stdoutFull, ...rest } = result; result = rest;   // never post the full buffer as a result
+  try {
+    const r = await api('shot', { worker_id: WORKER_ID, png_b64: m[1] });
+    const where = r?.shown ? 'shown on the deck now' : 'stored; no deck was open to show it';
+    return { ...result, stdout: `Screenshot taken (${Math.round(m[1].length * 0.75 / 1024)} KB) — ${where}. File: ${r?.name || '?'}` };
+  } catch (e) {
+    return { ...result, code: 1, stdout: '', stderr: `screenshot taken but could not be handed to the gateway: ${e.message}` };
+  }
+}
+
 async function runActionJob(job) {
   currentActionId = job.id;
   try {
-    const result = await runAction(job);
+    const result = await handOffScreenshot(await runAction(job));
     log(`action job ${job.id.slice(0, 8)} finished — exit ${result.code}${result.timedOut ? ' (TIMEOUT)' : ''}`);
     await postResult({ job_id: job.id, worker_id: WORKER_ID, ...result });
   } finally {

@@ -221,3 +221,58 @@ test('an older worker that reports no verb list gets the benefit of the doubt', 
   assert.equal(workerKnowsVerb({ elevated: true }, 'harvest.list'), true);
   assert.equal(workerKnowsVerb({ verbs: 'not-an-array' }, 'harvest.list'), true);
 });
+
+// ── The read-only verb set (2026-08-19, audit move 38) ───────────────────────
+//
+// "I should be able to ask it questions about my PC." Every question that needs
+// no change to the machine gets an instant verb — and none of them may be
+// mutating by accident, because `shell` is what every gap used to become.
+const READ_ONLY = ['pc.snapshot', 'cpu.top', 'disk.usage', 'gpu.info', 'net.info', 'apps.list',
+  'windows.list', 'battery', 'updates.status', 'sessions.who', 'files.find', 'files.recent',
+  'startup.list', 'tasks.list', 'screen.capture'];
+
+test('every new question verb is read-only, needs no admin, and builds a script', () => {
+  for (const verb of READ_ONLY) {
+    const plan = planAction(verb, {});
+    assert.equal(plan.mutates, false, verb);
+    assert.equal(plan.needsAdmin, false, verb);
+    assert.ok(plan.script.length > 20, verb);
+    assert.ok(typeof plan.description === 'string' && plan.description.length > 5, verb);
+  }
+});
+
+test('cpu.top measures a sampled percentage, not the lifetime CPU-seconds process.list shows', () => {
+  const s = planAction('cpu.top', {}).script;
+  assert.match(s, /TotalProcessorTime/);
+  assert.match(s, /Start-Sleep/);
+  assert.match(s, /CPU%/);
+});
+
+test('paths and globs are validated and quoted, never interpolated raw', () => {
+  assert.throws(() => planAction('disk.usage', { path: 'C:\\x | Remove-Item' }), /absolute Windows path/);
+  assert.throws(() => planAction('files.find', { path: '..\\..\\etc' }), /absolute Windows path/);
+  assert.throws(() => planAction('files.find', { glob: '..\\*' }), /path separators/);
+  const ok = planAction('files.find', { path: "C:\\Users\\it's", glob: '*.pdf' }).script;
+  assert.match(ok, /'C:\\Users\\it''s'/, 'psQuote doubles the quote');
+  assert.match(ok, /-Filter '\*\.pdf'/);
+});
+
+test('filters are quoted (apps.list / tasks.list)', () => {
+  const s = planAction('apps.list', { filter: "O'Reilly" }).script;
+  assert.match(s, /-like '\*O''Reilly\*'/);
+  const t = planAction('tasks.list', { filter: 'Jarvis' }).script;
+  assert.match(t, /-like '\*Jarvis\*'/);
+});
+
+test('screen.capture emits the hand-off marker the worker looks for, bounded to 1280 wide', () => {
+  const s = planAction('screen.capture', {}).script;
+  assert.match(s, /SCREENSHOT_PNG_B64:/);
+  assert.match(s, /1280/);
+});
+
+test('the legacy verb list is intact alongside the new ones', () => {
+  for (const v of ['service.status', 'service.list', 'process.list', 'system.info', 'eventlog.errors',
+    'service.restart', 'service.start', 'service.stop', 'process.kill', 'shell', 'harvest.list', 'harvest.get']) {
+    assert.ok(isKnownVerb(v), v);
+  }
+});

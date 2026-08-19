@@ -164,15 +164,17 @@ export const TOOLS = [
       task: { type: 'string', description: 'what the agent should do' },
       confirmed: { type: 'boolean', description: 'true ONLY after Craig has verbally confirmed' },
     }, required: ['task'] } },
-  { name: 'pc_control', description: "Act on CRAIG'S OWN WINDOWS PC (not the fleet box) — check or restart Windows services, list/kill processes, read the crash & error event log, snapshot the machine, or run a PowerShell command. Diagnostics run instantly. Anything that CHANGES the machine is staged and needs Craig's spoken yes. Use this for 'restart the worker service', 'why does my PC keep crashing', 'what's eating my memory'.",
+  { name: 'pc_control', description: "Act on CRAIG'S OWN WINDOWS PC (not the fleet box). ASK ANYTHING about the machine with the read-only actions — they run instantly, no confirmation: pc.snapshot ('how's my PC' — one combined picture), cpu.top ('what's using my CPU' — sampled % right now), process.list (by memory), system.info, disk.usage (largest folders), gpu.info, net.info (adapters, Wi-Fi, Tailscale, listening ports), apps.list, windows.list (what's open on screen), battery, updates.status (+ reboot pending), sessions.who, files.find (glob under a path), files.recent (changed in the last N hours), startup.list, tasks.list, eventlog.errors (crashes), service.status, service.list, screen.capture (puts a screenshot of his screen ON THE DECK). Anything that CHANGES the machine — service.restart/start/stop, process.kill, shell — is staged and needs Craig's spoken yes. Prefer a specific read-only action over `shell` for any question.",
     input_schema: { type: 'object', properties: {
-      action: { type: 'string', description: "one of: service.status, service.list, process.list, system.info, eventlog.errors (all read-only, instant); service.restart, service.start, service.stop, process.kill, shell (all staged for confirmation)" },
+      action: { type: 'string', description: "read-only (instant): pc.snapshot, cpu.top, process.list, system.info, disk.usage, gpu.info, net.info, apps.list, windows.list, battery, updates.status, sessions.who, files.find, files.recent, startup.list, tasks.list, eventlog.errors, service.status, service.list, screen.capture. Mutating (staged for confirmation): service.restart, service.start, service.stop, process.kill, shell" },
       name: { type: 'string', description: 'service or process name, for the service.*/process.kill actions' },
       pid: { type: 'number', description: 'process id, as an alternative to name for process.kill' },
       command: { type: 'string', description: 'PowerShell to run, for action=shell' },
-      hours: { type: 'number', description: 'how far back to read the event log (eventlog.errors, default 48)' },
+      hours: { type: 'number', description: 'how far back to look (eventlog.errors default 48; files.recent default 24)' },
       top: { type: 'number', description: 'how many rows for the list actions' },
-      filter: { type: 'string', description: 'substring filter for service.list' },
+      filter: { type: 'string', description: 'substring filter for service.list / apps.list / tasks.list' },
+      path: { type: 'string', description: 'absolute Windows path for disk.usage / files.find / files.recent (default: the user profile)' },
+      glob: { type: 'string', description: 'filename pattern for files.find, e.g. *.pdf or report*' },
     }, required: ['action'] } },
   { name: 'get_pc_status', description: "Is Craig's PC online, is the Jarvis worker running on it, and does it have administrator rights (needed to restart services)? Check this before promising anything on the PC.",
     input_schema: { type: 'object', properties: {}, required: [] } },
@@ -335,7 +337,7 @@ export async function runTool(name, input, ctx) {
     case 'pc_control': {
       const action = String(input.action || '').trim();
       const args = {};
-      for (const k of ['name', 'pid', 'command', 'hours', 'top', 'filter']) {
+      for (const k of ['name', 'pid', 'command', 'hours', 'top', 'filter', 'path', 'glob']) {
         if (input[k] !== undefined && input[k] !== null && input[k] !== '') args[k] = input[k];
       }
       let plan;
