@@ -30,6 +30,14 @@ async function dbGet(path) {
   if (!r.ok) throw new Error(`GET ${path} → ${r.status}`);
   return r.json();
 }
+async function kvGet(key) {
+  try { const j = await fetch(`${MEMORY}/memory/kv/${encodeURIComponent(key)}`, { signal: AbortSignal.timeout(2000) }).then(r => r.json()); return j?.value ?? null; }
+  catch { return null; }
+}
+async function kvSet(key, value) {
+  try { await fetch(`${MEMORY}/memory/kv`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, value }), signal: AbortSignal.timeout(2000) }); }
+  catch { /* memory down — the in-process map still guards */ }
+}
 
 // ── Minimal cron matcher: "m h dom mon dow", supports *, numbers, commas ────
 function fieldMatches(field, value) {
@@ -88,7 +96,16 @@ async function scheduleTick(now) {
     if (role.kind !== 'role' || role.status !== 'active' || !role.schedule) continue;
     if (!cronMatches(role.schedule, now)) continue;
     if (firedThisMinute.get(role.name) === minuteKey) continue;
+    // Durable guard (2026-08-19, audit move 7): the in-process map is lost on a
+    // restart, so a process that came back up inside the same cron minute would
+    // fire every due agent a second time (the daily budget catches it only once
+    // the first job's count has landed). A KV marker per agent+minute survives
+    // the restart. Best-effort: if memory is unreachable, the in-process map
+    // still guards the common case.
+    const firedKey = `agent-fired:${role.name}`;
+    if (await kvGet(firedKey) === minuteKey) { firedThisMinute.set(role.name, minuteKey); continue; }
     firedThisMinute.set(role.name, minuteKey);
+    await kvSet(firedKey, minuteKey);
 
     try {
       budgets = budgets || await jobsTodayByAgent();

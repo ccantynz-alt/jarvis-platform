@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pushAlert, hasPush, _reset } from '../src/lib/push.js';
+import { pushAlert, hasPush, _reset, _setKv } from '../src/lib/push.js';
 
 const ENV = ['NTFY_TOPIC', 'NTFY_SERVER', 'NTFY_TOKEN', 'PUSH_MIN_LEVEL', 'PUSH_DISABLED',
   'PUSH_CLICK_URL', 'PUSH_MAX_PER_HOUR', 'PUSH_DEDUPE_MINUTES', 'PUSH_ALERT_DEDUPE_HOURS'];
@@ -266,4 +266,42 @@ test('an escalation from warn to alert is new information and gets through', asy
     assert.equal((await pushAlert({ level: 'alert', title })).sent, true, 'it got worse — say so');
     assert.equal((await pushAlert({ level: 'alert', title })).reason, 'deduped', 'but only once');
   } finally { f.restore(); }
+});
+
+// ── Durable caps across processes (2026-08-19, audit move 7) ────────────────
+// The dedupe window and hourly cap used to be per-process, so a oneshot timer
+// (a fresh process every tick) hit neither. With a shared KV store, a SECOND
+// process sees the FIRST process's push and dedupes it.
+test('a repeat from a different process is deduped via shared KV', async () => {
+  const store = new Map();
+  const shared = { get: async (k) => (store.has(k) ? store.get(k) : null), set: async (k, v) => { store.set(k, v); } };
+  const a = capture();
+  process.env.NTFY_TOPIC = 'topic';
+  _setKv(shared);
+  await quiet(() => pushAlert({ level: 'warn', title: 'vapron down', body: 'x' }));
+  a.restore();
+  assert.equal(a.calls.length, 1, 'first process sends');
+
+  // Simulate a fresh oneshot process: clear in-process state, keep the KV store.
+  _reset();
+  _setKv(shared);
+  const b = capture();
+  process.env.NTFY_TOPIC = 'topic';
+  const r = await quiet(() => pushAlert({ level: 'warn', title: 'vapron down', body: 'x' }));
+  b.restore();
+  assert.equal(r.reason, 'deduped');
+  assert.equal(b.calls.length, 0, 'second process is capped by the first process\'s push');
+});
+
+test('an escalation from another process still breaks through the shared dedupe', async () => {
+  const store = new Map();
+  const shared = { get: async (k) => (store.has(k) ? store.get(k) : null), set: async (k, v) => { store.set(k, v); } };
+  process.env.NTFY_TOPIC = 'topic';
+  _setKv(shared);
+  await quiet(() => pushAlert({ level: 'warn', title: 'disk', body: 'x' }));
+  _reset(); _setKv(shared); process.env.NTFY_TOPIC = 'topic';
+  const c = capture();
+  const r = await quiet(() => pushAlert({ level: 'alert', title: 'disk', body: 'x' }));
+  c.restore();
+  assert.equal(r.sent, true, 'same headline at a higher level is new information');
 });

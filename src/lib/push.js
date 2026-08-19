@@ -24,6 +24,7 @@
  */
 
 import { guardrail } from './guardrail.js';
+import { createHash } from 'crypto';
 
 const DEFAULT_SERVER = 'https://ntfy.sh';
 
@@ -57,6 +58,36 @@ const state = {
   hourStart: 0,
   hourCount: 0,
 };
+
+// DURABLE twin of `state` (2026-08-19, audit move 7). The dedupe window and
+// the hourly cap live in memory-server KV, shared by EVERY process — oneshot
+// timers included — so the comment above stops being true: a 5-minute timer
+// can no longer push the same headline every tick, and twelve processes cannot
+// each spend their own twelve-an-hour. The in-process map stays as a cache and
+// as the fallback when memory is unreachable (better a per-process limit than
+// none). Keys: push-recent:<sha1(title)> → {at, level}; push-hour → {start, count}.
+const MEMORY = 'http://127.0.0.1:9200';
+const titleKey = (t) => 'push-recent:' + createHash('sha1').update(String(t)).digest('hex').slice(0, 24);
+// Swappable so tests (which mock global fetch and count calls) and a future
+// non-memory store can replace it: _reset() installs an in-memory stub.
+let kv = { get: kvGetHttp, set: kvSetHttp };
+const kvGet = (k) => kv.get(k);
+const kvSet = (k, v) => kv.set(k, v);
+async function kvGetHttp(key) {
+  try {
+    const r = await fetch(`${MEMORY}/memory/kv/${encodeURIComponent(key)}`, { signal: AbortSignal.timeout(2000) });
+    const j = await r.json();
+    return j && j.value ? JSON.parse(j.value) : null;
+  } catch { return null; }
+}
+async function kvSetHttp(key, value) {
+  try {
+    await fetch(`${MEMORY}/memory/kv`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value: JSON.stringify(value) }), signal: AbortSignal.timeout(2000),
+    });
+  } catch { /* memory down — in-process state still applies */ }
+}
 
 const cfg = () => ({
   topic: (process.env.NTFY_TOPIC || '').trim(),
@@ -106,8 +137,10 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
   // Rate cap. An alert storm must not become the reason he silences the one
   // channel that works — overflow is dropped here and still lives in the inbox.
   const perHour = guardrail('PUSH_MAX_PER_HOUR', 12, { source: 'push' });
-  if (now - state.hourStart > 3_600_000) { state.hourStart = now; state.hourCount = 0; }
-  if (state.hourCount >= perHour && lvl !== 'alert') return { sent: false, reason: 'rate-capped' };
+  const hour = (await kvGet('push-hour')) || { start: state.hourStart, count: state.hourCount };
+  if (now - (hour.start || 0) > 3_600_000) { hour.start = now; hour.count = 0; }
+  state.hourStart = hour.start; state.hourCount = hour.count;
+  if (hour.count >= perHour && lvl !== 'alert') return { sent: false, reason: 'rate-capped' };
 
   // Dedupe repeats of the same headline.
   //
@@ -135,7 +168,7 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
   const dedupeMs = lvl === 'alert'
     ? guardrail('PUSH_ALERT_DEDUPE_HOURS', 6, { source: 'push' }) * 3_600_000
     : guardrail('PUSH_DEDUPE_MINUTES', 10, { source: 'push' }) * 60_000;
-  const last = state.recent.get(title);
+  const last = (await kvGet(titleKey(title))) || state.recent.get(title);
   if (last && now - last.at < dedupeMs && LEVEL_ORDER[lvl] <= LEVEL_ORDER[last.level]) {
     return { sent: false, reason: 'deduped' };
   }
@@ -166,6 +199,8 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
     state.recent.set(title, { at: now, level: lvl });
     state.hourCount++;
     if (state.recent.size > 200) state.recent.clear();  // unbounded maps are leaks
+    await kvSet(titleKey(title), { at: now, level: lvl });
+    await kvSet('push-hour', { start: state.hourStart, count: state.hourCount });
     return { sent: true, status: r.status };
   } catch (e) {
     console.warn(`[push] ntfy failed: ${e.message}`);
@@ -192,4 +227,9 @@ export function _reset() {
   state.recent.clear();
   state.hourStart = 0;
   state.hourCount = 0;
+  // Tests run against an in-memory KV: durable semantics, no network.
+  const mem = new Map();
+  kv = { get: async (k) => (mem.has(k) ? mem.get(k) : null), set: async (k, v) => { mem.set(k, v); } };
 }
+/** Install a KV transport ({get(key)→value|null, set(key,value)}). Production = memory-server over HTTP. */
+export function _setKv(transport) { kv = transport; }
