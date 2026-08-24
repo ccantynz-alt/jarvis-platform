@@ -39,10 +39,16 @@ const jget = (url, headers = {}, ms = 10_000) =>
   fetch(url, { headers, signal: AbortSignal.timeout(ms) })
     .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))));
 
-const kvGet = (key) => jget(`${MEMORY}/memory/kv/${key}`).then(r => r?.value ?? null).catch(() => null);
+// KV values are STRINGS by contract (see experience-check.js) — callers
+// stringify on write and parse on read. Passing an object here coerces to
+// "[object Object]" and silently destroys the cursor (caught on the very
+// first deploy tick, 2026-08-24).
+const kvGet = (key) => jget(`${MEMORY}/memory/kv/${key}`)
+  .then(r => { try { return JSON.parse(r?.value ?? 'null'); } catch { return null; } })
+  .catch(() => null);
 const kvSet = (key, value) => fetch(`${MEMORY}/memory/kv`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ key, value }),
+  body: JSON.stringify({ key, value: JSON.stringify(value) }),
 }).catch(() => null);
 
 // A watcher that cannot see the mailbox must say so ONCE (fail loud), then
