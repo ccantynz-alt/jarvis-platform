@@ -363,6 +363,24 @@ Two secrets in `secrets.env`, both held by the deck/gateway/orchestrator and
   code first, set token second). **Every new service entrypoint must
   `installInternalAuth()`; a new sensitive mutation route must add `internalGuard`.**
 
+## THE BUILD PIPELINE (move 30, phase 1 — 2026-08-25)
+
+"Marco, build me a platform": `node src/platform-builder.js --slug <s>
+--brief "<what>" [--mock] [--resume]` on the box. Stages (pure logic +
+guards in `src/lib/build-pipeline.js`, tests carry the recon traps):
+plan → **build** (Zoobicon v2 spawn — burns Zoobicon's own metered key;
+`--mock` = free fixture) → **repo** (Gluecron `POST /api/v2/repos`,
+`GLUECRON_PAT`; AI review fires on PRs automatically) → **push** (smart-HTTP,
+PAT via header never argv) → **deploy** (Vapron trpc `projects.create` +
+`deployments.create` with `VAPRON_API_KEY`, polled to `live`; the returned
+slug MUST equal ours — Vapron suffixes on collision and the deploy "succeeds"
+at the wrong URL) → **register** (platforms.json entry at birth — the fleet
+watches the newborn) → **verify** (HTTP probe + screenshot, Rule 2). State is
+durable in KV `build-pipeline:<slug>`; pauses (e.g. missing PAT) resume with
+`--resume`, done stages never re-run. A MOCKED build result is a hard
+failure — Zoobicon fakes success URLs when keys are unset. Invocation from
+voice rides dispatch_job through the ONE confirmation gate; no second gate.
+
 ## GOVERNANCE — how autonomous work gets authorised
 
 Read **docs/GOVERNANCE.md** before adding any capability that changes
