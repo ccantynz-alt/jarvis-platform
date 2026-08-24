@@ -1,0 +1,20 @@
+[Unit]
+Description=Mail watch — Marco's standing copy of Craig's email (marco@alecrae.com)
+After=network-online.target jarvis-memory.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/jarvis
+EnvironmentFile=/opt/jarvis/config/secrets.env
+ExecStart=/usr/bin/node src/mail-watch.js
+# Oneshot units disable the start timeout by default (the 2026-07-30
+# fleet-check lesson). A tick is three bounded HTTP calls; 2 minutes is ample.
+TimeoutStartSec=120
+
+# Read-only against the mail store. Files at most one inbox row per tick.
+MemoryMax=128M
+CPUQuota=20%
+
+[Install]
+WantedBy=multi-user.target

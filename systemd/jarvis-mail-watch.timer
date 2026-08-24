@@ -1,0 +1,14 @@
+[Unit]
+Description=Watch marco@alecrae.com for new mail, every 5 minutes
+
+[Timer]
+OnBootSec=3min
+# 5 minutes is a detection window, not a notification cadence: a tick is
+# silent unless there is genuinely new mail, and a burst is one batched
+# inbox row (lib/mail-watch.js) — never a per-message buzz.
+OnUnitActiveSec=5min
+AccuracySec=30s
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
