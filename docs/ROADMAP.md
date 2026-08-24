@@ -78,6 +78,24 @@ live (`mcp.gatetest.ai`).
 20. 🔄 Jarvis Gateway MVP — private mesh, streaming brain, voice in/out. Tailscale mesh + jarvis-gateway (:9208, `tailscale serve` HTTPS) are live and voice-tested; iPad/phone shakedown is ongoing. Spec: docs/GATEWAY.md.
 21. 🔄 Embodied Jarvis — lip-synced live avatar + one custom voice (TTS via Vapron). **Custom-voice half live 2026-07-16:** ElevenLabs neural voice is wired into the Command Deck (`src/lib/tts.js`, `GET /tts` on :9210 — cache, daily char budget, `TTS_DISABLED` kill switch; awaiting a valid `ELEVENLABS_API_KEY`). Avatar half untouched; Vapron-hosted TTS remains the end-state.
 
+### Phase 6 — SHOWCASE (the estate builds platforms) — added 2026-08-25
+30. 🔄 **The build pipeline — "Marco, build me a platform."** Craig, 2026-08-25:
+    a spoken brief becomes a live platform, fully automated, and eventually a
+    customer product — "this is where we get to showcase AI." Order confirmed:
+    **Gluecron** (repo born; AI review on every PR = governance for AI-written
+    code) → **Zoobicon** (the 7-agent builder writes the app) → **Vapron**
+    (domain/DNS/TLS/deploy; AlecRae email) → **Jarvis** registers the newborn in
+    `config/platforms.json` so the fleet watches it from birth. Phase 1 =
+    internal dogfood through the existing confirmation gate + orchestrator:
+    launch on an estate subdomain (no registrar dependency), one pipeline job,
+    ends with URL + repo + screenshot. Phase 2 = same pipeline behind Zoobicon's
+    customer checkout (prereqs: CentralNic PRODUCTION creds — current ones are
+    OT&E sandbox, verified 2026-08-25; Zoobicon estate migration off
+    Vercel/Neon/OpenSRS; known-debt #2, agents off root/skip-permissions).
+    Phase 3 = the loop: plain-English Gluecron issues → AI PR → AI review →
+    deploy, every customer platform fleet-checked. Logic:
+    `src/lib/build-pipeline.js`.
+
 ---
 
 ## OPEN QUESTIONS FOR CRAIG (unblock when convenient)
