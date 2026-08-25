@@ -91,6 +91,21 @@ test('verify demands a serving HTTP status — Rule 2 in code', () => {
   assert.equal(s.status, 'failed');
 });
 
+test('a FAILED pipeline resumes at the failed stage with done work kept', () => {
+  // The push race (2026-08-25): repo row not yet visible to receive-pack,
+  // push failed, cause fixed — --resume must retry push, not rebuild.
+  let s = fresh();
+  s = applyStageResult(s, 'plan', { ok: true, result: {} });
+  s = applyStageResult(s, 'build', { ok: true, result: { files: { 'index.html': 'x' } } });
+  s = applyStageResult(s, 'repo', { ok: true, result: {} });
+  s = applyStageResult(s, 'push', { ok: false, error: 'Repository not found' });
+  assert.equal(s.status, 'failed');
+  s = resume(s);
+  assert.equal(s.status, 'running');
+  assert.equal(nextStage(s), 'push');
+  assert.equal(s.stages.build.status, 'done');
+});
+
 test('an executor returning nothing is a failure, not a success', () => {
   let s = fresh();
   s = applyStageResult(s, 'plan', undefined);

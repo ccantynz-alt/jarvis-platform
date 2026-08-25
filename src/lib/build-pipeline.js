@@ -101,10 +101,18 @@ export function applyStageResult(state, stage, outcome) {
   return next;
 }
 
-/** Resume a paused pipeline (the blocker was cleared — e.g. a PAT arrived). */
+/**
+ * Resume a paused OR failed pipeline. Paused = a named blocker was cleared
+ * (e.g. a PAT arrived). Failed = the operator fixed the cause and asked for
+ * a retry: the failed stage resets to retry, done stages stay done. Nothing
+ * resumes silently — only an explicit --resume reaches this.
+ */
 export function resume(state) {
-  if (state.status !== 'paused') return state;
+  if (state.status !== 'paused' && state.status !== 'failed') return state;
   const next = structuredClone(state);
+  for (const s of STAGES) {
+    if (next.stages[s].status === 'failed') { next.stages[s].status = 'retry'; }
+  }
   next.status = 'running';
   next.pausedReason = null;
   return next;
