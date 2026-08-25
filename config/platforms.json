@@ -214,6 +214,21 @@
       ],
       "status": "active",
       "notes": "Third-party fork (abi/screenshot-to-code). Container restarted 2026-07-17 (was OOM-exited 2026-07-03). Runs on :5173 (frontend) / :7001 (backend), loopback only. Bring up: cd /opt/screenshot-to-code && docker compose up -d. 2026-07-17: restart: unless-stopped set on both services (compose + docker update) after self-heal session 78; frontend/backend verified HTTP 200."
+    },
+    "marco-demo": {
+      "name": "marco-demo",
+      "display_name": "marco-demo",
+      "server": "149.28.119.158",
+      "path": "/opt/vapron-apps/marco-demo",
+      "repo": "https://gluecron.com/ccantynz/marco-demo.git",
+      "branch_strategy": "direct-to-main",
+      "default_branch": "main",
+      "tech_stack": [
+        "Bun"
+      ],
+      "status": "active",
+      "site_url": "https://marco-demo.vapron.app",
+      "notes": "Born from the build pipeline (move 30) 2026-08-25. Brief: A one-page demo site proving the estate build pipeline: headline, three feature cards, footer."
     }
   },
   "defaults": {
