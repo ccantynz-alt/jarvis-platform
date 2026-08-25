@@ -77,17 +77,20 @@ const jfetch = async (url, opts = {}, ms = 30_000) => {
   return { status: r.status, body };
 };
 
-// tRPC over HTTP: queries are GET, mutations are POST {"json": input}.
+// tRPC over HTTP: queries are GET with ?input=<json>, mutations are POST
+// with the input as the RAW body — Vapron's server has no transformer, so
+// the {"json": input} wrapper (which its own unbuilt CLI uses) is rejected
+// with "expected string, received undefined" (2026-08-25 shakedown).
 // No Origin header on purpose — Vapron's CSRF middleware passes server-to-server calls.
 const vapron = {
   key: process.env.VAPRON_API_KEY || '',
   query: (proc, input) => jfetch(
-    `${VAPRON_API}/trpc/${proc}${input !== undefined ? `?input=${encodeURIComponent(JSON.stringify({ json: input }))}` : ''}`,
+    `${VAPRON_API}/trpc/${proc}${input !== undefined ? `?input=${encodeURIComponent(JSON.stringify(input))}` : ''}`,
     { headers: { Authorization: `Bearer ${vapron.key}` } }),
   mutate: (proc, input) => jfetch(`${VAPRON_API}/trpc/${proc}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${vapron.key}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ json: input }),
+    body: JSON.stringify(input),
   }, 60_000),
 };
 
