@@ -188,9 +188,15 @@ const executors = {
       env: { ...process.env, HOME: process.env.HOME || '/root', GIT_TERMINAL_PROMPT: '0' },
     });
     try {
-      // Token stays out of argv/remotes: smart-HTTP accepts a Bearer header.
+      // Token stays out of argv-persisted config and remotes: smart-HTTP
+      // accepts a Bearer header. `-c` must come BEFORE the subcommand —
+      // `git clone -c k=v` PERSISTS the config into the new repo, and the
+      // later `git -c` push then sends the Authorization header twice; the
+      // server reads the doubled header as garbage, treats the push as
+      // anonymous, and answers "Repository not found" (2026-08-25, cost
+      // three shakedown runs to isolate).
       const authed = ['-c', `http.extraHeader=Authorization: Bearer ${pat}`];
-      execFileSync('git', ['clone', '--quiet', ...authed, `${GLUECRON}/${state.owner}/${state.slug}.git`, dir], {
+      execFileSync('git', [...authed, 'clone', '--quiet', `${GLUECRON}/${state.owner}/${state.slug}.git`, dir], {
         encoding: 'utf8', timeout: 60_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       });
       for (const name of Object.keys(files)) writeFileSync(join(dir, name), readFileSync(join(filesDir, name)));
