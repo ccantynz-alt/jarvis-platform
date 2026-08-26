@@ -1555,12 +1555,24 @@ function speakBrowserAsync(text) {
     u.lang = (v && v.lang) || 'en-GB';
     u.rate = Number(voiceSetting('rate', 1.02)) || 1.02;
     u.pitch = Number(voiceSetting('pitch', 0.9)) || 0.9;
-    let done = false;
-    const finish = () => { if (done) return; done = true; S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel(); resolve(); };
+    let done = false, keepAlive = null;
+    const finish = () => { if (done) return; done = true; if (keepAlive) { clearInterval(keepAlive); keepAlive = null; } S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel(); resolve(); };
     u.onstart = () => { S.speaking = true; updateOrbLabel(); };
     u.onend = u.onerror = finish;
-    setTimeout(finish, 1500 + text.length * 90); // belt & braces: never wedge the queue
+    setTimeout(finish, 2000 + text.length * 90); // belt & braces: never wedge the queue
     speechSynthesis.speak(u);
+    // Chrome desktop bug (Craig's laptop, 2026-08-27: "the voice is gone
+    // again"): the synthesis engine pauses ITSELF mid-utterance and after brief
+    // idle, so the voice works, then silently stops. The documented workaround
+    // is to nudge it awake: resume() right after speak() (Chrome sometimes
+    // starts an utterance paused), then keep resuming while it's meant to be
+    // speaking. resume() on a healthy engine is a harmless no-op, and iOS
+    // ignores it — so this is safe on every platform.
+    try { speechSynthesis.resume(); } catch { /* older engines */ }
+    keepAlive = setInterval(() => {
+      if (speechSynthesis.speaking && !done) { try { speechSynthesis.resume(); } catch { /* */ } }
+      else { clearInterval(keepAlive); keepAlive = null; }
+    }, 4000);
   });
 }
 
