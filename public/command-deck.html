@@ -463,9 +463,12 @@ function layout() {
            : 'minmax(280px,340px) minmax(420px,1fr) minmax(300px,380px)');
   $('hud-left').style.order = narrow ? 2 : 0;
   $('ops-grid').style.gridTemplateColumns = narrow ? '1fr' : '1fr 1fr';
-  // CORE = the brain full screen; HUD = compact orb in the center column
+  // CORE = the brain full screen; HUD = compact orb in the center column.
+  // On a PHONE the conversation is the primary surface (move 31), so the orb
+  // becomes a compact header (~28% of height) and the transcript takes the
+  // rest — not a 320px orb crowding the reply into a sliver.
   const orb = S.view === 'core'
-    ? Math.round(Math.min(h * 0.52, w * 0.82))
+    ? (phone ? Math.round(Math.min(h * 0.28, w * 0.55)) : Math.round(Math.min(h * 0.52, w * 0.82)))
     : (narrow ? Math.min(240, Math.max(160, w - 80)) : (mid ? 220 : 280));
   $('orb-wrap').style.width = orb + 'px';
   $('orb-wrap').style.height = orb + 'px';
