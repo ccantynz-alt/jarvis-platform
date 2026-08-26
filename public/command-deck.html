@@ -461,9 +461,13 @@ function layout() {
   // #center-stack between CORE and HUD; the tab elements and their handlers
   // travel with it, so nothing else changes.
   const phone = w < 700;
+  // The top tab row wrapped to four ugly rows and collided with the header at
+  // iPad width (move 31 phase 2). Phone AND tablet get the single-row bottom
+  // tab bar — thumb-reachable, no wrap; only true desktop keeps top tabs.
+  const bottomTabs = w < 1180;
   const tabs = $('tabs'), bar = $('tabbar'), slot = $('tabs-slot');
-  if (phone && tabs.parentElement !== bar) { bar.appendChild(tabs); bar.classList.add('on'); }
-  else if (!phone && tabs.parentElement !== slot) { slot.appendChild(tabs); bar.classList.remove('on'); }
+  if (bottomTabs && tabs.parentElement !== bar) { bar.appendChild(tabs); bar.classList.add('on'); }
+  else if (!bottomTabs && tabs.parentElement !== slot) { slot.appendChild(tabs); bar.classList.remove('on'); }
   $('view-hud').style.gridTemplateColumns =
       phone ? '1fr'
     : tablet ? 'minmax(240px,320px) minmax(360px,1fr)'   // two-pane: C-suite left, everything else right
