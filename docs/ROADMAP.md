@@ -77,6 +77,21 @@ live (`mcp.gatetest.ai`).
 ### Phase 5 — INTERFACE (the product)
 20. 🔄 Jarvis Gateway MVP — private mesh, streaming brain, voice in/out. Tailscale mesh + jarvis-gateway (:9208, `tailscale serve` HTTPS) are live and voice-tested; iPad/phone shakedown is ongoing. Spec: docs/GATEWAY.md.
 21. 🔄 Embodied Jarvis — lip-synced live avatar + one custom voice (TTS via Vapron). **Custom-voice half live 2026-07-16:** ElevenLabs neural voice is wired into the Command Deck (`src/lib/tts.js`, `GET /tts` on :9210 — cache, daily char budget, `TTS_DISABLED` kill switch; awaiting a valid `ELEVENLABS_API_KEY`). Avatar half untouched; Vapron-hosted TTS remains the end-state.
+31. 🔄 **Mobile command centre — Marco on iPhone/iPad.** Craig, 2026-08-27:
+    "much better access… incredibly professional with great intelligence
+    including orchestration" — all four use-cases (reporting, directions,
+    maintaining platforms, coding), both voice + text flawless. Recon found the
+    foundations strong (installable PWA, Tailscale-identity auth, resilient
+    reconnect, honest-data discipline, governance gates) and the gap to be
+    *surfacing the rich server data beautifully on mobile* + iPad tuning, not
+    re-plumbing. **Phase 1a–c done + screenshot-verified:** the mobile
+    conversation is now persistent, timestamped, rehydrated on connect, open by
+    default, tap-to-copy, with a compact orb so the transcript owns the screen
+    (`public/command-deck.html`, `src/deck-server.js`). **Next:** Phase 2 iPad
+    two-pane master/detail + typography; Phase 3 professional reporting (OPS
+    filter/drill-down/history/KPIs); Phase 4 orchestration from the phone (live
+    job logs, build-stage progress, diffs, job actions behind the double-confirm);
+    Phase 5 iOS voice depth + a neural-voice path that works on iOS.
 
 ### Phase 6 — SHOWCASE (the estate builds platforms) — added 2026-08-25
 30. 🔄 **The build pipeline — "Marco, build me a platform."** Craig, 2026-08-25:

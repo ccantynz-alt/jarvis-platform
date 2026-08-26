@@ -1,5 +1,5 @@
 {
-  "updated": "2026-08-25",
+  "updated": "2026-08-27",
   "phases": [
     {
       "name": "STABILIZE",
@@ -158,6 +158,12 @@
           "title": "Embodied Jarvis — lip-synced live avatar + one custom voice (TTS via Vapron)",
           "status": "in_progress",
           "note": "custom-voice half LIVE 2026-07-16: ElevenLabs neural voice on the Command Deck (src/lib/tts.js, GET /tts on :9210, cache+budget+TTS_DISABLED kill switch; awaiting valid ELEVENLABS_API_KEY). Avatar half untouched. Vapron-hosted TTS still the end-state per estate model."
+        },
+        {
+          "id": 31,
+          "title": "Mobile command centre — Marco on iPhone/iPad: reporting, directions, maintaining, coding (professional, both voice+text flawless)",
+          "status": "in_progress",
+          "note": "Craig 2026-08-27: 'much better access... incredibly professional with great intelligence including orchestration', all four use-cases, both flawless. Recon: strong PWA/auth/reconnect foundations; gaps are surfacing rich server data on mobile + iPad tuning + persistent chat + orchestration visibility + voice depth. Phase 1a-c DONE+screenshot-verified: persistent timestamped conversation, rehydrated on connect, mobile-open, tap-to-copy, compact orb so the transcript owns the screen. Next: iPad two-pane layout; OPS filter/drill-down/history; live job logs+build progress+diffs+job actions; iOS voice depth + neural voice path. Logic: public/command-deck.html, src/deck-server.js."
         }
       ]
     },
