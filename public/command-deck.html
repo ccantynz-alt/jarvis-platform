@@ -76,6 +76,25 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .chat-time{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:1px;color:#5b7583;flex-shrink:0}
 .chat-msg{cursor:pointer}
 .chat-msg.copied{outline:1px solid rgba(0,229,255,.7);outline-offset:1px}
+/* OPS reporting (move 31 phase 3): KPI strip, filter chips, detail sheet */
+.kpi-strip{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+@media(max-width:520px){.kpi-strip{grid-template-columns:repeat(2,1fr)}}
+.kpi{border:1px solid rgba(0,229,255,.16);background:rgba(8,16,26,.6);border-radius:5px;padding:10px 12px;min-width:0}
+.kpi .kv{font-family:'Michroma',sans-serif;font-size:24px;line-height:1.1}
+.kpi .kl{font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:1.5px;color:#6b8a9e;margin-top:4px}
+.kpi .ks{font-size:10px;color:#5f7a8c;margin-top:2px}
+.chip-row{display:flex;flex-wrap:wrap;gap:5px;margin:2px 0 4px}
+.chip{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.8px;padding:3px 9px;border-radius:11px;border:1px solid rgba(0,229,255,.25);color:#8fb4c4;cursor:pointer;user-select:none;min-height:24px;display:inline-flex;align-items:center}
+.chip.on{background:rgba(0,229,255,.16);border-color:rgba(0,229,255,.6);color:#dcedf6}
+.sheet-back{position:fixed;inset:0;background:rgba(2,6,12,.72);backdrop-filter:blur(3px);display:none;align-items:flex-end;justify-content:center;z-index:60}
+.sheet-back.on{display:flex}
+.sheet{width:100%;max-width:640px;max-height:82vh;overflow-y:auto;background:linear-gradient(180deg,rgba(10,20,30,.98),rgba(6,12,20,.98));border:1px solid rgba(0,229,255,.3);border-radius:14px 14px 0 0;padding:18px 18px calc(18px + env(safe-area-inset-bottom));box-shadow:0 -8px 40px rgba(0,0,0,.6)}
+@media(min-width:700px){.sheet-back{align-items:center}.sheet{border-radius:12px}}
+.sheet h3{font-family:'Michroma',sans-serif;font-size:15px;color:#dcedf6;margin:0 0 4px;line-height:1.35;overflow-wrap:anywhere}
+.sheet .sf{display:flex;gap:10px;padding:7px 0;border-top:1px solid rgba(255,255,255,.06);font-size:13px}
+.sheet .sf .k{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:1px;color:#6b8a9e;flex:none;width:96px;padding-top:2px}
+.sheet .sf .v{color:#e6f4fa;overflow-wrap:anywhere;min-width:0;flex:1}
+.sheet-close{margin-top:14px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px;color:#00e5ff;border:1px solid rgba(0,229,255,.35);border-radius:6px;padding:10px;cursor:pointer}
 .chat-msg.jarvis .chat-who{color:#00e5ff}
 .chat-msg.you .chat-who{color:#ffb547}
 .chat-text{font-size:14px;line-height:1.45;color:#dcedf6}
@@ -312,6 +331,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 
     <!-- OPS VIEW — the work itself: inbox, code findings, agent reports, job queue -->
     <div id="view-ops" class="view hidden" style="overflow:auto;padding:18px">
+      <div id="ops-kpi" class="kpi-strip"></div>
       <div id="ops-situation-wrap" class="ops-panel" style="min-width:0;display:none;flex-direction:column;gap:10px;border:1px solid rgba(0,229,255,.25);background:linear-gradient(180deg,rgba(6,20,28,.75),rgba(6,12,20,.6));border-radius:4px;padding:16px 18px;margin-bottom:14px">
         <div style="display:flex;align-items:center;gap:10px">
           <div class="section-label" style="color:#00e5ff">SITUATION</div>
@@ -337,6 +357,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
         </div>
         <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
           <div class="section-label">CODE FINDINGS · <span id="ops-fcounts" class="mono" style="letter-spacing:1px"></span></div>
+          <div id="ops-fchips" class="chip-row"></div>
           <div id="ops-findings" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;max-height:44vh"></div>
         </div>
         <div class="ops-panel" style="min-width:0;display:flex;flex-direction:column;gap:8px;border:1px solid rgba(0,229,255,.12);background:rgba(8,14,24,.6);border-radius:4px;padding:12px;min-height:200px">
@@ -366,6 +387,13 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
      preference list with no way to see what this device actually has,
      test it, or pick. On iOS the Google voice does not exist and the
      fallback order was invisible. -->
+<!-- OPS drill-down detail sheet (move 31 phase 3) -->
+<div id="detail-sheet-back" class="sheet-back"><div class="sheet" role="dialog" aria-label="Detail">
+  <h3 id="detail-title"></h3>
+  <div id="detail-body"></div>
+  <div id="detail-close" class="sheet-close" role="button" tabindex="0">CLOSE</div>
+</div></div>
+
 <div id="voice-sheet-wrap" class="hidden"><div id="voice-sheet" role="dialog" aria-label="Voice settings">
   <div class="vs-row"><label for="vs-voice">VOICE</label><select id="vs-voice"></select></div>
   <div class="vs-row"><label for="vs-rate">RATE <span id="vs-rate-v">1.02</span></label><input id="vs-rate" type="range" min="0.8" max="1.3" step="0.02" value="1.02"></div>
@@ -815,7 +843,9 @@ function agoc(iso) {
 //  - the meta column competed with the title at the same weight → smaller,
 //    dimmer, and it never wraps.
 // All content is set via textContent — every title here is agent-written text.
-function opsRow(color, main, meta, dim) {
+// detail (move 31 phase 3): when given {title, fields}, a tap opens the
+// drill-down sheet instead of just un-clamping the row in place.
+function opsRow(color, main, meta, dim, detail) {
   const el = document.createElement('div');
   el.style.cssText = 'display:flex;align-items:flex-start;gap:10px;font-size:13px;line-height:1.45;'
     + 'padding:6px 8px;border-left:3px solid ' + color + ';border-radius:0 3px 3px 0;'
@@ -831,8 +861,57 @@ function opsRow(color, main, meta, dim) {
   // the clamp off so the whole finding/report is readable in place. Buttons
   // inside a row (proposal verdicts) still get their click first.
   el.classList.add('ops-row');
-  el.addEventListener('click', (e) => { if (e.target.closest('[role="button"],button,a')) return; el.classList.toggle('expanded'); });
+  if (detail) { el.style.cursor = 'pointer'; el.title = 'Tap for detail'; }
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('[role="button"],button,a')) return;
+    if (detail) openSheet(detail.title, detail.fields);
+    else el.classList.toggle('expanded');
+  });
   return el;
+}
+
+// ── OPS drill-down sheet + KPI strip + filters (move 31 phase 3) ──────────────
+function openSheet(title, fields) {
+  $('detail-title').textContent = title || 'Detail';
+  const body = $('detail-body'); body.innerHTML = '';
+  for (const [k, v] of (fields || [])) {
+    if (v == null || v === '') continue;
+    const row = document.createElement('div'); row.className = 'sf';
+    const kk = document.createElement('div'); kk.className = 'k'; kk.textContent = k;
+    const vv = document.createElement('div'); vv.className = 'v'; vv.textContent = String(v);
+    row.appendChild(kk); row.appendChild(vv); body.appendChild(row);
+  }
+  $('detail-sheet-back').classList.add('on');
+}
+function closeSheet() { $('detail-sheet-back').classList.remove('on'); }
+$('detail-close').onclick = closeSheet;
+$('detail-sheet-back').addEventListener('click', (e) => { if (e.target.id === 'detail-sheet-back') closeSheet(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+
+let findingFilter = 'all';
+function renderKpi() {
+  const o = S.ops, strip = $('ops-kpi'); if (!o || !strip) return;
+  const fc = o.findingCounts || [];
+  const bySev = (s) => fc.find(c => c.severity === s)?.n || 0;
+  const openF = fc.reduce((s, c) => s + (c.n || 0), 0);
+  const critHigh = bySev('critical') + bySev('high');
+  const unread = o.inbox?.unread || 0;
+  const active = (o.jobs || []).filter(j => j.status === 'running' || j.status === 'queued').length;
+  const props = (o.proposals || []).length;
+  const tiles = [
+    { v: openF, l: 'OPEN FINDINGS', s: critHigh ? critHigh + ' crit/high' : 'none urgent', c: critHigh ? '#ff8f5c' : '#3dffa0' },
+    { v: unread, l: 'INBOX UNREAD', s: unread ? 'need a look' : 'inbox zero', c: unread ? '#ffb547' : '#3dffa0' },
+    { v: active, l: 'JOBS ACTIVE', s: 'queued + running', c: active ? '#00e5ff' : '#5f7a8c' },
+    { v: props, l: 'AWAITING YOU', s: props ? 'proposals to decide' : 'nothing pending', c: props ? '#ffb547' : '#3dffa0' },
+  ];
+  strip.innerHTML = '';
+  for (const t of tiles) {
+    const el = document.createElement('div'); el.className = 'kpi';
+    const kv = document.createElement('div'); kv.className = 'kv'; kv.style.color = t.c; kv.textContent = t.v;
+    const kl = document.createElement('div'); kl.className = 'kl'; kl.textContent = t.l;
+    const ks = document.createElement('div'); ks.className = 'ks'; ks.textContent = t.s;
+    el.append(kv, kl, ks); strip.appendChild(el);
+  }
 }
 
 // A collapsible group header — turns 60 flat finding rows into 8 scannable
@@ -983,6 +1062,7 @@ function renderOps() {
   const o = S.ops;
   if (!o) return;
   renderReview();
+  renderKpi();
   if (o.inbox) {
     $('ops-unread').textContent = o.inbox.unread;
     const box = $('ops-inbox'); box.innerHTML = '';
@@ -1008,13 +1088,30 @@ function renderOps() {
       .slice().sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9))
       .map(c => c.n + ' ' + c.severity).join(' · ');
     $('ops-fcounts').textContent = counts ? counts + ' OPEN' : 'NONE OPEN';
+    // Severity filter chips (move 31 phase 3): only offer severities that are
+    // actually present, plus ALL. Clicking re-renders through findingFilter.
+    const fchips = $('ops-fchips');
+    if (fchips) {
+      const present = ['critical', 'high', 'medium', 'low'].filter(s => o.findings.some(f => f.severity === s));
+      if (!present.some(s => s === findingFilter) && findingFilter !== 'all') findingFilter = 'all';
+      fchips.innerHTML = '';
+      for (const s of ['all', ...present]) {
+        const c = document.createElement('div');
+        c.className = 'chip' + (findingFilter === s ? ' on' : '');
+        c.textContent = s === 'all' ? 'ALL' : s.toUpperCase();
+        c.setAttribute('role', 'button'); c.tabIndex = 0;
+        c.onclick = () => { findingFilter = s; renderOps(); };
+        fchips.appendChild(c);
+      }
+    }
+    const shown = findingFilter === 'all' ? o.findings : o.findings.filter(f => f.severity === findingFilter);
     const box = $('ops-findings'); box.innerHTML = '';
-    if (!o.findings.length) { box.textContent = 'No open findings.'; box.style.fontSize = '13px'; box.style.color = '#5f7a8c'; }
+    if (!shown.length) { box.textContent = o.findings.length ? 'None at this severity.' : 'No open findings.'; box.style.fontSize = '13px'; box.style.color = '#5f7a8c'; }
     else {
       // Group by platform, worst platform first. A flat list of 60 rows answers
       // no question; "which platform is in trouble" is the first thing to know.
       const byPlat = new Map();
-      for (const f of o.findings) {
+      for (const f of shown) {
         if (!byPlat.has(f.platform)) byPlat.set(f.platform, []);
         byPlat.get(f.platform).push(f);
       }
@@ -1030,7 +1127,14 @@ function renderOps() {
         for (const f of list) {
           g.body.appendChild(opsRow(SEV_COLOR[f.severity] || '#7d99aa',
             f.title + (f.file ? '  — ' + f.file : ''),
-            f.severity + (f.seen > 1 ? ' ×' + f.seen : '')));
+            f.severity + (f.seen > 1 ? ' ×' + f.seen : ''),
+            false,
+            { title: f.title, fields: [
+              ['PLATFORM', f.platform], ['SEVERITY', f.severity], ['KIND', f.kind],
+              ['FILE', f.file], ['STATUS', f.status],
+              ['SEEN', f.seen ? f.seen + '×' : null],
+              ['LAST SEEN', f.last_seen ? agoc(f.last_seen) : null], ['ID', f.id],
+            ] }));
         }
         box.appendChild(g.wrap);
       });
@@ -1040,7 +1144,11 @@ function renderOps() {
     const box = $('ops-reports'); box.innerHTML = '';
     for (const r of o.reports) {
       box.appendChild(opsRow(RPT_COLOR[r.status] || '#7d99aa',
-        r.agent + ' — ' + r.summary, (r.status === 'ok' ? '' : r.status + ' · ') + agoc(r.ts)));
+        r.agent + ' — ' + r.summary, (r.status === 'ok' ? '' : r.status + ' · ') + agoc(r.ts),
+        false,
+        { title: r.agent, fields: [
+          ['STATUS', r.status], ['FILED', agoc(r.ts)], ['REPORT', r.summary],
+        ] }));
     }
     if (!o.reports.length) box.textContent = 'No reports filed yet.';
   }
@@ -1049,7 +1157,14 @@ function renderOps() {
     for (const j of o.jobs) {
       box.appendChild(opsRow(JOB_COLOR[j.status] || '#7d99aa',
         (j.platform ? '[' + j.platform + '] ' : '') + j.task,
-        j.status + ' · ' + agoc(j.finished_at || j.created_at)));
+        j.status + ' · ' + agoc(j.finished_at || j.created_at),
+        false,
+        { title: (j.platform ? '[' + j.platform + '] ' : '') + j.task, fields: [
+          ['PLATFORM', j.platform], ['STATUS', j.status], ['RUNTIME', j.runtime],
+          ['STARTED', j.created_at ? agoc(j.created_at) : null],
+          ['FINISHED', j.finished_at ? agoc(j.finished_at) : null],
+          ['EXIT', j.exit_code == null ? null : String(j.exit_code)], ['JOB', j.id],
+        ] }));
     }
     if (!o.jobs.length) box.textContent = 'Queue empty.';
   }
