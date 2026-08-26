@@ -468,7 +468,7 @@ function layout() {
   // becomes a compact header (~28% of height) and the transcript takes the
   // rest — not a 320px orb crowding the reply into a sliver.
   const orb = S.view === 'core'
-    ? (phone ? Math.round(Math.min(h * 0.28, w * 0.55)) : Math.round(Math.min(h * 0.52, w * 0.82)))
+    ? (phone ? Math.round(Math.min(h * 0.2, w * 0.42)) : Math.round(Math.min(h * 0.52, w * 0.82)))
     : (narrow ? Math.min(240, Math.max(160, w - 80)) : (mid ? 220 : 280));
   $('orb-wrap').style.width = orb + 'px';
   $('orb-wrap').style.height = orb + 'px';
@@ -490,6 +490,10 @@ layout();
 if (window.matchMedia('(max-width:700px)').matches) {
   const c = $('chat');
   if (c) { c.classList.remove('collapsed'); const b = $('btn-history'); if (b) b.textContent = '✕ HIDE HISTORY'; }
+  // The big centred reply and the heard-line duplicate what the open
+  // transcript already shows (streaming lands in the transcript too), so on a
+  // phone they only steal the vertical space the conversation should own.
+  for (const id of ['latest-reply', 'heard-line']) { const e = $(id); if (e) e.style.display = 'none'; }
 }
 
 // ── C-suite tiles (keyed, update-in-place so riseIn doesn't replay) ─────────
