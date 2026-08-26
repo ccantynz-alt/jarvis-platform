@@ -162,8 +162,8 @@
         {
           "id": 31,
           "title": "Mobile command centre — Marco on iPhone/iPad: reporting, directions, maintaining, coding (professional, both voice+text flawless)",
-          "status": "in_progress",
-          "note": "Craig 2026-08-27: 'much better access... incredibly professional with great intelligence including orchestration', all four use-cases, both flawless. Recon: strong PWA/auth/reconnect foundations; gaps are surfacing rich server data on mobile + iPad tuning + persistent chat + orchestration visibility + voice depth. Phase 1a-c DONE+screenshot-verified: persistent timestamped conversation, rehydrated on connect, mobile-open, tap-to-copy, compact orb so the transcript owns the screen. Next: iPad two-pane layout; OPS filter/drill-down/history; live job logs+build progress+diffs+job actions; iOS voice depth + neural voice path. Logic: public/command-deck.html, src/deck-server.js."
+          "status": "done",
+          "note": "DONE 2026-08-27 (build loop, 5 phases, each screenshot-verified). 1: persistent timestamped mobile conversation, rehydrated on connect, open by default, tap-to-copy. 2: iPad tablet tier — two-pane HUD (C-suite|feed), two-column OPS, single-row bottom tabs. 3: professional OPS reporting — KPI strip, findings severity filter chips, tap-through drill-down sheet. 4: orchestration from the phone — proposal drill-down + VIEW DIFF + APPROVE/REJECT in-sheet, job VIEW LOG via new GET /api/ops/job/:id. 5: always-visible colour-coded voice-state pill (LISTENING/SPEAKING/THINKING/TAP TO TALK/MIC OFF). Neural voice stayed OFF per TTS_DISABLED ruling. Files: public/command-deck.html, src/deck-server.js."
         }
       ]
     },
