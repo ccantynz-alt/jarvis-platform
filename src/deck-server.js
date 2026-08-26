@@ -392,6 +392,24 @@ app.post('/api/ops/inbox-read', async (req, res) => {
   }
 });
 
+// Job log tail (move 31 phase 4): the phone can pull a finished/running job's
+// captured output + error so orchestration is inspectable from the deck, not
+// just a status word. Read-only; auth-gated like the other ops routes.
+app.get('/api/ops/job/:id', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const r = await fetch(`${MEMORY}/memory/jobs/${encodeURIComponent(req.params.id)}`, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return res.status(r.status).json({ error: `job ${req.params.id} not found` });
+    const j = await r.json();
+    res.json({
+      id: j.id, status: j.status, platform: j.platform, exit_code: j.exit_code ?? j.exitCode ?? null,
+      output: (j.output || '').slice(-8000), error: (j.error || '').slice(-2000),
+    });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 const authCookieHeader = (token) =>
   `${AUTH_COOKIE}=${encodeURIComponent(token)}; Max-Age=${COOKIE_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax; Secure`;
 

@@ -94,6 +94,8 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .sheet .sf{display:flex;gap:10px;padding:7px 0;border-top:1px solid rgba(255,255,255,.06);font-size:13px}
 .sheet .sf .k{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:1px;color:#6b8a9e;flex:none;width:96px;padding-top:2px}
 .sheet .sf .v{color:#e6f4fa;overflow-wrap:anywhere;min-width:0;flex:1}
+.sheet-acts{display:none;gap:8px;margin-top:14px;flex-wrap:wrap}
+.detail-log{margin-top:12px;max-height:40vh;overflow:auto;background:rgba(2,6,12,.9);border:1px solid rgba(0,229,255,.15);border-radius:6px;padding:10px;font-family:'IBM Plex Mono',monospace;font-size:11px;line-height:1.5;color:#b9d6e2;white-space:pre-wrap;overflow-wrap:anywhere}
 .sheet-close{margin-top:14px;text-align:center;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px;color:#00e5ff;border:1px solid rgba(0,229,255,.35);border-radius:6px;padding:10px;cursor:pointer}
 .chat-msg.jarvis .chat-who{color:#00e5ff}
 .chat-msg.you .chat-who{color:#ffb547}
@@ -391,6 +393,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 <div id="detail-sheet-back" class="sheet-back"><div class="sheet" role="dialog" aria-label="Detail">
   <h3 id="detail-title"></h3>
   <div id="detail-body"></div>
+  <div id="detail-actions" class="sheet-acts"></div>
   <div id="detail-close" class="sheet-close" role="button" tabindex="0">CLOSE</div>
 </div></div>
 
@@ -864,14 +867,14 @@ function opsRow(color, main, meta, dim, detail) {
   if (detail) { el.style.cursor = 'pointer'; el.title = 'Tap for detail'; }
   el.addEventListener('click', (e) => {
     if (e.target.closest('[role="button"],button,a')) return;
-    if (detail) openSheet(detail.title, detail.fields);
+    if (detail) openSheet(detail.title, detail.fields, detail.actions);
     else el.classList.toggle('expanded');
   });
   return el;
 }
 
 // ── OPS drill-down sheet + KPI strip + filters (move 31 phase 3) ──────────────
-function openSheet(title, fields) {
+function openSheet(title, fields, actions) {
   $('detail-title').textContent = title || 'Detail';
   const body = $('detail-body'); body.innerHTML = '';
   for (const [k, v] of (fields || [])) {
@@ -881,7 +884,50 @@ function openSheet(title, fields) {
     const vv = document.createElement('div'); vv.className = 'v'; vv.textContent = String(v);
     row.appendChild(kk); row.appendChild(vv); body.appendChild(row);
   }
+  // Action buttons (move 31 phase 4): the sheet can carry real actions —
+  // view a diff, approve/reject a proposal, view a job log — so a decision is
+  // made from the full context, not a truncated row. Each callback gets its
+  // own button so decideProposal's arm→CONFIRM→fire double-confirm still works.
+  const acts = $('detail-actions'); acts.innerHTML = '';
+  for (const a of (actions || [])) {
+    const b = document.createElement('div');
+    b.setAttribute('role', 'button'); b.tabIndex = 0; b.className = 'mono';
+    const col = a.color || '#00e5ff';
+    b.style.cssText = `flex:1 1 40%;text-align:center;font-size:11px;letter-spacing:1px;color:${col};border:1px solid ${col}55;border-radius:6px;padding:11px 8px;cursor:pointer;min-height:42px`;
+    b.textContent = a.label;
+    b.onclick = () => a.onClick(b);
+    acts.appendChild(b);
+  }
+  acts.style.display = (actions && actions.length) ? 'flex' : 'none';
   $('detail-sheet-back').classList.add('on');
+}
+function openProposalSheet(p) {
+  const fields = [
+    ['ID', '#' + p.id], ['DOMAIN', p.domain], ['PLATFORM', p.platform],
+    ['STATUS', p.status], ['RISK', p.risk], ['CLASS', p.change_class],
+    ['RATIONALE', p.rationale],
+    ['REVIEWER', p.reviewed_by], ['NOTES', p.review_notes], ['CREATED BY', p.created_by],
+  ];
+  const actions = [];
+  if (p.artifact_url) actions.push({ label: '▸ VIEW DIFF', color: '#00e5ff', onClick: () => window.open(p.artifact_url, '_blank', 'noopener') });
+  const open = ['proposed', 'under_review', 'escalated'].includes(p.status);
+  if (open && p.artifact_url) actions.push({ label: 'APPROVE', color: '#3dffa0', onClick: (b) => decideProposal(p.id, 'approve', b) });
+  if (open) actions.push({ label: 'REJECT', color: '#ff4d6a', onClick: (b) => decideProposal(p.id, 'reject', b) });
+  openSheet(`#${p.id} ${p.title}`, fields, actions);
+}
+// Pull a job's captured stdout/stderr into the open sheet (move 31 phase 4).
+function viewJobLog(id, btn) {
+  const was = btn.textContent; btn.textContent = '…';
+  fetch('/api/ops/job/' + encodeURIComponent(id)).then(r => r.json()).then(d => {
+    btn.textContent = was;
+    if (d && d.error && !d.output && !d.status) { btn.textContent = 'ERR'; return; }
+    const body = $('detail-body');
+    let pre = document.getElementById('detail-log');
+    if (!pre) { pre = document.createElement('pre'); pre.id = 'detail-log'; pre.className = 'detail-log'; body.appendChild(pre); }
+    const out = (d.output || '').trim();
+    pre.textContent = (d.error ? 'stderr:\n' + d.error + '\n\n' : '') + (out || (d.error ? '' : '(no output captured for this job)'));
+    pre.scrollTop = pre.scrollHeight;
+  }).catch(() => { btn.textContent = 'ERR'; });
 }
 function closeSheet() { $('detail-sheet-back').classList.remove('on'); }
 $('detail-close').onclick = closeSheet;
@@ -985,7 +1031,10 @@ function renderReview() {
         '<a class="ra mono" target="_blank" rel="noopener" style="font-size:10px;color:#00e5ff"></a>' +
         '<div class="racts" style="margin-left:auto;display:flex;gap:6px"></div>' +
       '</div>';
-    row.querySelector('.rt').textContent = `#${p.id} [${p.domain}] ${p.title}`;
+    const rt = row.querySelector('.rt');
+    rt.textContent = `#${p.id} [${p.domain}] ${p.title}`;
+    rt.style.cursor = 'pointer'; rt.title = 'Tap for the full proposal + diff';
+    rt.onclick = () => openProposalSheet(p);
     row.querySelector('.rs').textContent = `${p.status} · ${p.risk} · ${p.change_class}`;
     row.querySelector('.rr').textContent = p.review_notes ? `${p.rationale}  —  ${p.reviewed_by || 'officer'}: ${p.review_notes}` : p.rationale;
     const a = row.querySelector('.ra');
@@ -1164,6 +1213,8 @@ function renderOps() {
           ['STARTED', j.created_at ? agoc(j.created_at) : null],
           ['FINISHED', j.finished_at ? agoc(j.finished_at) : null],
           ['EXIT', j.exit_code == null ? null : String(j.exit_code)], ['JOB', j.id],
+        ], actions: [
+          { label: '▸ VIEW LOG', color: '#00e5ff', onClick: (b) => viewJobLog(j.id, b) },
         ] }));
     }
     if (!o.jobs.length) box.textContent = 'Queue empty.';
