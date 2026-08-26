@@ -43,7 +43,7 @@ import { runAgent, hasAgent, maybeBrainSwitch, getBrainProvider, noteBrainDegrad
 import { authHold } from './lib/claude-auth.js';
 import { synthesize, ttsEnabled } from './lib/tts.js';
 import { openTtsStream } from './lib/tts-stream.js';
-import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn } from './lib/transcript.js';
+import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn, msgText } from './lib/transcript.js';
 import { spawnClaude } from './lib/spawn-agent.js';
 import { modelFor } from './lib/model-routing.js';
 import { situationFingerprint, situationPrompt, parseSituation, needsAttention } from './lib/situation.js';
@@ -1068,6 +1068,19 @@ wss.on('connection', (ws, req) => {
   send({ type: 'brain', ...brainState() });   // honest from the first frame (move 33)
   for (const f of [...state.feedCache].reverse()) send({ type: 'feed', ...f });
   for (const w of [...state.wireCache].reverse()) send({ type: 'wire', ...w });
+
+  // Rehydrate the conversation on connect (mobile command-centre, move 31): the
+  // phone/iPad boots into a REAL scrollable transcript, not the single ephemeral
+  // line it showed before. Non-blocking; a cold transcript store is an empty
+  // history, never a failure. Only string-content user/assistant turns cross.
+  loadTranscript().then((transcript) => {
+    if (!Array.isArray(transcript) || !transcript.length) return;
+    const turns = transcript
+      .filter((mm) => (mm.role === 'user' || mm.role === 'assistant') && msgText(mm).trim())
+      .slice(-40)
+      .map((mm) => ({ who: mm.role === 'user' ? 'YOU' : 'MARCO', text: msgText(mm).slice(0, 4000), ts: mm.ts || null }));
+    if (turns.length) send({ type: 'history', turns });
+  }).catch(() => {});
 
   // Voice v2 (docs/VOICE-V2.md): per-connection streaming-speech session.
   // voiceSession.discard flips on interrupt — the brain may keep generating,

@@ -71,7 +71,11 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
 .chat-msg{max-width:85%;border-radius:4px;padding:8px 12px;animation:riseIn .3s ease both}
 .chat-msg.jarvis{align-self:flex-start;border:1px solid rgba(0,229,255,.25);background:rgba(6,18,26,.7)}
 .chat-msg.you{align-self:flex-end;border:1px solid rgba(255,181,71,.3);background:rgba(30,22,8,.6)}
-.chat-who{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px;margin-bottom:3px}
+.chat-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:3px}
+.chat-who{font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:2px}
+.chat-time{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:1px;color:#5b7583;flex-shrink:0}
+.chat-msg{cursor:pointer}
+.chat-msg.copied{outline:1px solid rgba(0,229,255,.7);outline-offset:1px}
 .chat-msg.jarvis .chat-who{color:#00e5ff}
 .chat-msg.you .chat-who{color:#ffb547}
 .chat-text{font-size:14px;line-height:1.45;color:#dcedf6}
@@ -477,6 +481,14 @@ function layout() {
 window.addEventListener('resize', layout);
 layout();
 
+// Mobile boots with the conversation OPEN — on a phone the transcript IS the
+// primary surface (move 31). Desktop keeps the orb-first CORE with history
+// behind the ☰ toggle. One-time at boot so it never fights a manual toggle.
+if (window.matchMedia('(max-width:700px)').matches) {
+  const c = $('chat');
+  if (c) { c.classList.remove('collapsed'); const b = $('btn-history'); if (b) b.textContent = '✕ HIDE HISTORY'; }
+}
+
 // ── C-suite tiles (keyed, update-in-place so riseIn doesn't replay) ─────────
 const tileEls = new Map();
 function renderAgents() {
@@ -516,18 +528,33 @@ function renderAgents() {
 }
 
 // ── Chat ─────────────────────────────────────────────────────────────────────
-function addChat(who, text, speechText) {
+function fmtChatTime(ts) {
+  try { return new Date(ts).toLocaleTimeString('en-NZ', { hour: 'numeric', minute: '2-digit', hour12: true }); }
+  catch { return ''; }
+}
+// ts/mute set only when REHYDRATING history (move 31): a rehydrated turn shows
+// its stored time and is never re-spoken. A live turn stamps 'now' and speaks
+// as before, so every existing caller keeps working unchanged.
+function addChat(who, text, speechText, ts, mute) {
   const el = document.createElement('div');
   el.className = 'chat-msg ' + (who === 'YOU' ? 'you' : 'jarvis');
+  const head = document.createElement('div'); head.className = 'chat-head';
   const w = document.createElement('div'); w.className = 'chat-who'; w.textContent = who;
+  const tm = document.createElement('div'); tm.className = 'chat-time';
+  tm.textContent = fmtChatTime(ts != null ? ts : Date.now());
+  head.appendChild(w); head.appendChild(tm);
   const t = document.createElement('div'); t.className = 'chat-text'; t.textContent = text;
-  el.appendChild(w); el.appendChild(t);
+  el.appendChild(head); el.appendChild(t);
+  el.title = 'Tap to copy';
+  el.addEventListener('click', () => {
+    try { navigator.clipboard.writeText(text); el.classList.add('copied'); setTimeout(() => el.classList.remove('copied'), 700); } catch { /* clipboard blocked off-https — no-op */ }
+  });
   const box = $('chat');
   box.appendChild(el);
-  while (box.children.length > 50) box.firstChild.remove();
+  while (box.children.length > 200) box.firstChild.remove();
   box.scrollTop = box.scrollHeight;
   if (who === 'MARCO') $('latest-reply').textContent = text;
-  if (who === 'MARCO' && speechText !== null) speak(speechText || text);
+  if (who === 'MARCO' && speechText !== null && !mute) speak(speechText || text);
   return t;
 }
 
@@ -2600,6 +2627,17 @@ function handleMsg(m) {
   }
   else if (m.type === 'queues' && Array.isArray(m.queues)) { S.queues = m.queues; renderQueues(); }
   else if (m.type === 'platforms' && Array.isArray(m.platforms)) { S.platforms = m.platforms; renderPlatforms(); }
+  else if (m.type === 'history' && Array.isArray(m.turns)) {
+    // Boot the conversation into a real transcript (move 31). Rehydrated turns
+    // carry their stored time and are muted (never re-spoken on reconnect).
+    const box = $('chat');
+    if (box && !box.dataset.hydrated) {
+      box.innerHTML = '';
+      for (const turn of m.turns) addChat(turn.who, turn.text, null, turn.ts ?? null, true);
+      box.dataset.hydrated = '1';
+      box.scrollTop = box.scrollHeight;
+    }
+  }
   else if (m.type === 'ops') { S.ops = m; renderOps(); }
   else if (m.type === 'situation') { S.situation = m; renderSituation(); }
   else if (m.type === 'brain') {
