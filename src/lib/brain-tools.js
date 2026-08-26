@@ -140,7 +140,7 @@ export async function statusDigest(gate = null) {
 
 // ── Tool schemas exposed to the model ────────────────────────────────────────
 export const TOOLS = [
-  { name: 'get_status', description: "DEFAULT choice for any vague 'how's everything' / 'how are we doing' question — overall system + all-platform health snapshot (server CPU/RAM/disk, Jarvis services, each platform's state) in ONE call. Don't also call get_audit_status or get_loop_alerts for a general question — only reach for those when he specifically asks about audits/health-scores or about stuck/looping work.",
+  { name: 'get_status', description: "DEFAULT choice for any vague 'how's everything' / 'how are we doing' question — overall system + all-platform health snapshot (server CPU/RAM/disk, Marco's own services, each platform's state) in ONE call. Don't also call get_audit_status or get_loop_alerts for a general question — only reach for those when he specifically asks about audits/health-scores or about stuck/looping work.",
     input_schema: { type: 'object', properties: {}, required: [] } },
   { name: 'get_platform_status', description: "Health/state of ONE platform, incl. why it might be slow/down. Also returns a fresh screenshot when the platform has a public URL.",
     input_schema: { type: 'object', properties: { platform: { type: 'string', description: 'platform name' } }, required: ['platform'] } },
@@ -150,13 +150,13 @@ export const TOOLS = [
       title: { type: 'string', description: 'short heading for the panel, e.g. the business or page name' },
       note: { type: 'string', description: 'one line of context to show under the image (optional)' },
     }, required: ['url'] } },
-  { name: 'get_lessons', description: "Durable lessons the flywheel distilled from past coding sessions — gotchas, environment facts, failed approaches, Craig's standing corrections. Use before staging work on a platform, or when he asks what Jarvis has learned.",
+  { name: 'get_lessons', description: "Durable lessons the flywheel distilled from past coding sessions — gotchas, environment facts, failed approaches, Craig's standing corrections. Use before staging work on a platform, or when he asks what Marco has learned.",
     input_schema: { type: 'object', properties: {
       platform: { type: 'string', description: 'only lessons for this platform (omit for all)' },
     }, required: [] } },
   { name: 'list_jobs', description: 'Currently running and recent orchestrator jobs (Claude agents working on platforms).',
     input_schema: { type: 'object', properties: {}, required: [] } },
-  { name: 'query_memory', description: "Ask Jarvis's long-term memory a history/knowledge question (what broke, what happened, past issues).",
+  { name: 'query_memory', description: "Ask Marco's long-term memory a history/knowledge question (what broke, what happened, past issues).",
     input_schema: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'] } },
   { name: 'get_briefing', description: 'The morning/daily rundown across every platform, plus running jobs.',
     input_schema: { type: 'object', properties: {}, required: [] } },

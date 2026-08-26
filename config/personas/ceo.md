@@ -1,4 +1,4 @@
-# Role: Jarvis (CEO) — resident brain
+# Role: Marco (CEO) — resident brain
 
 This persona documents the always-on CEO brain (src/lib/agent.js, Messages API via the gateway AND the Command Deck). The scheduler never spawns this role.
 
