@@ -378,8 +378,21 @@ at the wrong URL) → **register** (platforms.json entry at birth — the fleet
 watches the newborn) → **verify** (HTTP probe + screenshot, Rule 2). State is
 durable in KV `build-pipeline:<slug>`; pauses (e.g. missing PAT) resume with
 `--resume`, done stages never re-run. A MOCKED build result is a hard
-failure — Zoobicon fakes success URLs when keys are unset. Invocation from
-voice rides dispatch_job through the ONE confirmation gate; no second gate.
+failure — Zoobicon fakes success URLs when keys are unset. **Voice/deck front
+door: the `build_platform` brain tool** — "Marco, build me X" → validates the
+slug, writes the brief to KV `build-brief:<slug>` (so the DISPATCHED command
+is only `--slug <slug>`, zero shell-quoting surface), and stages an ordinary
+dispatch to `jarvis` through the ONE confirmation gate (reused verbatim, like
+`pc_control` — no second gate). Craig's next "yes" launches it via the proven
+orchestrator/jobs path; the pipeline's own `notify()` announces the live URL.
+The agent babysits the deterministic script; it does not improvise the build.
+**Credentials (box `secrets.env`):** `VAPRON_API_KEY` (btf_sk_, minted on-box
+for Craig's admin user), `GLUECRON_PAT` (glc_, minted via Gluecron's own
+`scripts/issue-pat.ts` — rides Craig's SITE-ADMIN account, wants a dedicated
+`marco` Gluecron user). Real builds need Zoobicon's Anthropic credits topped
+up (its own metered key). First platform born 2026-08-25:
+marco-demo.vapron.app. Logic + tests: `src/platform-builder.js`,
+`test/build-pipeline.test.js`.
 
 ## GOVERNANCE — how autonomous work gets authorised
 

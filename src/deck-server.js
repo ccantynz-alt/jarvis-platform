@@ -842,6 +842,7 @@ async function pollPlatforms() {
     const uptime = s && s.total >= 2 ? ((100 * s.up / s.total) >= 99.995 ? '100%' : (100 * s.up / s.total).toFixed(2) + '%') : '—';
     return {
       name: host, desc: PLATFORM_DESC[p.name] || (p.tech_stack || []).join(' · '),
+      monitored: p.monitor !== false,   // non-products (monitor:false) never sit in NEEDS ATTENTION (2026-08-20)
       status, uptime,
       latency: h?.latencyMs ?? '—',
       build: done ? `#${done} ${lastJob?.exit_code === 0 ? '✓' : '✗'}` : '—',

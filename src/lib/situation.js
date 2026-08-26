@@ -47,7 +47,7 @@ export function situationFingerprint(data = {}) {
     .map(p => `${p.id}:${p.status}`)
     .sort();
   const platforms = (data.platforms || [])
-    .filter(p => p.status && p.status !== 'OPERATIONAL')
+    .filter(p => p.status && p.status !== 'OPERATIONAL' && p.monitored !== false)
     .map(p => `${p.name}:${p.status}`)
     .sort();
   const failedJobs = (data.jobs || [])
@@ -89,7 +89,7 @@ export function situationPrompt(data = {}) {
   }
   lines.push('');
   lines.push('=== PLATFORMS NOT FULLY HEALTHY ===');
-  const bad = (data.platforms || []).filter(p => p.status && p.status !== 'OPERATIONAL');
+  const bad = (data.platforms || []).filter(p => p.status && p.status !== 'OPERATIONAL' && p.monitored !== false);
   lines.push(bad.length ? bad.map(p => `- ${p.name}: ${p.status}`).join('\n') : 'all operational');
   lines.push('');
   lines.push('=== RECENT WORK ===');
