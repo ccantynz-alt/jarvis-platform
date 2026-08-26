@@ -305,6 +305,12 @@ async function main() {
     process.exit(2);
   }
 
+  // The brief may come on the CLI or from KV `build-brief:<slug>`. The voice
+  // path (build_platform tool) writes it to KV so the DISPATCHED command is
+  // just `--slug <slug>` — no brief in argv means no shell-quoting surface for
+  // the agent that runs it (the injection the KV hand-off exists to remove).
+  if (!args.brief && !args.resume) args.brief = await kvGet(`build-brief:${args.slug}`);
+
   let state = await kvGet(kvKey(args.slug));
   if (state && !args.resume) {
     console.error(`a pipeline for "${args.slug}" already exists (${state.status}) — pass --resume to continue it`);
