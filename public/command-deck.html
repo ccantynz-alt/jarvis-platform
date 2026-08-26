@@ -449,6 +449,12 @@ $('clock').textContent = ts();
 function layout() {
   const w = window.innerWidth, h = window.innerHeight;
   const narrow = w < 1180, mid = w >= 1180 && w < 1400;
+  // Tablet tier (move 31 phase 2): iPad (portrait 768-834, landscape 1024-1194)
+  // used to fall into `narrow` and get a shrunken single-column PHONE-less
+  // desktop — top tabs, one column, wasted width. It now gets a real two-pane
+  // layout that USES the width, while the phone (<700) keeps its bottom-bar
+  // single-column form.
+  const tablet = w >= 700 && w < 1180;
   // Phone (< 700px, 2026-08-19): the six tabs wrapped the topbar to ~3 rows
   // and ate 150px of a 390px screen. Move #tabs into the bottom bar above the
   // command line — thumb-reachable, one row. Same reparenting trick as
@@ -458,11 +464,18 @@ function layout() {
   const tabs = $('tabs'), bar = $('tabbar'), slot = $('tabs-slot');
   if (phone && tabs.parentElement !== bar) { bar.appendChild(tabs); bar.classList.add('on'); }
   else if (!phone && tabs.parentElement !== slot) { slot.appendChild(tabs); bar.classList.remove('on'); }
-  $('view-hud').style.gridTemplateColumns = narrow ? '1fr'
+  $('view-hud').style.gridTemplateColumns =
+      phone ? '1fr'
+    : tablet ? 'minmax(240px,320px) minmax(360px,1fr)'   // two-pane: C-suite left, everything else right
     : (mid ? 'minmax(240px,280px) minmax(360px,1fr) minmax(260px,320px)'
            : 'minmax(280px,340px) minmax(420px,1fr) minmax(300px,380px)');
-  $('hud-left').style.order = narrow ? 2 : 0;
-  $('ops-grid').style.gridTemplateColumns = narrow ? '1fr' : '1fr 1fr';
+  $('hud-left').style.order = phone ? 2 : 0;
+  // Tablet HUD is a clean two-pane (agents | live feed): the decorative centre
+  // orb slot is hidden so the two real panels fill the width instead of the
+  // feed wrapping under an orb.
+  $('hud-center-slot').style.display = tablet ? 'none' : 'flex';
+  // OPS: phone one column; tablet and up two columns (uses the iPad width).
+  $('ops-grid').style.gridTemplateColumns = phone ? '1fr' : '1fr 1fr';
   // CORE = the brain full screen; HUD = compact orb in the center column.
   // On a PHONE the conversation is the primary surface (move 31), so the orb
   // becomes a compact header (~28% of height) and the transcript takes the
