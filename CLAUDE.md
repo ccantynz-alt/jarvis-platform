@@ -131,7 +131,7 @@ oneshot MUST set `TimeoutStartSec` explicitly (the default is no timeout).
 | jarvis-fix-runner | 30 min | `src/fix-runner.js`: closes the loop — worst CONFIRMED, pushable, unclaimed findings → opens a proposal → ONE repair agent each (max 1/platform/tick), branch `jarvis/fix-<id>` only. Gates in src/lib/fix-dispatch.js (confirmed-only, git remote required, no dupes, denied platforms, CAUTION_RE — prose beats enum). Never marks findings fixed | **live** |
 | jarvis-review-runner | 20 min | `src/review-runner.js`: spawns the OWNING officer to review open proposals — ONCE per proposal per artifact (KV `review-verdict:<id>` + an info inbox row; 2026-08-19: the rotation was re-deciding the same 16 diffs forever, up to 216 turns/day) | **dry-run** |
 | jarvis-harvester | 1 h | `src/session-harvester.js`: **the flywheel** (2026-08-07) — indexes every quiet CLI transcript into `coding_sessions` (redacted metadata; raw stays on disk), then distills each real session with one capped agent turn into `lessons` (deduped by fingerprint, `seen_count` on recurrence). Brain CONVERSATION sessions excluded by construction (the 2026-08-06 privacy lesson). Injection: session-start.sh prints a platform's lessons; brain tool `get_lessons`. **Phase 2 (2026-08-08):** also pulls 158 transcripts (tailnet rsync, `HARVEST_REMOTE`) and Craig's PC (read-only `harvest.list`/`harvest.get` PC verbs, cursor in KV `harvest-pc-cursor`). PC dispatch is single-flight with fate tracking (2026-08-10): a queued/running harvester PC job blocks new dispatch, and a permanent refusal — even one landing after the wait window (KV `harvest-pc-last-list-job`) — trips the daily stale-worker back-off (KV `harvest-pc-stale-worker-day`; `pcListPlan()` in lib/harvest.js). Backlog burn at `HARVEST_DISTILL_MAX=10` newest-first until the ~458-session backlog clears, then RESTORE to 3. Logic + tests: `src/lib/harvest.js`, `test/harvest.test.js`, `test/pc-actions.test.js` | **live** |
-| jarvis-experience | 30 min | `src/experience-check.js`: **the only thing watching what CRAIG notices**, as opposed to what the machine notices (2026-08-11, from "how do we keep improving" — for a week every real fault was found by him while 12 services stayed green). Seven checks, each citing the incident that earned it: deploy drift (production ran two days on an agent branch while pulls said "up to date"), voice honesty (`/health` said `tts:true` for a day while every synthesis 503'd), brain on a SUBSCRIPTION provider (2026-07-25 silent metered billing), notification flood rate (235 pushes in 48h), PC-worker silence >4h, the `show_me` capture path, and **agent spawns** — 2026-08-16: both claude.ai logins expired, every box-local spawn failed in ~2s, and all eight autonomous timers did nothing for THREE DAYS while twelve services stayed green; the only symptom was an absence (no new code findings). Reads KV `claude-last-spawn-ok`, written by spawn-agent.js on every spawn that authenticates. **Announces on CHANGE, once daily while unchanged, once on recovery — never at `alert` level**, because a timer that can reach push.js's alert exemption IS the flood. Read-only; repairs nothing. Logic + tests: `src/lib/experience.js`, `test/experience.test.js` | **live** |
+| jarvis-experience | 30 min | `src/experience-check.js`: **the only thing watching what CRAIG notices**, as opposed to what the machine notices (2026-08-11, from "how do we keep improving" — for a week every real fault was found by him while 12 services stayed green). Eight checks, each citing the incident that earned it: deploy drift (production ran two days on an agent branch while pulls said "up to date"), voice honesty (`/health` said `tts:true` for a day while every synthesis 503'd), brain on a SUBSCRIPTION provider (2026-07-25 silent metered billing), notification flood rate (235 pushes in 48h), PC-worker silence >4h, the `show_me` capture path, **agent spawns** — 2026-08-16: both claude.ai logins expired, every box-local spawn failed in ~2s, and all eight autonomous timers did nothing for THREE DAYS while twelve services stayed green; the only symptom was an absence (no new code findings). Reads KV `claude-last-spawn-ok`, written by spawn-agent.js on every spawn that authenticates. — and (2026-08-27) **the alert channel itself**: `checkAlertChannel` reads KV `push-devices` directly (so it still answers when the deck is down) and reports the two things the box CAN see — whether any device-push transport exists at all, and whether anything has actually reached a device recently. A registered device that has never received one is a registration, not a channel. **Announces on CHANGE, once daily while unchanged, once on recovery — never at `alert` level**, because a timer that can reach push.js's alert exemption IS the flood. Read-only; repairs nothing. Logic + tests: `src/lib/experience.js`, `test/experience.test.js` | **live** |
 | jarvis-mail-watch | 5 min | `src/mail-watch.js`: watches **marco@alecrae.com** — Marco's standing copy of Craig's email (Craig 2026-08-25: copies only, "he won't need to reply unless I ask him to"). Reads the mailbox via the AlecRae API with scoped `ALECRAE_MARCO_API_KEY` (never the co-tenant DB), diffs against KV `mail-watch-cursor`, files AT MOST ONE `info` inbox row per tick (bursts batch; first run baselines silently); cannot-read state announces ONCE (KV `mail-watch-degraded`), once on recovery. Brain reads mail on demand: `check_mail` tool. Logic + tests: `src/lib/mail-watch.js`, `test/mail-watch.test.js` | **live** |
 | jarvis-backup / jarvis-vapron-backup | daily 03:30 / 04:17 UTC | SQLite backup; pull + verify off-box copy of box 158's Vapron DB | — |
 
@@ -263,6 +263,38 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
 - **One transcript for all surfaces:** src/lib/transcript.js, KV
   `jarvis-conversation`; saves MERGE (never overwrite), write nothing if the
   store is unreachable.
+
+## DEVICE ALERTS (2026-08-27) — full account in docs/ALERTS.md
+
+- **The phone and iPad leg is Web Push through the deck PWA**, not a second app.
+  Craig: *"we need smart alerts pushed and enabled through to the mobile and
+  ipad devices."* The deck is already installed on both (move 31) and iOS 16.4+
+  delivers Web Push to a home-screen PWA, so the surface he already opens is the
+  one that wakes him. RFC 8291/8292 implemented on `node:crypto` alone in
+  `src/lib/webpush.js` — **no `web-push` package** (Rule 5); devices in KV
+  `push-devices` via `src/lib/push-subs.js`, pruned on the 404/410 that says one
+  is dead. ntfy stays as the fallback. **Turn it on:** deck → ⚙ → DEVICE ALERTS
+  → ENABLE ON THIS DEVICE → TEST ALERT (iOS needs Add to Home Screen first; the
+  sheet says so rather than reporting a permission error).
+- **TWO transports, ONE set of gates.** `pushAlert()` runs level, hourly cap and
+  dedupe once and hands the result to both legs. A second bespoke pipeline is
+  where the next incident lives (principle 4), and it would have meant every
+  noise rule applying to half the alerts.
+- **Triage lives in `src/lib/alert-smart.js`**, pure and tested: quiet hours
+  **22:00–07:00 NZ** hold a `warn` for a morning digest naming what it was;
+  **an `alert` is NEVER held** (that is the 3am case the whole channel exists
+  for); `info` never buzzes at any hour; a collapse key per headline stops a
+  pocketed phone unlocking to eleven copies; every alert carries the deck tab
+  that answers it, so the tap lands on OPS/PLATFORMS/HIERARCHY/FLOW rather than
+  wherever he was. Rate-cap overflow is HELD for the digest now, not dropped.
+  The digest is flushed by the orchestrator's existing 30s loop — not a tenth
+  timer. Env: `ALERT_QUIET_START`/`ALERT_QUIET_END`/`ALERT_HOLD_MAX_MINUTES`.
+- **`config/vapid.json` (0600, gitignored) is permanent.** The public key is
+  baked into every subscription a browser ever made; regenerating it silently
+  invalidates every registered device.
+- **Nothing on the box can prove a specific phone buzzed.** That is known debt
+  #1 in one sentence. `jarvis-experience`'s `checkAlertChannel` reports what it
+  CAN see; the TEST ALERT button is the rest.
 
 ## PC WORKER (Craig's Windows machine)
 
@@ -472,6 +504,7 @@ src/                  services (one file each — see the services table)
 src/lib/              pure logic + shared surfaces (findings, fix-dispatch,
                       proposals, guardrail, pc-actions, transcript, tts,
                       brain-*, conversation, checkout, audit-noise, push,
+                      webpush, push-subs, alert-smart, experience,
                       cookies, slack-auth, service-verdict, health-status)
 test/                 node:test suites — every lib has one; regression tests
                       carry their incident
@@ -512,6 +545,12 @@ auth).
   test.js` runs on the box only.
 - Repeat-identical audits go QUIET (info/digest) past 2 repeats — but break
   DIFFERENTLY and they're loud again. Nothing is ever dropped.
+- **`guardrail()` with `allowZero:true` returned 0 for an UNSET variable** until
+  2026-08-27 — `Number('')` is 0, not NaN, so the fallback was unreachable and
+  the feature silently disabled itself, inside the module written to prevent
+  exactly that. Unset/blank now short-circuits to the fallback; regression tests
+  in `test/guardrail.test.js`. Every allowZero caller on the box set its variable
+  explicitly, so it was latent, not live.
 - **An alert about something the monitor cannot fix needs a HUMAN's rate limit,
   not a monitor's.** `alert` is exempt from push dedupe AND the hourly cap, so a
   `notify()` inside a 5-minute timer loop is 288 buzzes a day (2026-08-10: 235
@@ -578,7 +617,11 @@ auth).
    (see SECOND BOX) probes both of the master's paths every 5 min; its
    `--test-alert` landed in the ntfy topic cache at max priority the day it
    was installed. **The single remaining step is Craig's: confirm a DEVICE
-   actually buzzed** (subscribe in the ntfy app if not) — then this clears.
+   actually buzzed** — and since 2026-08-27 there is a button for it rather than
+   an app to install: open the deck on the phone/iPad, ⚙ → DEVICE ALERTS →
+   ENABLE ON THIS DEVICE, then TEST ALERT (it reports per device: "sent to
+   1/1"). Web Push through the deck PWA is now the primary device leg; ntfy is
+   the fallback. See VOICE→ALERTS below and docs/ALERTS.md.
    The GitHub Actions watcher (`offbox-watchdog.yml`, ~hourly, GitHub
    throttles hard) stays as the second, fully-independent leg; its own push
    half still wants the `NTFY_TOPIC` repo secret, and its job-failure email

@@ -219,6 +219,125 @@
           "note": "Approved 2026-08-25 (Craig: 'boom lets go'). Phase 1 = internal dogfood: confirmation gate → one orchestrator pipeline job → Gluecron repo + AI-built app + Vapron subdomain deploy + registry-at-birth, ends with URL/repo/screenshot. Phase 2 customers via Zoobicon checkout (needs CentralNic PROD creds — current are OT&E sandbox; Zoobicon estate migration; debt #2). Phase 3 = issue→AI PR→AI review→deploy loop."
         }
       ]
+    },
+    {
+      "name": "SHARPEN",
+      "subtitle": "Marco notices first, and says so",
+      "moves": [
+        {
+          "id": 32,
+          "title": "Smart alerts to the phone and iPad — Web Push through the deck PWA",
+          "status": "in_progress",
+          "note": "Shipped 2026-08-27 (Craig: 'we need smart alerts pushed and enabled through to the mobile and ipad devices'). RFC 8291/8292 in src/lib/webpush.js on node:crypto alone (no web-push package, Rule 5); devices in KV via src/lib/push-subs.js; triage in src/lib/alert-smart.js — quiet hours 22:00-07:00 NZ hold a warn for a morning digest and NEVER hold an alert, collapse keys stop a pocketed phone piling up, deep links open the deck tab that answers it. Both transports ride the ONE existing gate set (dedupe/cap/level). Deck: GET|POST /api/push/{key,subscribe,unsubscribe,devices,test}, sw.js push+notificationclick, enable/test in the settings sheet. 647 tests green incl. a real decrypt round-trip and ES256 verification. IN PROGRESS not done: the device leg needs Craig's one tap (ENABLE ON THIS DEVICE, then TEST ALERT) — which is also what closes KNOWN DEBT #1."
+        },
+        {
+          "id": 33,
+          "title": "The alert canary — a synthetic alert proving the phone leg still works",
+          "status": "pending",
+          "note": "This channel's failure mode is an absence; jarvis-experience's alert_channel check only sees as far as 'registered and has succeeded before'."
+        },
+        {
+          "id": 34,
+          "title": "Acknowledge, then escalate — unacked alerts get louder, acked ones go quiet",
+          "status": "pending",
+          "note": "Today 'still broken' and 'he has seen it' produce identical repeats — the voxlen alert five days running."
+        },
+        {
+          "id": 35,
+          "title": "Actionable alerts — approve, dispatch or dismiss from the notification",
+          "status": "pending",
+          "note": "OPS already has every verdict path; the alert should reach it in one tap, not four."
+        },
+        {
+          "id": 36,
+          "title": "One health verdict per platform (per-writer columns + derived status)",
+          "status": "pending",
+          "note": "KNOWN DEBT #4. Three writers race on platform_state.status. Needs memory-server + fleet-check + orchestrator + audit-runner in one commit, with Craig awake."
+        },
+        {
+          "id": 37,
+          "title": "Findings get an exit path — age open low/medium to stale, or widen the re-check",
+          "status": "pending",
+          "note": "KNOWN DEBT #8. 308 of 618 findings were immortal on 2026-08-16. Craig's call: it changes what the backlog number means."
+        },
+        {
+          "id": 38,
+          "title": "Incident correlation — N alerts about one root cause become one incident",
+          "status": "pending"
+        },
+        {
+          "id": 39,
+          "title": "Noise scoring — sources he never opens demote themselves to the digest",
+          "status": "pending"
+        },
+        {
+          "id": 40,
+          "title": "Predictive alerts — domains, certs, disk, memory and quota projected forward",
+          "status": "pending",
+          "note": "gatetest.ai's domain died in redemption and was re-diagnosed twelve times; date arithmetic would have said so in June."
+        },
+        {
+          "id": 41,
+          "title": "Baselines, not thresholds — alert on deviation from each platform's own normal",
+          "status": "pending"
+        },
+        {
+          "id": 42,
+          "title": "The brief arrives as a push, not only as speech",
+          "status": "pending",
+          "note": "Briefings exist today only if a deck is open and listening."
+        },
+        {
+          "id": 43,
+          "title": "Ask back — replying to an alert by voice loads THAT alert's context",
+          "status": "pending"
+        },
+        {
+          "id": 44,
+          "title": "Alert → proposal → approved fix, entirely from the phone",
+          "status": "pending",
+          "note": "Every piece exists (fix-runner, governance, OPS verdicts, move 31 drill-down); the end-to-end motion has never been run once."
+        },
+        {
+          "id": 45,
+          "title": "Credential scoping + server-side branch protection",
+          "status": "pending",
+          "note": "KNOWN DEBT #5. One root key writes to every product repo; pre-push hooks are local-only. ~10 minutes of Craig's time; prerequisite for review-runner going live."
+        },
+        {
+          "id": 46,
+          "title": "Guardrail conformance — prove every env limit actually gates",
+          "status": "pending",
+          "note": "Earned 2026-08-27: guardrail() returned 0 instead of the fallback for any UNSET variable when allowZero was set, because Number('') is 0 — a silent disable inside the module written to prevent silent disables. Fixed with a regression test; the class needs a sweep."
+        },
+        {
+          "id": 47,
+          "title": "Real journeys, not HTTP 200 — one scripted user journey per platform",
+          "status": "pending"
+        },
+        {
+          "id": 48,
+          "title": "Cost and model telemetry, with a budget alarm",
+          "status": "pending",
+          "note": "Today the only signal that spend went wrong is a usage limit at the worst moment."
+        },
+        {
+          "id": 49,
+          "title": "The estate incident timeline — one ordered story across both boxes",
+          "status": "pending"
+        },
+        {
+          "id": 50,
+          "title": "LESSONS.md distils itself from the harvester's lessons table",
+          "status": "pending",
+          "note": "The flywheel stops one step short of the file every session reads."
+        },
+        {
+          "id": 51,
+          "title": "Second-box alert redundancy — 158 pushes when the master's own path is broken",
+          "status": "pending"
+        }
+      ]
     }
   ]
 }

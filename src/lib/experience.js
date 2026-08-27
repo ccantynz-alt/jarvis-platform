@@ -271,6 +271,58 @@ export function checkAgentSpawns({ secondsSinceOk, staleAfter = 6 * 3600 }) {
 }
 
 /** show_me depends on the guarded render path; a dead browser service kills it silently. */
+/**
+ * Can an alert still REACH a device? (2026-08-27)
+ *
+ * The eighth check, and it exists for the same reason as the seventh: the only
+ * symptom of this failing is an absence. KNOWN DEBT #1 sat open for a month on
+ * one unanswered question — did a device ever actually buzz? — while every
+ * layer underneath reported success. A subscription dies silently when the PWA
+ * is deleted, permission is revoked, or the phone is restored from a backup,
+ * and the only notice is a 404 on a send that may not happen for days.
+ *
+ * So this asks two things the rest of the stack cannot:
+ *   - is there ANY device-push transport at all (ntfy topic, or a registered
+ *     device)? Zero of both means every alert since is decoration.
+ *   - has anything actually been delivered to a device recently, or are all the
+ *     registered ones accumulating failures?
+ *
+ * `warn`, never `alert`: the gotcha at the top of this file applies to itself.
+ */
+export function checkAlertChannel({ ntfy, devices = [], staleDays = 14, now = Date.now() } = {}) {
+  const live = devices.filter(d => (d.fails || 0) < 5);
+  if (!ntfy && !devices.length) {
+    return result('alert_channel', false, {
+      severity: 'critical', incident: '2026-08-27',
+      detail: 'no device-push transport at all — no ntfy topic and no registered device; every alert is decoration',
+    });
+  }
+  if (devices.length && !live.length) {
+    return result('alert_channel', false, {
+      severity: 'warn', incident: '2026-08-27',
+      detail: `all ${devices.length} registered device(s) are failing repeatedly — the phone leg is dead`,
+    });
+  }
+  // A device that has NEVER succeeded is a registration that was never proven.
+  const everOk = devices.filter(d => d.lastOk);
+  if (devices.length && !everOk.length) {
+    return result('alert_channel', false, {
+      severity: 'warn', incident: '2026-08-27',
+      detail: `${devices.length} device(s) registered but none has ever received an alert — send a test`,
+    });
+  }
+  const newest = everOk.reduce((max, d) => Math.max(max, Date.parse(d.lastOk) || 0), 0);
+  if (devices.length && newest && (now - newest) > staleDays * 86400_000) {
+    const days = Math.round((now - newest) / 86400_000);
+    return result('alert_channel', false, {
+      severity: 'warn', incident: '2026-08-27',
+      detail: `no alert has reached a device in ${days} days — quiet, or broken, and they look identical`,
+    });
+  }
+  const legs = [ntfy ? 'ntfy' : null, live.length ? `${live.length} device(s)` : null].filter(Boolean).join(' + ');
+  return result('alert_channel', true, { detail: `device push live via ${legs}` });
+}
+
 export function checkShowMe({ browserOk }) {
   return browserOk
     ? result('show_me', true, { detail: 'capture path healthy' })

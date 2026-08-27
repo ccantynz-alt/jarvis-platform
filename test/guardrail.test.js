@@ -60,6 +60,33 @@ test('zero is accepted when it is a meaningful setting', () => {
   assert.equal(guardrail(NAME, 5, { allowZero: true }), 0);
 });
 
+// 2026-08-27. Number('') is 0, not NaN, so with allowZero:true an UNSET
+// variable passed the `n >= 0` check and returned 0 — the fallback was
+// unreachable. allowZero is asked for precisely where 0 means "off", so this
+// silently disabled the feature and logged nothing. Found by quiet hours never
+// being quiet; every allowZero caller on the box set its variable explicitly,
+// so this was latent rather than live.
+test('an UNSET variable returns its fallback even when zero is allowed', () => {
+  delete process.env[NAME];
+  assert.equal(guardrail(NAME, 22, { allowZero: true }), 22);
+  assert.equal(guardrail(NAME, 7, { allowZero: true }), 7);
+  assert.equal(guardrail(NAME, 5), 5, 'and the ordinary path is unchanged');
+});
+
+test('a blank or whitespace-only variable is treated as unset, not as zero', () => {
+  for (const blank of ['', '   ', '\t']) {
+    process.env[NAME] = blank;
+    assert.equal(guardrail(NAME, 9, { allowZero: true }), 9, JSON.stringify(blank));
+  }
+});
+
+test('an explicit 0 still wins over the fallback — that is what allowZero is for', () => {
+  process.env[NAME] = '0';
+  assert.equal(guardrail(NAME, 9, { allowZero: true }), 0);
+  process.env[NAME] = '0 # disabled';
+  assert.equal(guardrail(NAME, 9, { allowZero: true }), 0, 'inline comments still stripped');
+});
+
 test('the result is ALWAYS finite — nothing downstream can compare against NaN', () => {
   for (const v of ['', '   ', 'abc', 'NaN', 'Infinity', '# nope']) {
     process.env[NAME] = v;

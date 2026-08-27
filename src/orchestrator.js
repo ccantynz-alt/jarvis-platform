@@ -15,6 +15,7 @@ import { getAgent, buildAgentPrompt } from './lib/agents.js';
 import { guardrail, clampLimit } from './lib/guardrail.js';
 import { planAction, encodeActionJob, workerKnowsVerb } from './lib/pc-actions.js';
 import { jobWritesPlatformHealth } from './lib/health-status.js';
+import { flushHeld } from './lib/push.js';
 import { installInternalAuth } from './lib/internal-http.js';
 installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
@@ -1593,6 +1594,15 @@ app.listen(PORT, '127.0.0.1', async () => {
   await recoverInterruptedJobs();
   setInterval(schedulerTick, SCHEDULER_TICK_MS);
   setInterval(fireDueReminders, 30_000);   // the memory pen's alarm (move 14)
+  // The overnight digest (2026-08-27). Rides this loop rather than becoming a
+  // tenth systemd timer: it needs a process that is always up and it returns
+  // immediately unless lib/alert-smart.js says the held queue is due. Errors
+  // are swallowed for the same reason every other notification path swallows
+  // them — the alert plumbing must never take down the dispatcher.
+  setInterval(() => {
+    flushHeld().then(r => { if (r.flushed) console.log(`[orchestrator] held-alert digest sent: ${r.flushed} item(s), ${r.devices} device(s)`); })
+      .catch(e => console.warn(`[orchestrator] held digest failed: ${e.message}`));
+  }, 30_000);
   console.log(`[orchestrator] scheduler running (tick ${SCHEDULER_TICK_MS}ms, max ${MAX_CONCURRENT_JOBS} concurrent)`);
 });
 

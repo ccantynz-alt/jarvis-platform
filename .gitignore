@@ -20,5 +20,6 @@ config/secrets.env.bak*
 config/*.env.bak*
 *.bak.*
 config/deck.token
+config/vapid.json
 config/deck.env
 config/pc-worker.env

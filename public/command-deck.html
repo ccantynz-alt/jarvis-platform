@@ -423,6 +423,18 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
     <div id="vs-close" class="btn" role="button" tabindex="0">✕ CLOSE</div>
   </div>
   <div id="vs-note" class="mono" style="font-size:10px;color:#5f7a8c;letter-spacing:1px"></div>
+
+  <!-- Device alerts (2026-08-27). In the same sheet as voice on purpose: these
+       are the two settings that decide whether Marco can reach him when the
+       deck is not on screen, and a second sheet is a second thing to find. -->
+  <div class="vs-row" style="border-top:1px solid rgba(0,229,255,.18);padding-top:10px;margin-top:2px">
+    <label>DEVICE ALERTS</label><span id="vs-push-state" class="mono" style="font-size:11px;color:#ffb547">checking…</span>
+  </div>
+  <div class="vs-row" style="justify-content:flex-end;gap:8px">
+    <div id="vs-push-on" class="btn" role="button" tabindex="0">🔔 ENABLE ON THIS DEVICE</div>
+    <div id="vs-push-test" class="btn" role="button" tabindex="0">▶ TEST ALERT</div>
+  </div>
+  <div id="vs-push-note" class="mono" style="font-size:10px;color:#5f7a8c;letter-spacing:1px;line-height:1.5"></div>
 </div></div>
 
 <script>
@@ -482,10 +494,16 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Deep-link a view for screenshots / bookmarks: ?view=hud|org|flow|plat|ops
-const wantView = qs.get('view');
-if (wantView && TABS.some(([id]) => id === wantView) && wantView !== S.view) {
-  [...$('tabs').children][TABS.findIndex(([id]) => id === wantView)].click();
+// Also the landing point for a tapped alert: sw.js focuses an already-open deck
+// and posts {type:'show-view'}, because focusing a window does not re-read the
+// URL — without this the notification would open the deck on whatever tab it
+// was already showing, which is the tab he was not looking for.
+function showView(view) {
+  if (!view || !TABS.some(([id]) => id === view) || view === S.view) return;
+  const el = [...$('tabs').children][TABS.findIndex(([id]) => id === view)];
+  if (el) el.click();
 }
+showView(qs.get('view'));
 
 // ── Clock ────────────────────────────────────────────────────────────────────
 setInterval(() => { $('clock').textContent = ts(); }, 1000);
@@ -1620,7 +1638,8 @@ function renderVoiceSheet() {
   const sheet = $('voice-sheet-wrap'); if (!sheet) return;
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.classList.add('hidden'); });
   const open = () => { renderVoiceSheet(); $('vs-rate').value = voiceSetting('rate', 1.02); $('vs-pitch').value = voiceSetting('pitch', 0.9);
-    $('vs-rate-v').textContent = $('vs-rate').value; $('vs-pitch-v').textContent = $('vs-pitch').value; $('vs-lang').value = SR_LANG; sheet.classList.remove('hidden'); };
+    $('vs-rate-v').textContent = $('vs-rate').value; $('vs-pitch-v').textContent = $('vs-pitch').value; $('vs-lang').value = SR_LANG; sheet.classList.remove('hidden');
+    if (typeof renderPushState === 'function') renderPushState(); };
   const close = () => sheet.classList.add('hidden');
   const save = (k, v) => { try { v == null || v === '' ? localStorage.removeItem(VOICE_SETTINGS_KEYS[k]) : localStorage.setItem(VOICE_SETTINGS_KEYS[k], String(v)); } catch {} };
   $('btn-voice').onclick = () => sheet.classList.contains('hidden') ? open() : close();
@@ -3103,7 +3122,149 @@ $('cmd').addEventListener('keydown', (e) => {
 // QA/virtual-time captures (?ws=0 / ?sim=1) so headless renders stay pure.
 if ('serviceWorker' in navigator && !WS_DISABLED && !SIM_MODE) {
   navigator.serviceWorker.register('/sw.js').catch(e => console.warn('[deck] sw register failed:', e.message));
+  // A tapped notification focuses an already-open deck rather than opening a
+  // second one — but focusing does not reload, so the sw tells the live page
+  // which tab the alert was about (see sw.js notificationclick).
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data && e.data.type === 'show-view') showView(e.data.view);
+  });
 }
+
+// ── Device alerts (2026-08-27) ───────────────────────────────────────────────
+//
+// Craig: "we need smart alerts pushed and enabled through to the mobile and
+// ipad devices". iOS delivers Web Push ONLY to a PWA on the home screen, and
+// only after a real tap — so this cannot be armed automatically on first load,
+// and pretending otherwise would leave him believing in a channel that does not
+// exist. Hence a button, and a state line that reports what the BOX knows
+// rather than what this browser remembers.
+const b64ToBytes = (s) => {
+  const pad = '='.repeat((4 - (s.length % 4)) % 4);
+  const raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, (ch) => ch.charCodeAt(0));
+};
+
+function pushSupported() {
+  return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+}
+
+// navigator.serviceWorker.ready NEVER resolves if no worker is registered — it
+// does not reject, it simply waits forever. Awaiting it bare left the state line
+// reading "checking…" permanently, which is the same class of lie as a ⚠ BACKUP
+// VOICE badge for a deliberate setting: the UI claiming to be mid-something when
+// it has already finished failing. Bounded, and honest about the timeout.
+function swReady(ms = 4000) {
+  let ready;
+  try { ready = navigator.serviceWorker.ready; } catch { return Promise.resolve(null); }
+  return Promise.race([
+    Promise.resolve(ready).catch(() => null),
+    new Promise((res) => setTimeout(() => res(null), ms)),
+  ]);
+}
+
+// iOS gives Web Push to home-screen PWAs only. Saying so beats "permission
+// denied", which is what Safari reports and which sounds like a mistake he made.
+function iosNeedsInstall() {
+  const ios = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const standalone = window.navigator.standalone === true
+    || window.matchMedia('(display-mode: standalone)').matches;
+  return ios && !standalone;
+}
+
+// Wrapper, not a nicety: every path below must leave a STATE on screen. The
+// first version could reject mid-way and leave the line reading "checking…"
+// forever, which tells him the deck is still working on it when it has already
+// given up — the same lie in a different place.
+async function renderPushState() {
+  try { await renderPushStateInner(); }
+  catch (e) {
+    const el = $('vs-push-state');
+    if (el) { el.textContent = 'UNKNOWN'; el.style.color = '#ffb547'; }
+    $('vs-push-note').textContent = `Could not read alert state: ${e.message}`;
+  }
+}
+
+async function renderPushStateInner() {
+  const el = $('vs-push-state'), note = $('vs-push-note');
+  if (!el) return;
+  if (!pushSupported()) {
+    el.textContent = 'UNSUPPORTED'; el.style.color = '#7d95a3';
+    note.textContent = 'This browser has no Push API. Alerts still reach the ntfy app and the deck itself.';
+    return;
+  }
+  if (iosNeedsInstall()) {
+    el.textContent = 'ADD TO HOME SCREEN'; el.style.color = '#ffb547';
+    note.textContent = 'iOS only delivers alerts to an installed app: tap Share → Add to Home Screen, open MARCO from the icon, then enable here.';
+    return;
+  }
+  const reg = await swReady();
+  if (!reg) {
+    el.textContent = 'NO WORKER'; el.style.color = '#ffb547';
+    note.textContent = 'The service worker is not running on this tab, so alerts cannot be delivered to it. Reload the deck.';
+    return;
+  }
+  let mine = null;
+  try { mine = await reg.pushManager.getSubscription(); } catch {}
+  let server = { devices: [], held: 0 };
+  try { server = await (await fetch('/api/push/devices')).json(); } catch {}
+  const known = mine && server.devices && server.devices.length;
+  el.textContent = mine ? (known ? 'ON' : 'ON (device not registered)') : 'OFF';
+  el.style.color = mine && known ? '#00ff9d' : mine ? '#ffb547' : '#7d95a3';
+  const list = (server.devices || []).map(d => d.label).join(', ') || 'none';
+  note.textContent = `Registered on the box: ${list}.`
+    + (server.held ? ` ${server.held} held for the morning digest.` : '')
+    + (Notification.permission === 'denied' ? ' Notifications are blocked in this browser’s settings.' : '');
+}
+
+async function enablePush() {
+  const note = $('vs-push-note');
+  if (!pushSupported()) return;
+  if (iosNeedsInstall()) { renderPushState(); return; }
+  try {
+    // The permission prompt MUST be inside the tap — asking later (after an
+    // await that yields to the network) is silently refused on iOS.
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') { note.textContent = `Permission ${perm}. Enable notifications for this site, then try again.`; return; }
+    const { key } = await (await fetch('/api/push/key')).json();
+    if (!key) throw new Error('no VAPID key from the box');
+    const reg = await swReady();
+    if (!reg) throw new Error('the service worker is not running — reload the deck and try again');
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+    const label = iosNeedsInstall() ? 'iOS' : (/iPad/.test(navigator.userAgent) ? 'iPad'
+      : /iPhone/.test(navigator.userAgent) ? 'iPhone'
+      : /Android/.test(navigator.userAgent) ? 'Android' : 'desktop');
+    const r = await fetch('/api/push/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ subscription: sub.toJSON(), label }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    note.textContent = `Registered as ${j.label}. ${j.devices} device(s) will now be alerted.`;
+  } catch (e) {
+    note.textContent = `Could not enable: ${e.message}`;
+  }
+  renderPushState();
+}
+
+(function wirePushSheet() {
+  const on = $('vs-push-on'), test = $('vs-push-test');
+  if (!on || !test) return;
+  on.onclick = enablePush;
+  test.onclick = async () => {
+    const note = $('vs-push-note');
+    note.textContent = 'Sending…';
+    try {
+      const out = await (await fetch('/api/push/test', { method: 'POST' })).json();
+      // Per-device, deliberately: "ok" was the answer that let the ntfy leg sit
+      // unverified for a month. What matters is whether a DEVICE buzzed.
+      note.textContent = out.devices
+        ? `Sent to ${out.sent}/${out.devices} device(s). If nothing arrives, the subscription is stale — enable again.`
+        : 'No devices registered on the box yet — tap ENABLE first.';
+    } catch (e) { note.textContent = `Test failed: ${e.message}`; }
+    renderPushState();
+  };
+})();
 // ?demo-alert=1 renders a sample alert banner (screenshot/QA hook — the live
 // path is WS {type:'notify'}, which virtual-time captures can never witness).
 // ?core=idle|listening|thinking|speaking|alert — force the neural core into a

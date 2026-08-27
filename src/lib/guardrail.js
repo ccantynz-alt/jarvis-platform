@@ -52,8 +52,24 @@ export function clampLimit(raw, dflt = 50, max = 500) {
 
 export function guardrail(name, fallback, { source = 'guardrail', allowZero = false } = {}) {
   const raw = process.env[name];
+  // UNSET means "use the default", and it has to be decided BEFORE parsing
+  // (found 2026-08-27 while adding quiet hours to the alert layer).
+  //
+  // `Number('')` is 0, not NaN — one of the few places JavaScript coerces
+  // absence into a number rather than into NaN. So with allowZero:true, the
+  // `n >= 0` check below accepted that phantom zero and an UNSET variable
+  // returned 0 instead of its fallback: `guardrail('ALERT_QUIET_END', 7,
+  // {allowZero:true})` gave 0, and quiet hours silently became empty. The
+  // callers that ask for allowZero are exactly the ones where 0 means "off",
+  // so the failure mode is always a disabled feature that reports no error —
+  // this module's entire reason for existing, reproduced inside it.
+  //
+  // Every allowZero call site on the box today sets its variable explicitly, so
+  // nothing in production was running on a phantom zero; it was waiting for the
+  // next caller that relied on the default.
+  if (raw === undefined || String(raw).trim() === '') return fallback;
   // Take the leading token: "6 # per day" → "6". Whitespace or a # ends it.
-  const n = Number(String(raw ?? '').trim().split(/\s|#/)[0]);
+  const n = Number(String(raw).trim().split(/\s|#/)[0]);
   const ok = Number.isFinite(n) && (allowZero ? n >= 0 : n > 0);
   if (ok) return n;
   if (raw !== undefined && String(raw).trim() !== '') {

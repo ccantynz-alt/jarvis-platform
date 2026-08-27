@@ -187,3 +187,66 @@ test('the window is generous enough to survive one quiet code-health cadence', (
   assert.equal(checkAgentSpawns({ secondsSinceOk: 3.5 * 3600 }).ok, true);
   assert.equal(checkAgentSpawns({ secondsSinceOk: 6.5 * 3600 }).ok, false);
 });
+
+import { checkAlertChannel } from '../src/lib/experience.js';
+
+// ── checkAlertChannel (2026-08-27) ──────────────────────────────────────────
+//
+// The eighth check. Like checkAgentSpawns, its whole subject is an ABSENCE:
+// nothing else in the fleet can tell "no alerts because nothing is wrong" from
+// "no alerts because the channel is dead". KNOWN DEBT #1 was that ambiguity,
+// unresolved for a month.
+
+test('no transport at all is critical — every alert since was decoration', () => {
+  const r = checkAlertChannel({ ntfy: false, devices: [] });
+  assert.equal(r.ok, false);
+  assert.equal(r.severity, 'critical');
+  assert.match(r.detail, /no device-push transport/);
+});
+
+test('ntfy alone still counts as a channel', () => {
+  const r = checkAlertChannel({ ntfy: true, devices: [] });
+  assert.equal(r.ok, true);
+  assert.match(r.detail, /ntfy/);
+});
+
+test('a registered phone alone counts as a channel', () => {
+  const r = checkAlertChannel({ ntfy: false, devices: [{ label: 'iPhone', lastOk: new Date().toISOString(), fails: 0 }] });
+  assert.equal(r.ok, true);
+  assert.match(r.detail, /1 device/);
+});
+
+test('a device that has NEVER received an alert is a registration, not a channel', () => {
+  const r = checkAlertChannel({ ntfy: false, devices: [{ label: 'iPhone', lastOk: null, fails: 0 }] });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /none has ever received an alert/);
+});
+
+test('devices all failing repeatedly is reported as a dead phone leg', () => {
+  const r = checkAlertChannel({ ntfy: true, devices: [
+    { label: 'iPhone', lastOk: new Date().toISOString(), fails: 9 },
+    { label: 'iPad', lastOk: new Date().toISOString(), fails: 7 },
+  ] });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /failing repeatedly/);
+});
+
+test('a channel that has delivered nothing for weeks is flagged — quiet and broken look identical', () => {
+  const now = Date.parse('2026-08-27T00:00:00Z');
+  const old = new Date(now - 30 * 86400_000).toISOString();
+  const r = checkAlertChannel({ ntfy: false, devices: [{ label: 'iPhone', lastOk: old, fails: 0 }], now });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /30 days/);
+
+  const recent = new Date(now - 2 * 86400_000).toISOString();
+  assert.equal(checkAlertChannel({ ntfy: false, devices: [{ label: 'iPhone', lastOk: recent, fails: 0 }], now }).ok, true);
+});
+
+test('it never reaches alert level — a timer that can is the flood', () => {
+  for (const args of [
+    { ntfy: false, devices: [] },
+    { ntfy: true, devices: [{ label: 'x', lastOk: null, fails: 0 }] },
+  ]) {
+    assert.notEqual(checkAlertChannel(args).severity, 'alert');
+  }
+});

@@ -11,10 +11,19 @@ import assert from 'node:assert/strict';
 import { pushAlert, hasPush, _reset, _setKv } from '../src/lib/push.js';
 
 const ENV = ['NTFY_TOPIC', 'NTFY_SERVER', 'NTFY_TOKEN', 'PUSH_MIN_LEVEL', 'PUSH_DISABLED',
-  'PUSH_CLICK_URL', 'PUSH_MAX_PER_HOUR', 'PUSH_DEDUPE_MINUTES', 'PUSH_ALERT_DEDUPE_HOURS'];
+  'PUSH_CLICK_URL', 'PUSH_MAX_PER_HOUR', 'PUSH_DEDUPE_MINUTES', 'PUSH_ALERT_DEDUPE_HOURS',
+  'ALERT_QUIET_START', 'ALERT_QUIET_END', 'ALERT_HOLD_MAX_MINUTES'];
 
 test.beforeEach(() => {
   for (const k of ENV) delete process.env[k];
+  // Quiet hours OFF for the cases below (2026-08-27). They existed before the
+  // smart layer and assert on delivery, so leaving quiet hours at their real
+  // default would make every warn-level test in this file pass or fail
+  // depending on WHAT TIME OF DAY it ran — the worst kind of flake, because it
+  // is green all afternoon. The hold behaviour has its own tests further down,
+  // which turn it on deliberately.
+  process.env.ALERT_QUIET_START = '0';
+  process.env.ALERT_QUIET_END = '0';
   _reset();
 });
 test.afterEach(() => { for (const k of ENV) delete process.env[k]; });
@@ -113,7 +122,9 @@ test('the hourly cap sheds warnings but never alerts', async () => {
   try {
     assert.equal((await pushAlert({ level: 'warn', title: 'one' })).sent, true);
     assert.equal((await pushAlert({ level: 'warn', title: 'two' })).sent, true);
-    assert.equal((await pushAlert({ level: 'warn', title: 'three' })).reason, 'rate-capped');
+    // 'rate-capped-held' since 2026-08-27: overflow is queued for the digest
+    // rather than dropped. The cap itself is unchanged — nothing extra is SENT.
+    assert.equal((await pushAlert({ level: 'warn', title: 'three' })).reason, 'rate-capped-held');
     assert.equal((await pushAlert({ level: 'alert', title: 'the box is on fire' })).sent, true);
   } finally { f.restore(); }
 });
@@ -126,7 +137,7 @@ test('a malformed cap does not remove the cap (the 2026-07-17 lesson)', async ()
     await quiet(async () => {
       assert.equal((await pushAlert({ level: 'warn', title: 'one' })).sent, true);
       assert.equal((await pushAlert({ level: 'warn', title: 'two' })).sent, true);
-      assert.equal((await pushAlert({ level: 'warn', title: 'three' })).reason, 'rate-capped');
+      assert.equal((await pushAlert({ level: 'warn', title: 'three' })).reason, 'rate-capped-held');
     });
   } finally { f.restore(); }
 });
@@ -152,7 +163,9 @@ test('a self-hosted server and token are honoured', async () => {
     await pushAlert({ level: 'warn', title: 'x' });
     assert.equal(f.calls[0].url, 'https://push.example.com/topic', 'no double slash');
     assert.equal(f.calls[0].headers.Authorization, 'Bearer tk_abc');
-    assert.equal(f.calls[0].headers.Click, 'https://jarvis.example/deck');
+    // The Click now carries the deck tab that answers the alert (move 32):
+    // a notification with nowhere to tap is one he has to navigate at 3am.
+    assert.equal(f.calls[0].headers.Click, 'https://jarvis.example/deck?view=hud');
   } finally { f.restore(); }
 });
 
@@ -304,4 +317,197 @@ test('an escalation from another process still breaks through the shared dedupe'
   const r = await quiet(() => pushAlert({ level: 'alert', title: 'disk', body: 'x' }));
   c.restore();
   assert.equal(r.sent, true, 'same headline at a higher level is new information');
+});
+
+// ── Two transports, one set of gates (2026-08-27) ───────────────────────────
+//
+// Web Push to the deck PWA was added beside ntfy so that Craig's iPhone and
+// iPad can be reached without a second app. The risk in adding a transport is
+// that it becomes a SECOND pipeline with its own rules — so these cases assert
+// the opposite: the same dedupe, the same cap, the same levels, and neither leg
+// able to take the other down.
+
+import { flushHeld, heldCount, pushStatus } from '../src/lib/push.js';
+import { addDevice, listDevices } from '../src/lib/push-subs.js';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
+
+const b64u = (b) => Buffer.from(b).toString('base64url');
+
+/** A device the way the browser's Push API describes one. */
+function fakeDevice(label) {
+  const kp = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const jwk = kp.publicKey.export({ format: 'jwk' });
+  const raw = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]);
+  return {
+    endpoint: `https://web.push.apple.com/${label}`,
+    keys: { p256dh: b64u(raw), auth: b64u(randomBytes(16)) },
+  };
+}
+
+/** Register devices into the in-memory store _reset() installed. */
+async function withDevices(...labels) {
+  for (const l of labels) await addDevice(fakeDevice(l), { label: l });
+}
+
+test('an alert reaches the phone even when ntfy is not configured at all', async () => {
+  await withDevices('iPhone');
+  const f = capture(201);
+  try {
+    const r = await pushAlert({ level: 'alert', title: 'davenroe-api is down', source: 'fleet-check' });
+    assert.equal(r.sent, true, 'the ntfy leg being absent must not disable the device leg');
+    assert.equal(r.devices, 1);
+    assert.equal(r.ntfy, 'no-topic');
+    const call = f.calls.find(c => c.url.includes('web.push.apple.com'));
+    assert.ok(call, 'nothing was sent to the push service');
+    assert.equal(call.headers['Content-Encoding'], 'aes128gcm');
+    assert.match(call.headers.Authorization, /^vapid t=/);
+    assert.equal(call.headers.Urgency, 'high', 'an alert must wake a sleeping phone');
+  } finally { f.restore(); }
+});
+
+test('both transports fire for one alert, and one failing does not stop the other', async () => {
+  process.env.NTFY_TOPIC = 't';
+  await withDevices('iPhone', 'iPad');
+  const real = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = (url) => {
+    seen.push(String(url));
+    // ntfy is refusing; the phones are fine.
+    if (String(url).includes('ntfy.sh')) return Promise.resolve({ ok: false, status: 500 });
+    return Promise.resolve({ ok: true, status: 201 });
+  };
+  try {
+    const r = await quiet(() => pushAlert({ level: 'alert', title: 'the box is on fire' }));
+    assert.equal(r.sent, true, 'two phones got it — that is a delivery');
+    assert.equal(r.devices, 2);
+    assert.equal(r.of, 2);
+    assert.equal(seen.filter(u => u.includes('web.push.apple.com')).length, 2);
+  } finally { globalThis.fetch = real; }
+});
+
+test('the dedupe applies to the device leg too — one gate, not one per transport', async () => {
+  await withDevices('iPhone');
+  const f = capture(201);
+  try {
+    assert.equal((await pushAlert({ level: 'warn', title: 'same thing' })).sent, true);
+    const second = await pushAlert({ level: 'warn', title: 'same thing' });
+    assert.equal(second.reason, 'deduped');
+    assert.equal(f.calls.filter(c => c.url.includes('web.push.apple.com')).length, 1);
+  } finally { f.restore(); }
+});
+
+test('a dead subscription is pruned on the 410 that says so', async () => {
+  await withDevices('iPhone', 'iPad');
+  const real = globalThis.fetch;
+  globalThis.fetch = (url) => Promise.resolve(
+    String(url).includes('/iPhone') ? { ok: false, status: 410 } : { ok: true, status: 201 });
+  try {
+    const r = await pushAlert({ level: 'alert', title: 'x' });
+    assert.equal(r.sent, true, 'the surviving device still counts as delivered');
+    assert.equal(r.devices, 1);
+    const left = await listDevices();
+    assert.deepEqual(left.map(d => d.label), ['iPad'], 'the dead one is gone, the live one stays');
+  } finally { globalThis.fetch = real; }
+});
+
+test('an offline device is NOT pruned — only the push service can declare it dead', async () => {
+  await withDevices('iPhone');
+  const real = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({ ok: false, status: 503 });
+  try {
+    await quiet(() => pushAlert({ level: 'alert', title: 'x' }));
+    const left = await listDevices();
+    assert.equal(left.length, 1);
+    assert.equal(left[0].fails, 1, 'counted, not dropped');
+  } finally { globalThis.fetch = real; }
+});
+
+test('the ledger does not advance on a delivery that never happened', async () => {
+  process.env.NTFY_TOPIC = 't';
+  // Nothing was delivered, so the retry a minute later must NOT be deduped —
+  // suppressing the retry of an alert nobody received is the quiet failure
+  // this module exists to prevent.
+  const f = capture(500);
+  await quiet(() => pushAlert({ level: 'alert', title: 'the box is on fire' }));
+  f.restore();
+  const g = capture(200);
+  try {
+    assert.equal((await pushAlert({ level: 'alert', title: 'the box is on fire' })).sent, true);
+  } finally { g.restore(); }
+});
+
+// ── Quiet hours and the digest ──────────────────────────────────────────────
+
+test('at 3am a warning is held and an alert is not', async () => {
+  process.env.NTFY_TOPIC = 't';
+  process.env.ALERT_QUIET_START = '0';
+  process.env.ALERT_QUIET_END = '23';       // all but one hour is "night", deterministically
+  const f = capture();
+  try {
+    const w = await pushAlert({ level: 'warn', title: 'a finding needs review' });
+    assert.equal(w.sent, false);
+    assert.equal(w.held, true);
+    assert.equal(w.reason, 'quiet-hours');
+    assert.equal(f.calls.length, 0, 'nothing left the box');
+
+    const a = await pushAlert({ level: 'alert', title: 'the box is unreachable' });
+    assert.equal(a.sent, true, 'THE 3AM CASE — an alert is never held');
+    assert.equal(await heldCount(), 1);
+  } finally { f.restore(); }
+});
+
+test('held warnings arrive as ONE digest, naming what they were', async () => {
+  process.env.NTFY_TOPIC = 't';
+  process.env.ALERT_QUIET_START = '0';
+  process.env.ALERT_QUIET_END = '23';
+  const f = capture();
+  try {
+    await pushAlert({ level: 'warn', title: 'gatetest.ai does not resolve', source: 'fleet-check' });
+    await pushAlert({ level: 'warn', title: '2 new high findings', source: 'code-health' });
+    assert.equal(await heldCount(), 2);
+    assert.equal(f.calls.length, 0);
+
+    const out = await flushHeld({ force: true });
+    assert.equal(out.flushed, 2);
+    assert.equal(f.calls.length, 1, 'one message, not two');
+    assert.match(f.calls[0].headers.Title, /2 held overnight/);
+    assert.match(f.calls[0].body, /gatetest\.ai does not resolve/);
+    assert.match(f.calls[0].body, /2 new high findings/);
+    assert.equal(await heldCount(), 0, 'and the queue is emptied');
+  } finally { f.restore(); }
+});
+
+test('the same headline held repeatedly is one digest line, not eleven', async () => {
+  process.env.ALERT_QUIET_START = '0';
+  process.env.ALERT_QUIET_END = '23';
+  const f = capture();
+  try {
+    for (let i = 0; i < 11; i++) {
+      await pushAlert({ level: 'warn', title: 'voxlen.com is parked', source: 'agent-org' });
+    }
+    assert.equal(await heldCount(), 1, 'a digest that is one message repeated is the flood, delayed');
+  } finally { f.restore(); }
+});
+
+test('nothing to flush is not an error, and does not send an empty digest', async () => {
+  const f = capture();
+  try {
+    assert.deepEqual(await flushHeld({ force: true }), { flushed: 0 });
+    assert.equal(f.calls.length, 0);
+  } finally { f.restore(); }
+});
+
+test('pushStatus reports both legs honestly', async () => {
+  const before = await pushStatus();
+  assert.equal(before.ntfy, false);
+  assert.equal(before.devices, 0);
+  assert.equal(before.any, false, 'no transport at all must not read as "configured"');
+
+  await withDevices('iPhone');
+  process.env.NTFY_TOPIC = 't';
+  const after = await pushStatus();
+  assert.equal(after.ntfy, true);
+  assert.equal(after.devices, 1);
+  assert.deepEqual(after.deviceLabels, ['iPhone']);
+  assert.equal(after.any, true);
 });

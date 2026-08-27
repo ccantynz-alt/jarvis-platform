@@ -25,7 +25,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { notify } from './lib/notify.js';
 import {
-  STAGES, newBuildState, nextStage, applyStageResult, resume, describe as describeState,
+  newBuildState, nextStage, applyStageResult, resume, describe as describeState,
 } from './lib/build-pipeline.js';
 import { installInternalAuth } from './lib/internal-http.js';
 installInternalAuth();

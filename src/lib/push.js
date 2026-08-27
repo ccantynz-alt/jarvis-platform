@@ -25,8 +25,21 @@
 
 import { guardrail } from './guardrail.js';
 import { createHash } from 'crypto';
+import { routeAlert, buildDigest, shouldFlush } from './alert-smart.js';
+import { deliverWebPush, listDevices, _setKv as _setSubsKv } from './push-subs.js';
 
 const DEFAULT_SERVER = 'https://ntfy.sh';
+
+// TWO transports, ONE set of gates (2026-08-27).
+//
+// Web Push to the deck PWA was added beside ntfy rather than instead of it, and
+// the temptation was to give it its own send path — it has its own encryption,
+// its own subscription store, its own failure modes. That would have been the
+// second bespoke notification pipeline on this box, and every rule above about
+// dedupe, rate caps and levels would have applied to exactly half the alerts.
+//
+// So the gates run once, here, and BOTH transports are handed the result. A
+// change to what counts as a repeat changes it everywhere, by construction.
 
 // info is deliberately NOT pushed by default. A phone that buzzes for routine
 // chatter gets muted, and a muted channel is worse than no channel — that is the
@@ -98,10 +111,29 @@ const cfg = () => ({
   click: (process.env.PUSH_CLICK_URL || '').trim(),
 });
 
-/** Is a device-push transport actually configured? */
+/**
+ * Is a device-push transport actually configured?
+ *
+ * Synchronous, so it can only answer for ntfy — registered Web Push devices
+ * live in KV behind an await. Use pushStatus() when the answer has to be true.
+ */
 export function hasPush() {
   const c = cfg();
   return !!c.topic && !c.disabled;
+}
+
+/** The honest, complete answer: which legs of the device-push channel exist. */
+export async function pushStatus() {
+  const c = cfg();
+  const devices = await listDevices().catch(() => []);
+  return {
+    disabled: c.disabled,
+    ntfy: !!c.topic,
+    devices: devices.length,
+    deviceLabels: devices.map(d => d.label),
+    any: !c.disabled && (!!c.topic || devices.length > 0),
+    held: await heldCount().catch(() => 0),
+  };
 }
 
 /**
@@ -115,14 +147,14 @@ export function hasPush() {
 export async function pushAlert({ level = 'info', title, body, source = 'jarvis', click } = {}) {
   const c = cfg();
   if (c.disabled) return { sent: false, reason: 'disabled' };
-  if (!c.topic) {
-    if (!state.warned) {
-      state.warned = true;
-      console.warn('[push] no NTFY_TOPIC configured — device alerts are OFF (set it in config/secrets.env)');
-    }
-    return { sent: false, reason: 'no-topic' };
-  }
   if (!title) return { sent: false, reason: 'no-title' };
+  // No longer an early return. ntfy being unconfigured used to end the function,
+  // which would have silently disabled Web Push too the moment it was added —
+  // a device leg switched off by the absence of an unrelated one.
+  if (!c.topic && !state.warned) {
+    state.warned = true;
+    console.warn('[push] no NTFY_TOPIC configured — ntfy leg is OFF (Web Push to registered devices still applies)');
+  }
 
   // notify() normalises levels before it gets here, but pushAlert() is also
   // called directly. An unrecognised level resolves UP to 'warn', never down to
@@ -135,12 +167,17 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
   const now = Date.now();
 
   // Rate cap. An alert storm must not become the reason he silences the one
-  // channel that works — overflow is dropped here and still lives in the inbox.
+  // channel that works — overflow is HELD here (2026-08-27; it used to be
+  // dropped and left to the inbox, which meant the twelfth warning of the hour
+  // was indistinguishable from no warning at all unless he went looking).
   const perHour = guardrail('PUSH_MAX_PER_HOUR', 12, { source: 'push' });
   const hour = (await kvGet('push-hour')) || { start: state.hourStart, count: state.hourCount };
   if (now - (hour.start || 0) > 3_600_000) { hour.start = now; hour.count = 0; }
   state.hourStart = hour.start; state.hourCount = hour.count;
-  if (hour.count >= perHour && lvl !== 'alert') return { sent: false, reason: 'rate-capped' };
+  if (hour.count >= perHour && lvl !== 'alert') {
+    await hold({ level: lvl, title, body, source, at: new Date(now).toISOString() });
+    return { sent: false, reason: 'rate-capped-held' };
+  }
 
   // Dedupe repeats of the same headline.
   //
@@ -173,6 +210,65 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
     return { sent: false, reason: 'deduped' };
   }
 
+  // Triage (lib/alert-smart.js): wake him, or wait for him? And where does
+  // tapping it take him? A warn at 3am is held for the morning digest; an alert
+  // never is.
+  const route = routeAlert({ level: lvl, source, title, now: new Date(now) });
+  if (route.hold) {
+    await hold({ level: lvl, title, body, source, at: new Date(now).toISOString() });
+    return { sent: false, reason: route.reason, held: true };
+  }
+
+  const clickUrl = click || deepLink(route.view, c.click);
+  const results = await Promise.all([
+    sendNtfy({ c, lvl, title, body, source, clickUrl }),
+    // The deck's own devices — his iPhone and iPad. Failure here must not stop
+    // the ntfy leg and vice versa: two transports exist precisely so that one
+    // being broken is survivable.
+    deliverWebPush(
+      { level: lvl, title, body: body || title, source, view: route.view, url: clickUrl, ts: new Date(now).toISOString() },
+      { ttl: route.ttl, urgency: route.urgency, topic: route.topic },
+    ).catch(e => ({ sent: 0, reason: 'error', error: e.message })),
+  ]);
+  const [ntfy, web] = results;
+  const sent = !!ntfy.sent || (web.sent || 0) > 0;
+
+  // The dedupe/rate ledger advances only on a delivery that actually happened.
+  // Advancing it on a failed send would suppress the RETRY of an alert nobody
+  // received — the quiet failure this whole module exists to prevent.
+  if (sent) {
+    state.recent.set(title, { at: now, level: lvl });
+    state.hourCount++;
+    if (state.recent.size > 200) state.recent.clear();  // unbounded maps are leaks
+    await kvSet(titleKey(title), { at: now, level: lvl });
+    await kvSet('push-hour', { start: state.hourStart, count: state.hourCount });
+  }
+  return {
+    sent,
+    reason: sent ? undefined : (ntfy.reason || web.reason || 'no-transport'),
+    // Kept at the top level: callers and tests have read `status` since this
+    // module shipped, and an HTTP refusal is the one failure worth naming
+    // precisely (a 403 from ntfy is a revoked token, not a flaky network).
+    status: ntfy.status,
+    ntfy: ntfy.sent ? 'ok' : (ntfy.reason || 'failed'),
+    devices: web.sent || 0,
+    of: web.devices || 0,
+  };
+}
+
+/** The deck tab this alert is about, as a URL a phone can open. */
+function deepLink(view, base) {
+  if (!base) return '';
+  try {
+    const u = new URL(base);
+    if (view) u.searchParams.set('view', view);
+    return u.toString();
+  } catch { return base; }
+}
+
+/** The ntfy leg, unchanged in behaviour — just no longer the whole function. */
+async function sendNtfy({ c, lvl, title, body, source, clickUrl }) {
+  if (!c.topic) return { sent: false, reason: 'no-topic' };
   const headers = {
     'Content-Type': 'text/plain; charset=utf-8',
     // The visual marker comes from Tags (ntfy renders those as emoji itself) —
@@ -181,10 +277,8 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
     Priority: String(LEVEL_PRIORITY[lvl]),
     Tags: LEVEL_TAGS[lvl],
   };
-  const clickUrl = click || c.click;
   if (clickUrl) headers.Click = clickUrl;
   if (c.token) headers.Authorization = `Bearer ${c.token}`;
-
   try {
     const r = await fetch(`${c.server}/${encodeURIComponent(c.topic)}`, {
       method: 'POST',
@@ -196,16 +290,72 @@ export async function pushAlert({ level = 'info', title, body, source = 'jarvis'
       console.warn(`[push] ntfy responded ${r.status}`);
       return { sent: false, reason: 'http', status: r.status };
     }
-    state.recent.set(title, { at: now, level: lvl });
-    state.hourCount++;
-    if (state.recent.size > 200) state.recent.clear();  // unbounded maps are leaks
-    await kvSet(titleKey(title), { at: now, level: lvl });
-    await kvSet('push-hour', { start: state.hourStart, count: state.hourCount });
     return { sent: true, status: r.status };
   } catch (e) {
     console.warn(`[push] ntfy failed: ${e.message}`);
     return { sent: false, reason: 'error' };
   }
+}
+
+// ── the held queue ───────────────────────────────────────────────────────────
+//
+// Held is not dropped. Everything in here is already durable in the memory
+// inbox — this queue exists so it also ARRIVES, as one line in the morning
+// rather than eleven buzzes at 2am. Durable in KV for the reason recorded at
+// the top of this file: most callers are oneshot timers, so anything kept in
+// process memory is empty on every tick and gates nothing.
+
+const HELD_KEY = 'push-held';
+const HELD_MAX = 50;
+
+async function hold(item) {
+  const cur = (await kvGet(HELD_KEY)) || { items: [] };
+  const items = Array.isArray(cur.items) ? cur.items : [];
+  // Collapse a repeat of the same headline rather than listing it eleven times:
+  // a digest that is one message repeated is the flood, delayed.
+  const dup = items.find(i => i.title === item.title);
+  if (dup) { dup.count = (dup.count || 1) + 1; dup.at = item.at; }
+  else items.push({ ...item, count: 1 });
+  await kvSet(HELD_KEY, { items: items.slice(-HELD_MAX) });
+}
+
+/**
+ * Deliver the held queue as one digest, if it is time.
+ *
+ * Called from the orchestrator's 30-second loop — the same place due reminders
+ * fire — rather than from a tenth systemd timer. Safe to call constantly: it
+ * returns immediately unless shouldFlush() says otherwise.
+ */
+export async function flushHeld({ force = false, now = new Date() } = {}) {
+  const cur = (await kvGet(HELD_KEY)) || { items: [] };
+  const items = Array.isArray(cur.items) ? cur.items : [];
+  if (!items.length) return { flushed: 0 };
+  if (!force && !shouldFlush(items, { now })) return { flushed: 0, holding: items.length };
+
+  const digest = buildDigest(items);
+  if (!digest) return { flushed: 0 };
+
+  // Clear FIRST. A flush that fails after sending would otherwise re-send the
+  // same digest every 30 seconds; the items are still in the inbox either way,
+  // so losing a digest is recoverable and repeating one is not.
+  await kvSet(HELD_KEY, { items: [] });
+
+  const c = cfg();
+  const clickUrl = deepLink('ops', c.click);
+  const [ntfy, web] = await Promise.all([
+    sendNtfy({ c, lvl: 'warn', title: digest.title, body: digest.body, source: 'held-digest', clickUrl }),
+    deliverWebPush(
+      { level: 'warn', title: digest.title, body: digest.body, source: 'held-digest', view: 'ops', url: clickUrl, ts: now.toISOString() },
+      { ttl: 21600, urgency: 'normal', topic: 'held-digest' },
+    ).catch(e => ({ sent: 0, error: e.message })),
+  ]);
+  return { flushed: digest.count, ntfy: !!ntfy.sent, devices: web.sent || 0 };
+}
+
+/** How many notifications are waiting for the next digest. */
+export async function heldCount() {
+  const cur = (await kvGet(HELD_KEY)) || { items: [] };
+  return Array.isArray(cur.items) ? cur.items.length : 0;
 }
 
 /**
@@ -230,6 +380,10 @@ export function _reset() {
   // Tests run against an in-memory KV: durable semantics, no network.
   const mem = new Map();
   kv = { get: async (k) => (mem.has(k) ? mem.get(k) : null), set: async (k, v) => { mem.set(k, v); } };
+  // The device store gets one too, or every assertion about "how many HTTP
+  // calls did this make" silently counts push-subs' KV read as an ntfy post.
+  const subMem = new Map();
+  _setSubsKv({ get: async (k) => (subMem.has(k) ? subMem.get(k) : null), set: async (k, v) => { subMem.set(k, v); return true; } });
 }
 /** Install a KV transport ({get(key)→value|null, set(key,value)}). Production = memory-server over HTTP. */
 export function _setKv(transport) { kv = transport; }

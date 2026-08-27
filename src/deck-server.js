@@ -47,6 +47,9 @@ import { loadTranscript, saveTranscript, recordFallbackTurn, recordTurn, msgText
 import { spawnClaude } from './lib/spawn-agent.js';
 import { modelFor } from './lib/model-routing.js';
 import { situationFingerprint, situationPrompt, parseSituation, needsAttention } from './lib/situation.js';
+import { loadVapid } from './lib/webpush.js';
+import { addDevice, removeDevice, listDevices, deliverWebPush, validSubscription } from './lib/push-subs.js';
+import { heldCount } from './lib/push.js';
 import { installInternalAuth } from './lib/internal-http.js';
 installInternalAuth();   // gate loopback :9200/:9205 writes with the internal token (move 11)
 
@@ -289,6 +292,87 @@ app.get('/tts', async (req, res) => {
   res.set('Content-Type', 'audio/mpeg');
   res.set('Cache-Control', 'private, max-age=3600');
   res.send(out.buf);
+});
+
+// ── DEVICE ALERTS (2026-08-27) ───────────────────────────────────────────────
+//
+// Craig: "we need smart alerts pushed and enabled through to the mobile and
+// ipad devices". The deck is already installed as a PWA on both, so it is the
+// surface that can wake him — no second app, no topic name that is also the
+// only credential, and a notification that knows which tab answers it.
+//
+// These five routes are the whole registration surface. They are AUTHED like
+// everything else on the deck: a subscription is a capability to interrupt
+// Craig at 3am, and it is not one an unauthenticated caller gets to mint.
+
+// GET /api/push/key — the VAPID public key the browser needs to subscribe.
+// Minted on first call and stable forever after (see webpush.js: rotating it
+// silently invalidates every device that ever subscribed).
+app.get('/api/push/key', (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  try {
+    res.json({ key: loadVapid().publicKey });
+  } catch (e) {
+    res.status(500).json({ error: 'no vapid key', detail: e.message });
+  }
+});
+
+// POST /api/push/subscribe { subscription, label } — register this device.
+app.post('/api/push/subscribe', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  const { subscription, label } = req.body || {};
+  if (!validSubscription(subscription)) return res.status(400).json({ error: 'invalid subscription' });
+  try {
+    const row = await addDevice(subscription, { label: label || 'device', ua: String(req.headers['user-agent'] || '') });
+    const devices = await listDevices();
+    console.log(`[jarvis-deck] push device registered: ${row.label} (${devices.length} total)`);
+    res.json({ ok: true, label: row.label, devices: devices.length });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// POST /api/push/unsubscribe { endpoint }
+app.post('/api/push/unsubscribe', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  const removed = await removeDevice(String(req.body?.endpoint || ''));
+  res.json({ ok: true, removed });
+});
+
+// GET /api/push/devices — what is registered, WITHOUT the keys. The deck shows
+// this so "alerts are on" is a fact about the box, not a checkbox in a phone's
+// local storage that survives the server forgetting the subscription.
+app.get('/api/push/devices', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  const devices = await listDevices();
+  res.json({
+    devices: devices.map(d => ({
+      label: d.label, created: d.created, lastOk: d.lastOk, fails: d.fails || 0,
+      endpointHost: (() => { try { return new URL(d.endpoint).host; } catch { return '?'; } })(),
+    })),
+    held: await heldCount().catch(() => 0),
+  });
+});
+
+// POST /api/push/test — send a real alert to every registered device.
+//
+// This route exists because of KNOWN DEBT #1, which has sat open for a month on
+// exactly one unanswered question: did a DEVICE actually buzz? Every layer
+// below reports success independently of whether anything arrived. This is the
+// button that answers it, and it deliberately reports per-device outcomes
+// rather than a single ok.
+app.post('/api/push/test', async (req, res) => {
+  if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  const out = await deliverWebPush({
+    level: 'warn',
+    title: 'MARCO — alert channel test',
+    body: `Sent from the box at ${hhmm()}. If you are reading this on your phone, device alerts work.`,
+    source: 'deck-test',
+    view: 'ops',
+    url: `${process.env.PUSH_CLICK_URL || ''}`,
+    ts: new Date().toISOString(),
+  }, { ttl: 600, urgency: 'high', topic: 'alert-test' });
+  res.json(out);
 });
 
 // ── OPS tab data (2026-08-05, Craig: "we need it all available on command deck")

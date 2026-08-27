@@ -323,8 +323,8 @@ function diffChangedFiles(before, after, cap = 25) {
 // deck; the job output becomes one line saying so (2026-08-19, move 38).
 async function handOffScreenshot(result) {
   const m = /SCREENSHOT_PNG_B64:([A-Za-z0-9+/=]+)/.exec(result.stdoutFull || result.stdout || '');
-  if (!m) { const { stdoutFull, ...rest } = result; return rest; }
-  const { stdoutFull, ...rest } = result; result = rest;   // never post the full buffer as a result
+  if (!m) { const { stdoutFull: _drop, ...rest } = result; return rest; }
+  const { stdoutFull: _drop2, ...rest } = result; result = rest;   // never post the full buffer as a result
   try {
     const r = await api('shot', { worker_id: WORKER_ID, png_b64: m[1] });
     const where = r?.shown ? 'shown on the deck now' : 'stored; no deck was open to show it';

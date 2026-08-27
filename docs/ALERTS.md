@@ -234,3 +234,96 @@ Unsolicited *Slack* traffic additionally passes through `NotifyCenter`
 (`src/notify-center.js`) for quiet hours, mute, and digesting. Device push has
 its own, simpler guards (above) rather than reusing that state machine — its
 whole purpose is the alert that must not be batched away.
+
+---
+
+## Web Push to the deck PWA — the iPhone and iPad leg (added 2026-08-27)
+
+> Craig, 2026-08-27: *"we need smart alerts pushed and enabled through to the
+> mobile and ipad devices."*
+
+ntfy stays. It is a fine dumb pipe and it is the fallback. But it needs a
+**second app** installed and subscribed to a topic whose name is also its only
+credential, and it spent a month in KNOWN DEBT #1 on one unanswered question:
+did a device ever actually buzz?
+
+The Command Deck is already installed as a PWA on both devices (move 31), and
+iOS 16.4+ delivers Web Push to a home-screen PWA. So the surface he already
+opens is now the surface that wakes him — no app store, no shared topic name,
+and, because both ends are ours, a notification that knows **where it goes**.
+
+### How it works
+
+| Piece | File | What it does |
+|---|---|---|
+| transport | `src/lib/webpush.js` | RFC 8291 payload encryption + RFC 8292 VAPID, on `node:crypto` alone — no `web-push` package (Rule 5) |
+| device store | `src/lib/push-subs.js` | subscriptions in memory KV `push-devices`, keyed by endpoint; prunes on the 404/410 that says one is dead |
+| triage | `src/lib/alert-smart.js` | quiet hours, collapse keys, the deck tab an alert belongs to, the held-queue digest |
+| fan-out | `src/lib/push.js` | ONE set of gates (level, hourly cap, dedupe) feeding BOTH transports |
+| the phone half | `public/sw.js` | `push` renders the notification, `notificationclick` opens/focuses the deck on the right tab |
+| registration | `src/deck-server.js` | `/api/push/key`, `/subscribe`, `/unsubscribe`, `/devices`, `/test` — all authed |
+
+The payload is encrypted end-to-end between this box and the service worker.
+Apple's push service relays bytes it cannot read, which is the only reason it is
+acceptable to put a real headline ("davenroe-api is down") into it.
+
+### What makes it "smart"
+
+Not cleverness — triage, with three questions:
+
+1. **Wake him, or wait for him?** `alert` always goes, at high urgency, with a
+   24-hour TTL. A `warn` between **22:00 and 07:00 NZ** is *held*, not dropped,
+   and arrives as one morning digest naming what it was ("3 held overnight —
+   2 fleet-check, 1 code-health"). **An `alert` is never held.** That line is
+   what the off-box watchdog and the 5-minute fleet check exist for; a
+   quiet-hours rule that silenced them would be the most expensive line in the
+   repo. `info` never buzzes anything, at any hour.
+2. **Where does tapping it go?** Every source maps to the deck tab that answers
+   it — findings/proposals/mail → OPS, fleet/DNS/deploy → PLATFORMS, agents →
+   HIERARCHY, jobs → MESSAGE FLOW. A notification with nowhere to tap is work he
+   has to do at the worst possible hour.
+3. **Replace, or stack?** A collapse key per headline means a phone that was in
+   a pocket for an hour unlocks to *one* notification about a problem, not
+   eleven. It is the last line of the same defence the dedupe is: dedupe stops
+   us **sending** a repeat, collapse stops repeats already in flight from
+   arriving as a pile.
+
+Rate-cap overflow is now **held for the digest** rather than dropped — the
+twelfth warning of an hour used to be indistinguishable from no warning at all
+unless he went looking.
+
+### Turning it on (Craig, once per device)
+
+1. Open the deck on the device: `https://jarvis.tailbd6217.ts.net:8444/`
+2. **iPhone/iPad only:** Share → *Add to Home Screen*, then open MARCO from the
+   icon. iOS delivers Web Push to installed PWAs only — in Safari-proper the
+   sheet says so rather than reporting a permission error.
+3. ⚙ (VOICE) → **DEVICE ALERTS → ENABLE ON THIS DEVICE**, accept the prompt.
+4. **TEST ALERT.** It reports per device — "sent to 1/1" — and the phone should
+   buzz. That is the confirmation KNOWN DEBT #1 has been waiting for.
+
+The state line reads what the BOX knows (which devices are registered), not what
+this browser remembers, so a subscription the server has forgotten shows as
+"ON (device not registered)" instead of quietly delivering nothing.
+
+### Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ALERT_QUIET_START` | `22` | NZ hour quiet hours begin |
+| `ALERT_QUIET_END` | `7` | NZ hour they end (set both equal to disable) |
+| `ALERT_HOLD_MAX_MINUTES` | `600` | a held queue flushes anyway after this, whatever the hour |
+| `PUSH_DISABLED=1` | — | still the complete kill switch, for both transports |
+
+`config/vapid.json` (0600, gitignored) holds this deck's signing keypair. It is
+**stable forever**: the public key is baked into every subscription a browser
+has ever created, so deleting it silently invalidates every registered device.
+
+### What still can't be proven from the box
+
+That a specific device buzzed. Every layer reports its own success —
+that ambiguity IS known debt #1 — so `jarvis-experience`'s eighth check
+(`checkAlertChannel`) reports the two things it *can* see: whether any transport
+exists at all, and whether anything has actually been delivered to a device
+recently. A registered device that has never received one is reported as a
+registration, not a channel.

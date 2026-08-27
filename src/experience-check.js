@@ -30,6 +30,7 @@ import { notify } from './lib/notify.js';
 import { guardrail } from './lib/guardrail.js';
 import {
   checkDeploy, checkVoice, checkBrain, checkAlertRate, checkShowMe, checkPcWorker, checkAgentSpawns,
+  checkAlertChannel,
   fingerprint, announcement, summarize, speech,
 } from './lib/experience.js';
 import { installInternalAuth } from './lib/internal-http.js';
@@ -123,13 +124,20 @@ const saveState = (state) => fetch(`${MEMORY}/memory/kv`, {
 async function main() {
   if (MODE === 'off') { log('EXPERIENCE_MODE=off — exiting'); return; }
 
-  const [voice, brain, lastHour, browser, pc, spawnOk] = await Promise.all([
+  const [voice, brain, lastHour, browser, pc, spawnOk, pushKv] = await Promise.all([
     voiceState(), brainState(), alertRate(),
     jget(`${BROWSER}/browser/health`),
     jget('http://127.0.0.1:9205/pc/status'),
     jget(`${MEMORY}/memory/kv/claude-last-spawn-ok`),
+    jget(`${MEMORY}/memory/kv/push-devices`),
   ]);
   const git = gitState();
+
+  // The registered devices, read straight from the same KV row push-subs.js
+  // writes — no service call, so this check still works when the deck is down,
+  // which is one of the ways the channel can be dead.
+  let pushDevices = [];
+  try { pushDevices = JSON.parse(pushKv?.value || '{}').devices || []; } catch { pushDevices = []; }
 
   // Written by spawn-agent.js on every spawn that authenticates. Absent or
   // unparseable → null, which checkAgentSpawns reports as "never" rather than
@@ -145,6 +153,8 @@ async function main() {
     checkPcWorker({ secondsSinceSeen: pc ? pc.seconds_since_seen : null }),
     checkAgentSpawns({ secondsSinceOk }),
     checkShowMe({ browserOk: !!browser }),
+    // Can an alert still reach a phone at all? (2026-08-27)
+    checkAlertChannel({ ntfy: !!(process.env.NTFY_TOPIC || '').trim(), devices: pushDevices }),
   ];
 
   for (const r of results) log(`${r.ok ? 'ok  ' : 'FAIL'} ${r.id}: ${r.detail}`);

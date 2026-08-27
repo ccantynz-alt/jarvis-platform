@@ -3,7 +3,7 @@
 > **This is the single source of truth.** Every agent (Jarvis-dispatched, Vapron's,
 > or interactive) reads this at session start and updates it the moment a decision
 > changes. If this file disagrees with reality, fix reality *or* fix this file —
-> never leave them out of sync. Last updated: 2026-08-08.
+> never leave them out of sync. Last updated: 2026-08-27.
 
 ---
 
@@ -35,7 +35,7 @@ live (`mcp.gatetest.ai`).
 
 ---
 
-## THE 23 MOVES (order = strategy; reliability is the floor)
+## THE 51 MOVES (order = strategy; reliability is the floor)
 
 ### Phase 1 — STABILIZE (kill "everything breaks")
 1. ✅ Restart policies — all jarvis-* + gatetest-mcp = `Restart=always`, alecrae = `on-failure`. (Container autoheal deferred — could conflict with Coolify; Craig call.)
@@ -114,6 +114,100 @@ live (`mcp.gatetest.ai`).
     Phase 3 = the loop: plain-English Gluecron issues → AI PR → AI review →
     deploy, every customer platform fleet-checked. Logic:
     `src/lib/build-pipeline.js`.
+
+### Phase 7 — SHARPEN (Marco notices first, and says so) — added 2026-08-27
+Craig, 2026-08-27: *"we need smart alerts pushed and enabled through to the
+mobile and ipad devices… if you can think on the next 20 biggest moves to make
+it even smarter then this is a must. the whole system must be very clean and
+work well with constant testing and checking."*
+
+The through-line: for a week in August every real fault reached him before it
+reached the box, and the fleet stayed green throughout. Phase 6 made Marco able
+to BUILD; this phase makes him able to NOTICE — and to tell the right person,
+at the right volume, at the right hour, with somewhere to tap.
+
+32. ✅ **Smart alerts to the phone and iPad — Web Push through the deck PWA.**
+    Shipped 2026-08-27. ntfy stayed, but it needs a second app and a topic name
+    that is also its only credential, and it sat in KNOWN DEBT #1 for a month
+    because nobody could confirm a device had ever buzzed. The deck is already
+    installed on both devices, so it is now the transport: RFC 8291/8292 in
+    `src/lib/webpush.js` against node:crypto alone (no `web-push` package —
+    Rule 5), devices in KV via `src/lib/push-subs.js`, and triage in
+    `src/lib/alert-smart.js` — quiet hours 22:00–07:00 NZ that hold a `warn` for
+    a morning digest and **never** hold an `alert`, a collapse key so a phone in
+    a pocket does not produce a pile, and a deep link so tapping "3 findings
+    need review" opens the OPS tab. Both transports sit behind the ONE existing
+    set of gates (dedupe, hourly cap, level) rather than becoming a second
+    pipeline. ⚙ sheet → ENABLE ON THIS DEVICE / TEST ALERT. **The last step is
+    Craig's: one tap on the phone, then TEST ALERT — that is also what finally
+    closes KNOWN DEBT #1.**
+33. ⬜ **The alert canary.** A synthetic alert on a schedule, delivered end to
+    end and asserted — because the failure mode of this whole channel is an
+    absence, and `jarvis-experience`'s new `alert_channel` check can only see as
+    far as "a device is registered and has succeeded before".
+34. ⬜ **Acknowledge, then escalate.** An alert nobody has acknowledged should
+    come back louder; one he has acknowledged should go quiet immediately.
+    Today "still broken" and "he has seen it" produce identical repeats, which
+    is what made the voxlen alert arrive five days running.
+35. ⬜ **Actionable alerts.** Approve the proposal, dispatch the repair, or
+    dismiss the finding from the notification itself. The OPS tab already has
+    every verdict path; the alert should reach it in one tap, not four.
+36. ⬜ **One health verdict per platform** (KNOWN DEBT #4). Three writers race
+    on `platform_state.status`, so fleet-check's "healthy" can bury an audit's
+    "critical" for ten minutes. Per-writer columns + a derived worst-of. Needs
+    memory-server + fleet-check + orchestrator + audit-runner in one commit,
+    with Craig awake.
+37. ⬜ **Findings get an exit path** (KNOWN DEBT #8). Only critical/high get a
+    verifier and only `confirmed` gets re-checked, so low/medium findings are
+    immortal — 308 of 618 on 2026-08-16. Age them to `stale` or widen the
+    re-check. Craig's call, because it changes what the backlog number means.
+38. ⬜ **Incident correlation.** One root cause currently produces N
+    notifications from N subsystems. Group them into one incident with one
+    headline and a timeline, and the phone buzzes once for one problem.
+39. ⬜ **Noise scoring.** Measure which alerts he opens. A source he never opens
+    demotes itself to the digest automatically — the honest version of the
+    hand-tuned thresholds that keep drifting.
+40. ⬜ **Predictive alerts.** Domain expiry, TLS certs, disk, memory and quota
+    projected FORWARD. gatetest.ai's domain died in redemption and was
+    re-diagnosed twelve times; a date arithmetic check would have said so in
+    June.
+41. ⬜ **Baselines, not thresholds.** metrics-collector already streams the
+    numbers; alert on deviation from each platform's own normal instead of a
+    fixed line that is wrong for eleven of them.
+42. ⬜ **The brief arrives, it is not just spoken.** Morning and evening
+    briefings push to the phone as a readable summary — today they exist only
+    if a deck is open and listening.
+43. ⬜ **Ask back.** Replying to an alert by voice loads THAT alert's context —
+    "what's that about?" should not start from a cold status digest.
+44. ⬜ **Alert → proposal → approved fix, entirely from the phone.** The pieces
+    all exist (fix-runner, governance, OPS verdicts, move 31's drill-down); the
+    end-to-end path from a 7am notification to a merged fix has never been run
+    as one motion.
+45. ⬜ **Credential scoping + server-side branch protection** (KNOWN DEBT #5).
+    One root key still writes to every product repo and the pre-push hooks are
+    local-only, so the boundary is a convention. ~10 minutes of Craig's time;
+    prerequisite for the review-runner going live.
+46. ⬜ **Guardrail conformance.** Prove every env limit actually gates, rather
+    than trusting that it parses. Earned on 2026-08-27: `guardrail()` returned
+    **0 instead of the fallback** for any unset variable when `allowZero` was
+    set, because `Number('')` is 0 — a silent-disable inside the module written
+    to prevent silent disables. Fixed with a regression test; the class needs a
+    sweep.
+47. ⬜ **Real journeys, not HTTP 200.** fleet-check proves a socket answers. It
+    does not prove a user can sign in, buy, or send. One scripted journey per
+    platform, run on the same cadence.
+48. ⬜ **Cost and model telemetry.** Which agent, which model, how many tokens,
+    what it cost — with a budget alarm. Today the only signal that spend went
+    wrong is a usage limit at the worst moment.
+49. ⬜ **The estate incident timeline.** One ordered view on the deck of what
+    happened across both boxes and every platform. The data is in memory
+    already; nothing renders it as a story.
+50. ⬜ **LESSONS.md distils itself.** The harvester already writes `lessons`;
+    the doctrine file is still hand-maintained, so the flywheel stops one step
+    short of the thing every session reads.
+51. ⬜ **Second-box alert redundancy.** 158 watches the master and can push;
+    the master cannot currently hand its alerts over when its own push path is
+    the thing that is broken.
 
 ---
 
