@@ -243,6 +243,34 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
   gate the MIC and the NEXT inbound utterance — neither can mute an outbound
   `speak()`. The line is now sent AND derived client-side (`briefingSpeech(d)`),
   so `?demo-briefing=1` is voiced too. Test: `test/deck-briefing-voice.test.js`.
+- **"More natural, not robot" is THREE fixes, none of which is ElevenLabs
+  (2026-08-27).** Craig asked for a more natural free voice the same evening the
+  alert channel shipped; the ruling above is untouched. (1) **Tier beats name:**
+  every platform ships a compact voice and a natural one and defaults to the
+  compact — `voiceTier()` + a natural-first pass in `pickBritishMaleVoice` mean
+  an enhanced voice wins even when its name is not in `VOICE_PREFS`, which is
+  what was missing (a device offering "Arthur (Premium)" fell through to a
+  compact voice). The ⚙ sheet stars natural voices, names the tier in use, and
+  prints the exact menu path for THAT device when it is compact. (2) **Never
+  hand an engine raw markdown:** `humanizeForSpeech()` — `**davenroe-api**` was
+  read aloud as "star star davenroe dash a p i star star"; URLs, ISO stamps,
+  emoji and code blocks are all worse. (3) **Sentence at a time with a real
+  pause** (`splitForSpeech()`, 230ms at a full stop): one long utterance is what
+  makes browser TTS sound mechanical. Prosody follows the tier — an enhanced
+  voice keeps its natural pitch, because resampling a neural voice is what
+  re-robots it. `speechGen` aborts a chunked reply so STOP still stops.
+  Tests: `test/deck-voice-natural.test.js`, `test/deck-voice.test.js`.
+- **An alert on an OPEN deck now SOUNDS before it speaks (2026-08-27).** There
+  was no attention-getting sound anywhere in the deck — only `ackChime`'s
+  near-inaudible blip — so an alert was a banner plus a sentence at whatever the
+  system volume happened to be. `alertKlaxon()` plays a two-tone through a
+  compressor (gain alone just clips), 3× for `alert` and 1× for `warn`, then the
+  speech follows. Level in ⚙ → ALERT VOLUME, default 85%, 0 = muted.
+  **Unset must never read as muted** — `Number(null)` is 0, which shipped the
+  control at 0% until the first screenshot caught it; the same shape as
+  `guardrail()`'s allowZero bug the same week. When NOTHING is open, loudness is
+  the push notification's and belongs to iOS settings (Time Sensitive + sounds),
+  not to any code here — docs/ALERTS.md has the exact taps.
 - **The ear is SHUT while Jarvis talks — every platform, no exceptions.**
   `closeEar()` + `isSelfEcho()` (LCS) as backstop. No voice barge-in (Craig
   accepted 2026-07-31): Escape, STOP bar, or mic button.

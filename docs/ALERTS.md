@@ -327,3 +327,96 @@ that ambiguity IS known debt #1 — so `jarvis-experience`'s eighth check
 exists at all, and whether anything has actually been delivered to a device
 recently. A registered device that has never received one is reported as a
 registration, not a channel.
+
+---
+
+## Loudness, and why the voice sounded like a robot (2026-08-27)
+
+> Craig, the same evening: *"how to change the alert so its louder and change
+> the free generic voice so its more natural rather than robot."*
+
+Two different problems that sound like one. Loudness is about **being noticed**;
+naturalness is about **being listenable**. ElevenLabs stays OFF throughout — that
+is a RULING (see the VOICE section of CLAUDE.md), and none of what follows needs
+it.
+
+### Louder — where the volume actually lives
+
+There are two cases and only one of them is ours:
+
+**The deck is open.** This was the gap. An alert drew a banner and spoke, and
+that was all — no attention-getting sound existed anywhere in the deck except
+`ackChime`'s "I heard you" blip at gain 0.08, which is deliberately almost
+inaudible. If Craig was not looking at the screen, a spoken sentence at whatever
+the system volume happened to be was the entire warning.
+
+Now an alert plays a **two-tone klaxon first, then speaks**: triangle waves
+(carry further than sine, far less abrasive than square) through a
+`DynamicsCompressor`, which is what makes it loud rather than merely peaky —
+raising gain alone just clips. `alert` repeats three times at 0.9 peak; `warn`
+sounds once at 0.5. The tone turns his head; the sentence is what he hears once
+it has, which is why the speech is delayed behind it rather than racing it.
+
+Set the level in ⚙ → **ALERT VOLUME** (0–100%, default 85%), with **TEST ALERT
+TONE** next to it. 0% means muted, deliberately.
+
+> An unset volume must never read as muted. `Number(null)` and `Number('')` are
+> both 0, so the obvious `Number(getItem(key))` guarded by a 0..1 range check
+> accepts that phantom zero and silences every alert on a device that has never
+> touched the slider. The first screenshot of the control read **ALERT VOLUME
+> 0%** and that is how it was caught — the same defect, the same week, as
+> `guardrail()`'s `allowZero` bug on the box. Absence and a deliberate zero are
+> different answers and must be read differently. `test/deck-voice-natural.test.js`.
+
+**Nothing is open.** Then loudness belongs to the push notification, and that is
+an OS setting no server can override. On the iPhone: Settings → Notifications →
+MARCO → Sounds **on**, Alerts (not just banners), and **Time Sensitive
+Notifications** enabled so alerts break through a Focus. In a Focus mode, add
+MARCO to Allowed Notifications. The ntfy app has its own per-topic sound if you
+prefer that leg to be the loud one.
+
+### Natural — the free voice has two tiers and defaults to the worse one
+
+"Robot" was never one problem. It was three, and all three are free to fix:
+
+**1. Which voice.** Every platform ships a compact voice and a natural one, and
+hands you the compact one by default:
+
+| Device | Compact (the robot) | Natural (free) | How |
+|---|---|---|---|
+| iPhone / iPad | Daniel | Daniel (Enhanced) / (Premium) | Settings → Accessibility → Spoken Content → Voices → English (UK) → Daniel → download |
+| Windows | Google/SAPI voices in Chrome | Microsoft Ryan Online (Natural) | open the deck in **Edge** — same machine, no install |
+| Android | default | Google Speech Services HQ voices | Settings → Accessibility → Text-to-speech |
+
+`pickBritishMaleVoice` now ranks the **tier above the name**: an enhanced voice
+wins even when its name is not in `VOICE_PREFS` at all. That step was missing,
+so a device offering "Arthur (Premium)" but no listed name fell all the way
+through to a compact voice — the robot playing while a natural one sat unused in
+the same list. `\bmale\b` discipline is unchanged (2026-08-11: "Female" contains
+"male"). The ⚙ sheet marks natural voices with **★**, names the tier in use, and
+when it is the compact one prints the exact menu path **for the device in hand**
+— "install a better voice" is useless advice; the path is thirty seconds.
+
+**2. What we hand it.** Marco writes for a screen. A speech engine reads
+`**davenroe-api**` as "star star davenroe dash a p i star star", recites URLs
+character by character, and pronounces `2026-08-27T18:04:30Z` as a serial
+number. `humanizeForSpeech()` strips markdown, turns a URL into "a link", an ISO
+stamp into the time, an email into "an email address", a code block into "code
+omitted", expands `e.g.`/`approx.`/`etc.`, and drops emoji and box-drawing. No
+voice quality survives being fed the raw string; this is a bigger win than the
+voice choice on most replies.
+
+**3. How it is delivered.** One long utterance is what makes browser TTS sound
+mechanical — the engine flattens prosody across the whole string and runs the
+sentences together with no breath. `splitForSpeech()` breaks a reply into
+sentences (splitting an over-long one at a clause, never mid-word, and merging
+stray fragments so "Yes." does not get a dramatic pause of its own) and each is
+spoken with a real gap after it: 230ms at a full stop, 110ms at a clause.
+`speechGen` is the abort token, so Escape / the STOP bar / the mic button kill
+the whole chain rather than silencing one sentence and letting the next start.
+
+And prosody now follows the tier: an **enhanced voice is left at its natural
+pitch and speed**, because pitch-shifting a neural voice makes the engine
+resample rather than re-synthesise, which is precisely what makes it sound
+synthetic again. Only the compact voices get the slight lowering that made them
+tolerable. An explicit rate/pitch from the sheet still wins over both.

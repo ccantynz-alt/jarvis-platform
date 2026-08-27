@@ -27,7 +27,19 @@ assert.ok(prefs, 'VOICE_PREFS not found in command-deck.html');
 const fn = html.match(/function pickBritishMaleVoice\(voices = voiceCache, chosen = null\) \{[\s\S]*?\n\}/);
 assert.ok(fn, 'pickBritishMaleVoice not found — did the voice section move?');
 
+// 2026-08-27: the picker gained a NATURAL-tier pass (an enhanced voice beats a
+// better-ranked compact one, whether or not its name is in VOICE_PREFS), so it
+// now depends on these. They are EXTRACTED rather than re-declared here, so a
+// change to what counts as "enhanced" cannot pass in the tests while failing on
+// the device.
+const tier = html.match(/const VOICE_TIER_RE =[\s\S]*?function voiceTier[^\n]*\n/);
+assert.ok(tier, 'voiceTier not found — pickBritishMaleVoice depends on it');
+const males = html.match(/const MALE_RE =[\s\S]*?const FEMALE_RE =[^\n]*\n/);
+assert.ok(males, 'MALE_RE/FEMALE_RE not found — pickBritishMaleVoice depends on them');
+const deps = tier[0] + males[0];
+
 const pick = new Function('voices', `
+  ${deps}
   ${prefs[0]}
   ${fn[0].replace('voices = voiceCache, chosen = null', 'voices, chosen = null')}
   return pickBritishMaleVoice(voices);
@@ -35,6 +47,7 @@ const pick = new Function('voices', `
 
 // ── Voice settings sheet (2026-08-19, move 32): an explicit choice wins ──────
 const pickChosen = new Function('voices', 'chosen', `
+  ${deps}
   ${prefs[0]}
   ${fn[0].replace('voices = voiceCache, chosen = null', 'voices, chosen')}
   return pickBritishMaleVoice(voices, chosen);
@@ -51,9 +64,25 @@ test('a saved choice this device does not have falls through to the ruling', () 
 });
 
 test('the utterance always carries a lang, en-GB when no voice could be named', () => {
-  const fnSpeak = html.match(/function speakBrowserAsync\(text\) \{[\s\S]*?\n\}/);
-  assert.ok(fnSpeak);
+  // The utterance is built in speakChunkAsync since 2026-08-27 — speakBrowserAsync
+  // became the sentence-by-sentence driver above it. The RULE is unchanged and
+  // still load-bearing: with an empty voice cache (iOS before the first gesture)
+  // an utterance carrying neither voice nor lang gets the OS default, which is
+  // the US voice Craig kept hearing.
+  const fnSpeak = html.match(/function speakChunkAsync\(text\) \{[\s\S]*?\n\}/);
+  assert.ok(fnSpeak, 'speakChunkAsync not found — did the voice section move?');
   assert.match(fnSpeak[0], /u\.lang = \(v && v\.lang\) \|\| 'en-GB'/);
+});
+
+test('speech is never emitted below full volume — loudness is the klaxon\'s job', () => {
+  const fnSpeak = html.match(/function speakChunkAsync\(text\) \{[\s\S]*?\n\}/);
+  assert.match(fnSpeak[0], /u\.volume = 1/);
+});
+
+test('an enhanced voice is left at its natural pitch — resampling one is what re-robots it', () => {
+  const fnSpeak = html.match(/function speakChunkAsync\(text\) \{[\s\S]*?\n\}/);
+  assert.match(fnSpeak[0], /enhanced \? 1\.0 : 0\.9/, 'pitch must follow the voice tier');
+  assert.match(fnSpeak[0], /voiceSetting\('pitch', null\)/, 'an explicit choice must still win');
 });
 
 const v = (name, lang) => ({ name, lang });

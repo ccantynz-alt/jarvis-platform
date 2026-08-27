@@ -428,6 +428,14 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
        are the two settings that decide whether Marco can reach him when the
        deck is not on screen, and a second sheet is a second thing to find. -->
   <div class="vs-row" style="border-top:1px solid rgba(0,229,255,.18);padding-top:10px;margin-top:2px">
+    <label for="vs-alertvol">ALERT VOLUME <span id="vs-alertvol-v">85%</span></label>
+    <input id="vs-alertvol" type="range" min="0" max="1" step="0.05" value="0.85">
+  </div>
+  <div class="vs-row" style="justify-content:flex-end;gap:8px">
+    <div id="vs-alert-test" class="btn" role="button" tabindex="0">🔊 TEST ALERT TONE</div>
+  </div>
+
+  <div class="vs-row" style="border-top:1px solid rgba(0,229,255,.18);padding-top:10px;margin-top:2px">
     <label>DEVICE ALERTS</label><span id="vs-push-state" class="mono" style="font-size:11px;color:#ffb547">checking…</span>
   </div>
   <div class="vs-row" style="justify-content:flex-end;gap:8px">
@@ -1367,6 +1375,10 @@ function stopAllAudio() {
   speechQ.length = 0; updatePendingBadge();
   try { jarvisAudio.pause(); jarvisAudio.currentTime = 0; } catch {}
   if (window.speechSynthesis) speechSynthesis.cancel();
+  // Abort any chunked reply mid-chain (2026-08-27). cancel() only silences the
+  // sentence in flight; without this the next chunk starts 110ms later and STOP
+  // looks broken.
+  speechGen++;
   // speechActive is only cleared naturally once pumpSpeech()'s while loop
   // unwinds, which happens on the next tick (onpause/onended fire async,
   // not synchronously with .pause()/.cancel() above) — force it clear here
@@ -1540,6 +1552,26 @@ const VOICE_PREFS = [
   'microsoft ryan', 'microsoft george', 'microsoft thomas',
   'daniel', 'arthur', 'oliver', 'jamie',
 ];
+// The single biggest naturalness lever on a free voice is WHICH free voice
+// (2026-08-27, Craig: "change the free generic voice so its more natural rather
+// than robot"). Every platform ships two tiers and defaults to the worse one:
+//
+//   iOS/iPadOS — "Daniel" is the 2011-era compact voice. "Daniel (Enhanced)"
+//                and "(Premium)" are free downloads and sound like a person.
+//   Windows    — Edge exposes "Microsoft Ryan Online (Natural)"; Chrome on the
+//                same machine offers only the robotic Google/SAPI ones.
+//   Android    — Google Speech Services' high-quality voices are a download.
+//
+// So the tier is worth MORE than the name: a natural voice with an unfamiliar
+// name beats the exact voice we asked for in its compact form.
+const VOICE_TIER_RE = /\b(natural|neural|enhanced|premium|siri)\b/i;
+function voiceTier(name) { return VOICE_TIER_RE.test(String(name || '')) ? 'enhanced' : 'standard'; }
+
+// `\bmale\b`, never /male/ — 'Google UK English Female' contains "male" as a
+// substring, and that exact bug picked the female voice in 2026-08-11.
+const MALE_RE = /\bmale\b/i;
+const FEMALE_RE = /\bfemale\b/i;
+
 function pickBritishMaleVoice(voices = voiceCache, chosen = null) {
   const list = Array.isArray(voices) ? voices : [];
   // An explicit choice from the Voice settings sheet wins when the device has
@@ -1549,16 +1581,161 @@ function pickBritishMaleVoice(voices = voiceCache, chosen = null) {
     const name = String(v.name || '').toLowerCase();
     return name.includes(n) && (!extra || extra.test(v.name));
   });
-  for (const n of VOICE_PREFS) { const v = byName(n, /premium|enhanced|natural/i); if (v) return v; }
+  const gb = (v) => /en[-_]GB/i.test(v.lang);
+  // 1. A voice we asked for, in its enhanced form. Best of both.
+  for (const n of VOICE_PREFS) { const v = byName(n, VOICE_TIER_RE); if (v) return v; }
+  // 2. ANY enhanced British voice, named or not (2026-08-27). This is the step
+  //    that was missing: without it a device offering "Arthur (Premium)" but no
+  //    listed name fell all the way through to a compact voice, and Craig heard
+  //    the robot while a natural one sat unused in the same list.
+  const enhancedGb = list.filter(v => gb(v) && voiceTier(v.name) === 'enhanced' && !FEMALE_RE.test(v.name));
+  if (enhancedGb.length) return enhancedGb.find(v => MALE_RE.test(v.name)) || enhancedGb[0];
+  // 3. The named list in its ordinary form, then the old fallbacks.
   for (const n of VOICE_PREFS) { const v = byName(n); if (v) return v; }
-  return list.find(v => /en[-_]GB/i.test(v.lang) && /\bmale\b/i.test(v.name))
-    || list.find(v => /en[-_]GB/i.test(v.lang))
+  return list.find(v => gb(v) && MALE_RE.test(v.name))
+    || list.find(v => gb(v))
     || list.find(v => /en[-_](AU|NZ)/i.test(v.lang))
     || list.find(v => /^en/i.test(v.lang))
     || list[0] || null;
 }
 
-function speakBrowserAsync(text) {
+/**
+ * What to say to Craig when the voice on this device is still the compact one.
+ * Device-specific, because "install a better voice" is useless advice and the
+ * actual menu path is thirty seconds of work.
+ */
+function voiceUpgradeHint(ua, hasEnhanced = false, nav) {
+  nav = nav || (typeof navigator !== 'undefined' ? navigator : {});
+  ua = ua == null ? String(nav.userAgent || '') : ua;
+  if (hasEnhanced) return '';
+  if (/iPad|iPhone|iPod/.test(ua) || (nav.platform === 'MacIntel' && nav.maxTouchPoints > 1)) {
+    return 'For a far more natural voice, download it once: Settings → Accessibility → Spoken Content → Voices → English (UK) → Daniel → Enhanced or Premium. Then reopen MARCO and pick it above.';
+  }
+  if (/Android/.test(ua)) {
+    return 'For a more natural voice: Android Settings → Accessibility → Text-to-speech → Google Speech Services → install the high-quality English (UK) voices.';
+  }
+  if (/Edg\//.test(ua)) return '';   // Edge already exposes the Natural voices
+  if (/Windows/.test(ua)) {
+    return 'This browser only offers the compact voices. Opening the deck in Microsoft Edge gives you the free "Natural" voices (Ryan, Thomas) — same machine, no install.';
+  }
+  return '';
+}
+
+// ── Making it SOUND spoken rather than read out (2026-08-27) ────────────────
+//
+// The other half of "robot" is not the voice, it is what we hand it. Marco's
+// replies are written for a screen: markdown emphasis, backticks around paths,
+// full URLs, arrows, ISO timestamps. Every speech engine reads that literally —
+// "star star davenroe dash a p i star star is down, colon eight zero one zero"
+// — and no amount of voice quality survives it.
+const SPEECH_FIXUPS = [
+  [/```[\s\S]*?```/g, ' — code omitted — '],      // never read a code block aloud
+  [/`([^`]*)`/g, '$1'],
+  [/\*\*([^*]*)\*\*/g, '$1'],
+  [/(^|\s)[*_]([^*_\n]+)[*_](?=\s|$)/g, '$1$2'],
+  [/^\s*[#>]+\s*/gm, ''],                          // headings, quotes
+  [/^\s*[-•·]\s+/gm, ''],                          // bullet markers
+  [/https?:\/\/\S+/gi, ' a link '],
+  [/\b[\w.-]+@[\w.-]+\.\w+\b/g, ' an email address '],
+  [/(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})(:\d{2})?Z?/g, '$4'],   // ISO stamp → the time
+  [/\s*[→➜]\s*/g, ' to '],
+  [/\s*&\s*/g, ' and '],
+  [/\s*\/\s*/g, ' '],                              // "warn/alert" → "warn alert"
+  [/([a-z])-([a-z])/gi, '$1 $2'],                  // davenroe-api → davenroe api
+  [/\be\.g\.\s*/gi, 'for example, '],
+  [/\bi\.e\.\s*/gi, 'that is, '],
+  [/\bvs\.?\s/gi, 'versus '],
+  [/\betc\.?\b/gi, 'and so on'],
+  [/\bapprox\.?\b/gi, 'approximately'],
+  [/\bmin\b/g, 'minutes'], [/\bsec\b/g, 'seconds'], [/\bhr\b/g, 'hours'],
+  [/[─-╿▀-▟■-◿]/g, ' '],           // box drawing, blocks
+  [/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, ' '],     // emoji
+  [/\.{3,}/g, '. '],
+  [/\s{2,}/g, ' '],
+];
+function humanizeForSpeech(text) {
+  let s = String(text == null ? '' : text);
+  for (const [re, to] of SPEECH_FIXUPS) s = s.replace(re, to);
+  return s.trim();
+}
+
+/**
+ * Speak sentence by sentence, not paragraph by paragraph.
+ *
+ * A single long utterance is what makes browser TTS sound like a machine: the
+ * engine flattens its prosody across the whole string and runs the sentences
+ * together with no breath. Feeding it one sentence at a time, with a real pause
+ * between, is most of the difference — and it happens to be the same shape that
+ * survives Chrome's self-pausing engine (see the keep-alive below).
+ */
+const SPEECH_CHUNK_MAX = 180;
+function splitForSpeech(text, max = SPEECH_CHUNK_MAX) {
+  const clean = String(text || '').trim();
+  if (!clean) return [];
+  const out = [];
+  for (const sentence of clean.match(/[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g) || [clean]) {
+    let s = sentence.trim();
+    if (!s) continue;
+    // A sentence longer than the cap is broken at a comma or clause boundary —
+    // never mid-word, which is worse than a long sentence.
+    while (s.length > max) {
+      const window = s.slice(0, max);
+      const cut = Math.max(window.lastIndexOf(', '), window.lastIndexOf('; '), window.lastIndexOf(' — '));
+      const at = cut > max * 0.4 ? cut + 1 : window.lastIndexOf(' ');
+      if (at <= 0) break;
+      out.push(s.slice(0, at).trim());
+      s = s.slice(at).trim();
+    }
+    if (s) out.push(s);
+  }
+  // Merge a stray FRAGMENT ("Yes.", "Understood.") into its neighbour rather
+  // than pausing around two words. The threshold is deliberately low: at 24 it
+  // also swallowed real sentences — "The deploy landed." is 18 characters — and
+  // collapsed a three-sentence reply back into the one flat utterance this
+  // whole function exists to break up.
+  const FRAGMENT = 14;
+  const merged = [];
+  for (const part of out) {
+    if (merged.length && (part.length < FRAGMENT || merged[merged.length - 1].length < FRAGMENT)
+        && merged[merged.length - 1].length + part.length < max) {
+      merged[merged.length - 1] += ' ' + part;
+    } else merged.push(part);
+  }
+  return merged;
+}
+
+/**
+ * Speak one reply: humanised, split into sentences, with a breath between.
+ *
+ * `speechGen` is the abort token. stopAllAudio() bumps it, so the Escape key,
+ * the STOP bar and the mic button kill a chunked reply mid-chain instead of
+ * only silencing the sentence in flight and then letting the next one start —
+ * which is what a naive loop would do, and would have made STOP look broken.
+ */
+let speechGen = 0;
+async function speakBrowserAsync(text) {
+  if (!window.speechSynthesis) return;
+  const chunks = splitForSpeech(humanizeForSpeech(text));
+  if (!chunks.length) return;
+  const gen = ++speechGen;
+  S.speaking = true; updateOrbLabel();
+  try {
+    for (let i = 0; i < chunks.length; i++) {
+      if (gen !== speechGen) return;               // interrupted
+      await speakChunkAsync(chunks[i]);
+      if (gen !== speechGen) return;
+      if (i < chunks.length - 1) {
+        // A real pause, longer at a full stop than at a clause break. This is
+        // the difference between a person and a ticker tape.
+        await new Promise(r => setTimeout(r, /[.!?]["')\]]*$/.test(chunks[i]) ? 230 : 110));
+      }
+    }
+  } finally {
+    if (gen === speechGen) { S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel(); }
+  }
+}
+
+function speakChunkAsync(text) {
   return new Promise((resolve) => {
     if (!window.speechSynthesis) return resolve();
     speechSynthesis.cancel(); // iOS wedges when utterances queue — always start fresh
@@ -1571,11 +1748,19 @@ function speakBrowserAsync(text) {
     // Craig keeps hearing. en-GB steers the default to a British voice even
     // when we could not name one.
     u.lang = (v && v.lang) || 'en-GB';
-    u.rate = Number(voiceSetting('rate', 1.02)) || 1.02;
-    u.pitch = Number(voiceSetting('pitch', 0.9)) || 0.9;
+    // Prosody defaults follow the TIER (2026-08-27). Pitch-shifting a neural
+    // voice is one of the things that makes it sound synthetic again — the
+    // engine resamples rather than re-synthesising — so an enhanced voice is
+    // left at its natural pitch and speed, and only the compact voices get the
+    // slight lowering that made them tolerable. An explicit choice from the
+    // sheet still wins over both.
+    const enhanced = voiceTier(v && v.name) === 'enhanced';
+    const savedRate = voiceSetting('rate', null), savedPitch = voiceSetting('pitch', null);
+    u.rate = Number(savedRate) || (enhanced ? 1.0 : 1.02);
+    u.pitch = Number(savedPitch) || (enhanced ? 1.0 : 0.9);
+    u.volume = 1;                                   // never below full — see ALERT VOLUME for loudness
     let done = false, keepAlive = null;
-    const finish = () => { if (done) return; done = true; if (keepAlive) { clearInterval(keepAlive); keepAlive = null; } S.speaking = false; lastSpeechEndAt = Date.now(); updateOrbLabel(); resolve(); };
-    u.onstart = () => { S.speaking = true; updateOrbLabel(); };
+    const finish = () => { if (done) return; done = true; if (keepAlive) { clearInterval(keepAlive); keepAlive = null; } resolve(); };
     u.onend = u.onerror = finish;
     setTimeout(finish, 2000 + text.length * 90); // belt & braces: never wedge the queue
     speechSynthesis.speak(u);
@@ -1626,12 +1811,25 @@ function renderVoiceSheet() {
   sel.appendChild(opt0);
   for (const v of list) {
     const o = document.createElement('option');
-    o.value = v.name; o.textContent = `${v.name} (${v.lang})`;
+    // Mark the good ones, so the list stops being forty indistinguishable names.
+    const star = voiceTier(v.name) === 'enhanced' ? '★ ' : '';
+    o.value = v.name; o.textContent = `${star}${v.name} (${v.lang})`;
     if (v.name === chosen) o.selected = true;
     sel.appendChild(o);
   }
+  // Name the tier in use and, when it is the compact one, the exact menu path
+  // that fixes it on THIS device (2026-08-27, Craig: "more natural rather than
+  // robot"). "Install a better voice" is useless advice; the path is 30 seconds.
+  const inUse = chosen ? (voiceCache.find(v => v.name === chosen) || auto) : auto;
+  const enhanced = voiceTier(inUse && inUse.name) === 'enhanced';
+  const anyEnhanced = voiceCache.some(v => voiceTier(v.name) === 'enhanced' && /^en/i.test(v.lang));
   $('vs-note').textContent = voiceCache.length
-    ? `${voiceCache.length} voices on this device · engine: ${voiceEngine === 'browser' ? 'browser (free Google/Apple voice)' : voiceEngine}`
+    ? `${voiceCache.length} voices here · using ${inUse ? inUse.name : '—'} · `
+      + (enhanced ? 'NATURAL tier ★ — this is the good one.'
+                  : 'compact tier — functional, but the robotic one.')
+      + (enhanced ? '' : ' ' + (anyEnhanced
+          ? 'A ★ natural voice IS installed — pick it above.'
+          : voiceUpgradeHint()))
     : 'No voices reported yet — tap anywhere once (iOS lists voices after a gesture).';
 }
 (function wireVoiceSheet() {
@@ -1639,6 +1837,8 @@ function renderVoiceSheet() {
   sheet.addEventListener('click', (e) => { if (e.target === sheet) sheet.classList.add('hidden'); });
   const open = () => { renderVoiceSheet(); $('vs-rate').value = voiceSetting('rate', 1.02); $('vs-pitch').value = voiceSetting('pitch', 0.9);
     $('vs-rate-v').textContent = $('vs-rate').value; $('vs-pitch-v').textContent = $('vs-pitch').value; $('vs-lang').value = SR_LANG; sheet.classList.remove('hidden');
+    $('vs-alertvol').value = alertVolume();
+    $('vs-alertvol-v').textContent = Math.round(alertVolume() * 100) + '%';
     if (typeof renderPushState === 'function') renderPushState(); };
   const close = () => sheet.classList.add('hidden');
   const save = (k, v) => { try { v == null || v === '' ? localStorage.removeItem(VOICE_SETTINGS_KEYS[k]) : localStorage.setItem(VOICE_SETTINGS_KEYS[k], String(v)); } catch {} };
@@ -1648,7 +1848,18 @@ function renderVoiceSheet() {
   $('vs-rate').oninput = (e) => { $('vs-rate-v').textContent = e.target.value; save('rate', e.target.value); };
   $('vs-pitch').oninput = (e) => { $('vs-pitch-v').textContent = e.target.value; save('pitch', e.target.value); };
   $('vs-lang').onchange = (e) => { try { localStorage.setItem('jarvis_lang', e.target.value); } catch {} $('vs-note').textContent = 'Mic language saved — reload the deck to apply.'; };
-  $('vs-test').onclick = () => { voiceEngine === 'neural' ? speak('Voice check, sir.') : speakBrowserAsync('Voice check, sir. This is the voice you will hear.'); };
+  // A test line long enough to actually judge: two sentences, so he hears the
+  // sentence pause, and a real headline so he hears how a live alert will read.
+  $('vs-test').onclick = () => {
+    const line = 'Voice check, sir. This is the voice you will hear — davenroe-api is down, and self-heal has dispatched a repair.';
+    voiceEngine === 'neural' ? speak(line) : speakBrowserAsync(line);
+  };
+  const setVol = (v) => {
+    $('vs-alertvol-v').textContent = Math.round(Number(v) * 100) + '%';
+    try { localStorage.setItem(ALERT_VOLUME_KEY, String(v)); } catch {}
+  };
+  $('vs-alertvol').oninput = (e) => setVol(e.target.value);
+  $('vs-alert-test').onclick = () => alertKlaxon('alert');
   $('vs-reset').onclick = () => { save('name', null); save('rate', null); save('pitch', null); open(); };
   if (qs.get('voicesheet') === '1') setTimeout(open, 300);   // QA hook, like ?demo-alert=1
 })();
@@ -1840,6 +2051,86 @@ function ackChime() { // instant "I heard you" blip — zero latency, zero TTS c
     o.connect(g); g.connect(chimeCtx.destination);
     o.start(); o.stop(chimeCtx.currentTime + 0.26);
   } catch { /* purely cosmetic */ }
+}
+
+// ── The alert tone (2026-08-27) ─────────────────────────────────────────────
+//
+// Craig: "how to change the alert so its louder". Until now an alert arriving
+// on an OPEN deck did exactly two things — drew a banner, and spoke. If he was
+// not looking at the screen and the room was noisy, a spoken sentence at
+// whatever the system volume happened to be was the entire warning. There was
+// no attention-getting sound at all; the only tone in the deck is ackChime's
+// "I heard you" blip at gain 0.08, which is deliberately almost inaudible.
+//
+// So: a real two-tone klaxon BEFORE the speech, through a compressor so it
+// cuts through a room rather than just peaking, repeated for `alert` and once
+// for `warn`. Craig sets the level (ALERT VOLUME in the ⚙ sheet); the default
+// is loud, because the failure mode of an alert nobody notices is the one this
+// whole channel exists to prevent.
+//
+// This is the OPEN-DECK case only. When nothing is open, loudness is the push
+// notification's, which is an OS setting — see docs/ALERTS.md.
+const ALERT_VOLUME_KEY = 'jarvis_alert_volume';
+const ALERT_VOLUME_DEFAULT = 0.85;
+function alertVolume() {
+  try {
+    const raw = localStorage.getItem(ALERT_VOLUME_KEY);
+    // UNSET IS NOT MUTED. `Number(null)` and `Number('')` are both 0, not NaN —
+    // so the obvious `Number(getItem(...))` guarded by a 0..1 range check
+    // accepts that phantom zero and every alert is silent on a device that has
+    // never touched the slider. Caught by the first screenshot of this control,
+    // which read "ALERT VOLUME 0%". It is the same defect, in the same week, as
+    // guardrail()'s allowZero bug on the box (2026-08-27) — absence and a
+    // deliberate zero are different answers and must be read differently.
+    if (raw == null || raw === '') return ALERT_VOLUME_DEFAULT;
+    const v = Number(raw);
+    return Number.isFinite(v) && v >= 0 && v <= 1 ? v : ALERT_VOLUME_DEFAULT;
+  } catch { return ALERT_VOLUME_DEFAULT; }
+}
+
+let klaxonCtx = null;
+function alertKlaxon(level = 'alert', volume = null) {
+  if (qs.get('voice') === '0') return;            // headless/QA captures stay silent
+  const vol = volume == null ? alertVolume() : volume;
+  if (!vol) return;                                // 0 = muted, deliberately
+  try {
+    klaxonCtx = klaxonCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (klaxonCtx.state === 'suspended') klaxonCtx.resume().catch(() => {});
+    // A compressor is what makes this LOUD rather than merely peaky: it lifts
+    // the body of the tone toward the ceiling instead of letting one transient
+    // define the level. Without it, raising gain alone just clips.
+    const comp = klaxonCtx.createDynamicsCompressor();
+    comp.threshold.setValueAtTime(-28, klaxonCtx.currentTime);
+    comp.ratio.setValueAtTime(12, klaxonCtx.currentTime);
+    comp.attack.setValueAtTime(0.003, klaxonCtx.currentTime);
+    comp.connect(klaxonCtx.destination);
+
+    const alert = level === 'alert';
+    const reps = alert ? 3 : 1;                    // a warning says it once
+    const tones = alert ? [740, 988] : [660, 880]; // alert is the harsher interval
+    const beep = 0.16, gap = 0.06;
+    const peak = Math.min(1, vol) * (alert ? 0.9 : 0.5);
+    let t = klaxonCtx.currentTime + 0.01;
+    for (let r = 0; r < reps; r++) {
+      for (const hz of tones) {
+        const o = klaxonCtx.createOscillator(), g = klaxonCtx.createGain();
+        // Triangle carries further than sine and is far less abrasive than
+        // square — audible across a room without being a smoke alarm.
+        o.type = 'triangle';
+        o.frequency.setValueAtTime(hz, t);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(peak, t + 0.012);   // fast, no click
+        g.gain.setValueAtTime(peak, t + beep - 0.03);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + beep);
+        o.connect(g); g.connect(comp);
+        o.start(t); o.stop(t + beep + 0.02);
+        t += beep + gap;
+      }
+      t += 0.10;                                   // a beat between repeats
+    }
+    // The mic must not hear the klaxon and treat it as a wake word or an echo.
+    if (typeof closeEar === 'function') closeEar();
+  } catch { /* audio is a courtesy — the banner and the speech still land */ }
 }
 
 let heardTimer = null;
@@ -3103,7 +3394,11 @@ function showAlert(level, title, speech) {
   setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 8000);
   while ($('alerts').children.length > 3) $('alerts').firstChild.remove();
   alertUntil = Date.now() + 3000; // the brain flashes red while the alert lands
-  speak(speech || title);
+  // Sound FIRST, then the words (2026-08-27). The tone is what turns his head;
+  // the sentence is what he hears once it has. Speaking first wastes the half
+  // second in which he was still looking at something else.
+  alertKlaxon(level === 'warn' ? 'warn' : 'alert');
+  setTimeout(() => speak(speech || title), level === 'warn' ? 450 : 1150);
 }
 
 // ── Command line ─────────────────────────────────────────────────────────────
@@ -3153,7 +3448,11 @@ function pushSupported() {
 // reading "checking…" permanently, which is the same class of lie as a ⚠ BACKUP
 // VOICE badge for a deliberate setting: the UI claiming to be mid-something when
 // it has already finished failing. Bounded, and honest about the timeout.
-function swReady(ms = 4000) {
+// 8s, not 4s (2026-08-27): a service worker that is INSTALLING — which is every
+// first load after sw.js changes — took longer than 4s in a cold headless run
+// and the sheet reported "NO WORKER" for a worker that was seconds from ready.
+// A slow answer is fine here; a wrong one sends him looking for a fault.
+function swReady(ms = 8000) {
   let ready;
   try { ready = navigator.serviceWorker.ready; } catch { return Promise.resolve(null); }
   return Promise.race([
@@ -3200,8 +3499,11 @@ async function renderPushStateInner() {
   }
   const reg = await swReady();
   if (!reg) {
-    el.textContent = 'NO WORKER'; el.style.color = '#ffb547';
-    note.textContent = 'The service worker is not running on this tab, so alerts cannot be delivered to it. Reload the deck.';
+    el.textContent = 'STARTING…'; el.style.color = '#ffb547';
+    note.textContent = 'The service worker has not finished starting on this tab. It usually takes a moment on the first load after an update — this will re-check itself.';
+    // Re-check when it does become ready, rather than leaving a stale verdict
+    // on screen until he happens to reopen the sheet.
+    try { navigator.serviceWorker.ready.then(() => renderPushState()).catch(() => {}); } catch {}
     return;
   }
   let mine = null;
