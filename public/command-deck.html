@@ -3560,8 +3560,15 @@ async function enablePush() {
       const out = await (await fetch('/api/push/test', { method: 'POST' })).json();
       // Per-device, deliberately: "ok" was the answer that let the ntfy leg sit
       // unverified for a month. What matters is whether a DEVICE buzzed.
+      // "Vibrate only" is the commonest outcome and it is NOT a fault here:
+      // iOS decides whether a web push makes a sound, and no server can
+      // override it. Say so on the spot rather than letting him think the
+      // channel is half-broken (2026-08-27).
       note.textContent = out.devices
-        ? `Sent to ${out.sent}/${out.devices} device(s). If nothing arrives, the subscription is stale — enable again.`
+        ? `Sent to ${out.sent}/${out.devices} device(s) at full alert level. `
+          + 'Silent or vibrate-only? That is iOS, not the box: check the ring/silent switch, '
+          + 'then Settings → Notifications → MARCO → Sounds on + Alerts + Time Sensitive. '
+          + 'If nothing arrives at all, the subscription is stale — tap ENABLE again.'
         : 'No devices registered on the box yet — tap ENABLE first.';
     } catch (e) { note.textContent = `Test failed: ${e.message}`; }
     renderPushState();

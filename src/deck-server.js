@@ -363,10 +363,16 @@ app.get('/api/push/devices', async (req, res) => {
 // rather than a single ok.
 app.post('/api/push/test', async (req, res) => {
   if (!isAuthed(req) && !isLocalDirect(req)) return res.status(403).json({ error: 'forbidden' });
+  // level 'alert', not 'warn' (2026-08-27, Craig: "the test button is vibrate
+  // only we need good clear alert"). A test that exercises a quieter path than
+  // a real emergency tells him nothing about the path that matters: only
+  // `alert` gets renotify + requireInteraction in sw.js, and only `alert`
+  // avoids `silent`. The test must be the loudest thing the channel can do,
+  // because its whole purpose is to prove what a 3am page will feel like.
   const out = await deliverWebPush({
-    level: 'warn',
+    level: 'alert',
     title: 'MARCO — alert channel test',
-    body: `Sent from the box at ${hhmm()}. If you are reading this on your phone, device alerts work.`,
+    body: `Sent from the box at ${hhmm()}. This is exactly how a real alert will arrive. If it only buzzed, your iPhone's ring switch or MARCO's notification sound is off — see docs/ALERTS.md.`,
     source: 'deck-test',
     view: 'ops',
     url: `${process.env.PUSH_CLICK_URL || ''}`,

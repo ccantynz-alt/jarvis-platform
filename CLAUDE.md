@@ -408,8 +408,12 @@ scoped `JARVIS_HEARTBEAT_TOKEN_vapron158`; >15 min silence auto-alerts.
 **`jarvis-watchdog.timer` (2026-08-08): 158 watches the master box** —
 `/root/jarvis-watchdog.sh` (standalone, same pattern as heartbeat) probes the
 master's `:9212/health` on BOTH the public IP and the tailnet IP every 5 min,
-3 spaced attempts each; both dead → max-priority ntfy push (topic in
-`/root/.jarvis-watchdog.env`, chmod 600). Alerts on the DOWN transition +
+3 spaced attempts each; both dead → **Web Push straight to Craig's phone**
+(`/root/jarvis-webpush.mjs` + `/root/.jarvis-webpush.json`, 0600, synced from
+the master by `scripts/sync-watchdog-push.sh`) **and** a max-priority ntfy push
+(topic in `/root/.jarvis-watchdog.env`, chmod 600) as the independent fallback.
+Both legs report; the log says DELIVERED or FAILED TO DELIVER, never just
+"pushed" (2026-08-27 — for weeks it said "pushed" while reaching nobody). Alerts on the DOWN transition +
 6-hourly while down + recovery — never per-tick. Log:
 `/var/log/jarvis-watchdog.log` on 158.
 Leftover `/opt/jarvis` clone on 158 (holds a secrets.env) awaits Craig's
@@ -579,6 +583,18 @@ auth).
   exactly that. Unset/blank now short-circuits to the fallback; regression tests
   in `test/guardrail.test.js`. Every allowZero caller on the box set its variable
   explicitly, so it was latent, not live.
+- **Monitoring that cannot prove DELIVERY is not monitoring** (2026-08-27). The
+  158 watchdog ran for weeks, detected three real outages, and reached nobody —
+  its topic had no subscriber, and it discarded the push result so it reported
+  success either way. Every check must be able to answer "and did anyone
+  actually receive it?"; `checkAlertChannel` and the deck's TEST ALERT exist to
+  answer it. A monitor whose alerts land where nobody reads is indistinguishable
+  from a monitor that is off — which is exactly how Craig read it, correctly.
+- **A leaking CO-TENANT can take the shared disk down** (2026-08-27). AlecRae's
+  bun API grew to 11-13GB and died five times in three days; apport kept every
+  core, 55G, and the box hit 96%. Cores are host hygiene and safe to clear
+  (`/var/lib/apport/coredump`, keep the small reports in `/var/crash`); the leak
+  itself is the co-tenant's — observe and file, never repair (Rule 4).
 - **An alert about something the monitor cannot fix needs a HUMAN's rate limit,
   not a monitor's.** `alert` is exempt from push dedupe AND the hourly cap, so a
   `notify()` inside a 5-minute timer loop is 288 buzzes a day (2026-08-10: 235
@@ -640,8 +656,28 @@ auth).
 
 ## KNOWN DEBT (open items only — fix these, don't work around them)
 
-1. **Off-box watchdog: the 158 watcher is INSTALLED and proven to the topic
-   (2026-08-08) — one confirmation left.** `jarvis-watchdog.timer` on 158
+1. **Off-box watchdog: CLOSED 2026-08-27 — it now reaches his phone, and says
+   so.** Kept here as the account, because the way it failed is the template.
+   Craig: *"the jarvis watch dog doesnt work and it hasnt done for sometime so
+   we might as well stop it."* It was in fact running every 5 minutes and had
+   pushed real outages on 21, 24 and 25 August — into an ntfy topic no device of
+   his was subscribed to. **A monitor whose alerts land where nobody reads is
+   indistinguishable from one that is switched off**, and `push()` discarded
+   curl's status while the caller logged "alert pushed" regardless, so nothing
+   could ever have told us. Now: 158 sends **Web Push straight to his iPhone**
+   (`/root/jarvis-webpush.mjs`, standalone, node:crypto only — it cannot use the
+   master's push path, since the master being dead is why it fires), with ntfy
+   as an independent fallback whose HTTP status is CHECKED, and both callers log
+   DELIVERED vs FAILED TO DELIVER. Proven live 20:20:58Z: `webpush=delivered to
+   1/1 device(s) ntfy=HTTP200`. **Re-run `scripts/sync-watchdog-push.sh` after
+   registering or removing a device** — 158 holds a copy of the VAPID key and
+   the subscriptions (`/root/.jarvis-webpush.json`, 0600) and will otherwise
+   push to a stale list. What the silence hid: the same topic held an unread
+   priority-5 `Disk at 96%` — 55G of orphaned core dumps from AlecRae's bun API
+   crashing five times in three days. Cleared to 58%; the leak is the
+   co-tenant's, filed not fixed.
+   *(historic, for context)* **The 158 watcher was INSTALLED and proven to the
+   topic (2026-08-08).** `jarvis-watchdog.timer` on 158
    (see SECOND BOX) probes both of the master's paths every 5 min; its
    `--test-alert` landed in the ntfy topic cache at max priority the day it
    was installed. **The single remaining step is Craig's: confirm a DEVICE

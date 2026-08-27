@@ -420,3 +420,130 @@ pitch and speed**, because pitch-shifting a neural voice makes the engine
 resample rather than re-synthesise, which is precisely what makes it sound
 synthetic again. Only the compact voices get the slight lowering that made them
 tolerable. An explicit rate/pitch from the sheet still wins over both.
+
+---
+
+## The off-box watchdog: what "it doesn't work" actually meant (2026-08-27)
+
+> Craig: *"the jarvis watch dog doesnt work and it hasnt done for sometime so we
+> might as well stop it."* — followed by *"well if we keep it we had better some
+> major repairs."*
+
+He was right about the symptom and wrong about the cause, and the difference
+matters because stopping it would have removed the estate's only off-box witness
+while fixing nothing.
+
+**What was actually true.** `jarvis-watchdog.timer` on 158 was running every five
+minutes and had been for weeks. Its log showed it doing its job:
+
+```
+[2026-08-21T20:26:04Z] DOWN — alert pushed
+[2026-08-24T10:23:22Z] DOWN — alert pushed
+[2026-08-25T07:56:10Z] DOWN — alert pushed
+```
+
+Three real outages detected. Nothing reached him for any of them — because its
+only route was an ntfy topic no device of his was subscribed to. **A monitor
+whose alerts land in a topic nobody reads is indistinguishable from a monitor
+that is switched off.** From where he sat it was broken, and his conclusion was
+reasonable.
+
+**And it could never have told us.** `push()` discarded curl's exit status, and
+the DOWN branch logged `"alert pushed"` unconditionally. The check could not
+report its own failure — the same shape as every other incident in this file.
+
+### The repairs
+
+**1. A leg that actually reaches him.** 158 now sends Web Push straight to his
+iPhone via `/root/jarvis-webpush.mjs` — standalone, `node:crypto` only, no npm
+and no Jarvis code on 158 (same doctrine as the heartbeat script). It reads
+`/root/.jarvis-webpush.json` (0600): the deck's VAPID key and the registered
+subscriptions, put there by `scripts/sync-watchdog-push.sh` over the tailnet.
+
+This leg **cannot** be delegated to the master. The master being dead is the
+entire reason the watchdog fires, so anything routed through it is guaranteed
+unavailable at the only moment it matters.
+
+> The VAPID **private key is copied to 158**, deliberately. A subscription is
+> cryptographically bound to the key it was created with, so a second keypair
+> would simply be rejected by Apple. The key's only power is "may send a
+> notification to a device subscribed to this deck" — it grants no access to
+> either box and is useless without a subscription. Re-run
+> `scripts/sync-watchdog-push.sh` after registering or removing a device;
+> otherwise 158 keeps pushing to a list that no longer matches.
+
+**2. ntfy kept, as a genuinely independent fallback** — different provider,
+different transport, no dependency on Apple or on a subscription that can expire
+silently. Its HTTP status is now checked instead of discarded.
+
+**3. Both legs report.** `push()` returns success if either leg was accepted and
+logs exactly what happened; the callers log `DELIVERED` or `FAILED TO DELIVER on
+every leg (nobody has been told)`. Proven live:
+
+```
+[2026-08-27T20:20:58Z] push [Jarvis watchdog TEST] -> webpush=delivered to 1/1 device(s) ntfy=HTTP200
+```
+
+### What the silence was hiding
+
+With the delivery leg dead, everything else the box shouted was lost too. The
+ntfy topic's own 24-hour cache held twelve messages nobody had read, including
+two at priority 5:
+
+> `⚠️ Disk at 93% — climbing` · `🔴 Disk at 96% — critical`
+
+Both true. The master was at **96%, 6.0 GB free of 150 GB**. The cause was 55 GB
+of orphaned core dumps — five of them 11–13 GB each, from AlecRae's `bun` API
+crashing on 25, 26 and 27 August. A leaking co-tenant had quietly taken a third
+of the shared disk while the alert about it sat unread.
+
+Cores removed (inventory kept at `/var/log/jarvis-coredump-inventory-20260827.txt`,
+the small `.crash` reports in `/var/crash` kept): **96% → 58%, 61 GB free**.
+
+**The AlecRae leak itself is NOT fixed** — it is a co-tenant, so it is
+observe-and-file per GOVERNANCE.md, not something Jarvis repairs. Five more
+crashes rebuild the problem exactly as it was.
+
+The lesson generalises past this one script: **monitoring that cannot prove
+delivery is not monitoring.** Every check on this box now has to answer "and did
+anyone actually receive it?", which is what `jarvis-experience`'s
+`checkAlertChannel` and the deck's TEST ALERT button exist to answer.
+
+### "The test button is vibrate only — we need a good clear alert"
+
+Craig, 2026-08-27, minutes after the first one landed. Worth stating plainly
+because it is a limit, not a bug:
+
+**On iOS, the box cannot choose the sound.** A Web Push notification plays
+whatever the OS decides. There is no `sound` field a sender can set, no volume,
+and no custom tone — Apple reserves Critical Alerts (the only API that overrides
+the ring switch) for entitled native apps. Every lever is on the phone.
+
+What was changed here: **TEST ALERT now sends at `alert` level, not `warn`.** A
+test that exercises a quieter path than a real emergency proves nothing about
+the path that matters — only `alert` gets `renotify` and `requireInteraction`
+in `sw.js`, and only `alert` is never `silent`. The test must be the loudest
+thing the channel can do.
+
+**The three taps that make it audible**, in the order they usually fail:
+
+1. **The ring/silent switch on the side of the phone.** On silent, every
+   notification is vibrate-only, whatever the app. This is nearly always it.
+2. **Settings → Notifications → MARCO** → **Sounds ON**, and **Alerts**
+   selected (not just Banners). A PWA gets its own entry here after you install
+   it to the Home Screen.
+3. **Time Sensitive Notifications ON** in that same screen, so alerts break
+   through a Focus. If you run a Focus at night, also add MARCO to its Allowed
+   Notifications — otherwise a 3am page waits politely until morning.
+
+**If you want a genuinely distinctive, loud, DND-piercing alert**, that is what
+the ntfy leg is for and it is already live on the same alerts. The ntfy iOS app
+can set a **custom sound per topic** and honours priority 5 to cut through Do
+Not Disturb — things Web Push structurally cannot do. Install ntfy, subscribe to
+the topic in `NTFY_TOPIC`, and give it a loud tone. The two legs then do
+different jobs: Web Push is the one that opens the right deck tab on tap; ntfy
+is the one that wakes the house.
+
+The deck says all of this on the spot now — the note under TEST ALERT reports
+"sent to 1/1 at full alert level" and then explains that silence is iOS's
+decision, not the box's, so a quiet phone never reads as a broken channel.
