@@ -493,16 +493,36 @@ two at priority 5:
 > `⚠️ Disk at 93% — climbing` · `🔴 Disk at 96% — critical`
 
 Both true. The master was at **96%, 6.0 GB free of 150 GB**. The cause was 55 GB
-of orphaned core dumps — five of them 11–13 GB each, from AlecRae's `bun` API
-crashing on 25, 26 and 27 August. A leaking co-tenant had quietly taken a third
-of the shared disk while the alert about it sat unread.
+of orphaned core dumps — five of them 11–13 GB each, from the
+`gluecron-gluecron-1` container's `bun` process crashing on 25, 26 and 27
+August. A leaking co-tenant had quietly taken a third of the shared disk while
+the alert about it sat unread.
 
 Cores removed (inventory kept at `/var/log/jarvis-coredump-inventory-20260827.txt`,
 the small `.crash` reports in `/var/crash` kept): **96% → 58%, 61 GB free**.
 
-**The AlecRae leak itself is NOT fixed** — it is a co-tenant, so it is
-observe-and-file per GOVERNANCE.md, not something Jarvis repairs. Five more
-crashes rebuild the problem exactly as it was.
+**The leak itself is NOT fixed** — it is a co-tenant, so it is observe-and-file
+per GOVERNANCE.md, not something Jarvis repairs. The container runs with
+`HostConfig.Memory=0`, so five more crashes rebuild the problem exactly as it
+was.
+
+> **Corrected 2026-08-27, same evening.** I first filed this against **AlecRae**,
+> because five `bun` cores appeared and AlecRae runs bun. It was Gluecron's
+> container. The core filename says so and I did not read it: every core is
+> `core._usr_local_bin_bun.**1000**.…`, and uid 1000 is `linuxuser` (Gluecron's
+> container), while AlecRae's units run as uid **997**. Every tenant here that
+> runs bun shares `/usr/local/bin/bun`, so the path in the filename identifies
+> nothing at all. AlecRae's session disproved it from the box — uid mapping,
+> `docker inspect` on the live PID, and a journal showing their only ungraceful
+> exit was a plain `exit(1)`, which cannot produce a core. **Resolve the uid
+> before you name a tenant**, and print the username beside each core in any
+> future inventory. Two sessions were paged on my wrong attribution.
+>
+> AlecRae then applied the two mitigations to themselves anyway, having found
+> all four of their units carried the same `MemoryMax=infinity` +
+> `LimitCORE=infinity`: api 2G, web 1.5G, mta 1G, inbound 1G, all `LimitCORE=0`,
+> all verified live. Their lesson, worth keeping: *when a neighbour's failure
+> mode reaches you, audit yourself for it before you finish being right.*
 
 The lesson generalises past this one script: **monitoring that cannot prove
 delivery is not monitoring.** Every check on this box now has to answer "and did

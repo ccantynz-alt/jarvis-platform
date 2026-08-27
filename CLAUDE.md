@@ -590,11 +590,31 @@ auth).
   actually receive it?"; `checkAlertChannel` and the deck's TEST ALERT exist to
   answer it. A monitor whose alerts land where nobody reads is indistinguishable
   from a monitor that is off — which is exactly how Craig read it, correctly.
-- **A leaking CO-TENANT can take the shared disk down** (2026-08-27). AlecRae's
-  bun API grew to 11-13GB and died five times in three days; apport kept every
-  core, 55G, and the box hit 96%. Cores are host hygiene and safe to clear
-  (`/var/lib/apport/coredump`, keep the small reports in `/var/crash`); the leak
-  itself is the co-tenant's — observe and file, never repair (Rule 4).
+- **A leaking CO-TENANT can take the shared disk down** (2026-08-27). The
+  `gluecron-gluecron-1` container's bun process grew to 11-13GB and died five
+  times in three days; apport kept every core, 55G, and the box hit 96%. Cores
+  are host hygiene and safe to clear (`/var/lib/apport/coredump`, keep the small
+  reports in `/var/crash`); the leak itself is the co-tenant's — observe and
+  file, never repair (Rule 4). The container runs with `HostConfig.Memory=0`, so
+  it can do it again.
+- **A CORE FILENAME CARRIES THE UID — resolve it before naming a tenant**
+  (2026-08-27, and this one is mine). `core._usr_local_bin_bun.1000.…`: that
+  `.1000.` is the owner. I saw five bun cores, knew AlecRae runs bun, and filed
+  a briefing against AlecRae — twice, to two sessions. AlecRae runs as uid **997**;
+  uid **1000** is `linuxuser`, which is Gluecron's container. Every tenant on
+  this box that runs bun shares `/usr/local/bin/bun`, so the executable path in
+  the filename identifies NOTHING. `getent passwd <uid>` and
+  `systemctl show <unit> -p User` are the two commands that settle it, and the
+  live process settles it completely: `readlink /proc/<pid>/cwd` +
+  `/proc/<pid>/cgroup` → `docker inspect`. I had the guilty PID in my own `ps`
+  output (3030811, the LARGEST bun on the box) and did not follow it. Whoever
+  writes the next core inventory: print the resolved username beside each file.
+- **When a neighbour's failure mode reaches you, audit yourself for it before
+  you finish being right** (AlecRae's session, 2026-08-27). Told they were
+  leaking, they disproved it AND discovered all four of their units carried the
+  same `MemoryMax=infinity` + `LimitCORE=infinity` that made the incident
+  possible — then capped them. The correct rebuttal and the useful fix were
+  different actions.
 - **An alert about something the monitor cannot fix needs a HUMAN's rate limit,
   not a monitor's.** `alert` is exempt from push dedupe AND the hourly cap, so a
   `notify()` inside a 5-minute timer loop is 288 buzzes a day (2026-08-10: 235
@@ -673,9 +693,11 @@ auth).
    registering or removing a device** — 158 holds a copy of the VAPID key and
    the subscriptions (`/root/.jarvis-webpush.json`, 0600) and will otherwise
    push to a stale list. What the silence hid: the same topic held an unread
-   priority-5 `Disk at 96%` — 55G of orphaned core dumps from AlecRae's bun API
-   crashing five times in three days. Cleared to 58%; the leak is the
-   co-tenant's, filed not fixed.
+   priority-5 `Disk at 96%` — 55G of orphaned core dumps from the
+   `gluecron-gluecron-1` container's bun process crashing five times in three
+   days. Cleared to 58%; the leak is the co-tenant's, filed not fixed.
+   (First filed against AlecRae on my misreading of the core filenames — see the
+   UID gotcha above; AlecRae's session disproved it from the box.)
    *(historic, for context)* **The 158 watcher was INSTALLED and proven to the
    topic (2026-08-08).** `jarvis-watchdog.timer` on 158
    (see SECOND BOX) probes both of the master's paths every 5 min; its
