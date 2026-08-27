@@ -1126,7 +1126,11 @@ wss.on('connection', (ws, req) => {
     // Any briefing ask also feeds the deck's structured briefing panel,
     // regardless of whether the brain or the intent pipeline answers.
     if (/\bbrief/i.test(text)) {
-      handleBriefing().then(b => { if (b?.data) send({ type: 'briefing', data: b.data }); }).catch(() => {});
+      // b.speech is the one-line spoken summary handleBriefing() has always
+      // computed. It used to be dropped here, so the panel rendered mute
+      // (2026-08-27) — the client can derive its own line, but the server's is
+      // authoritative and is what Slack/gateway already say.
+      handleBriefing().then(b => { if (b?.data) send({ type: 'briefing', data: b.data, speech: b.speech }); }).catch(() => {});
     }
     try {
       // "switch brain to GPT / Claude" — handled before any brain runs

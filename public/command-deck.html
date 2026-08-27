@@ -2891,7 +2891,7 @@ function handleMsg(m) {
   else if (m.type === 'chat') onChatFinal(m);
   else if (m.type === 'audio_ctl') v2AudioCtl(m.ev);
   else if (m.type === 'notify') showAlert(m.level, m.title, m.speech);
-  else if (m.type === 'briefing' && m.data) showBriefing(m.data);
+  else if (m.type === 'briefing' && m.data) showBriefing(m.data, m.speech);
   else if (m.type === 'show') showThing(m);
 }
 
@@ -2998,7 +2998,36 @@ document.addEventListener('keydown', (e) => {
   if (box && box.classList.contains('open')) { box.classList.remove('open'); e.stopImmediatePropagation(); }
 }, true);
 
-function showBriefing(d) {
+// The spoken half of the briefing panel (2026-08-27).
+//
+// For its whole life the panel rendered in SILENCE: showBriefing() built
+// innerHTML, wired its close button and returned, while its sibling showAlert()
+// ended with speak(). handleBriefing() had been computing a spoken summary the
+// entire time — deck-server just never forwarded it. Measured against the live
+// deck before the fix: the {type:'briefing'} frame landed at 28ms carrying
+// `speech: undefined`, the panel opened with the full briefing on screen, and
+// the only speak() calls in that turn (3129/3794/4014ms) carried the brain's
+// separate answer. Craig watched a briefing appear and heard nothing.
+//
+// Derived here as well as sent, so EVERY path that can raise the panel speaks —
+// including ?demo-briefing=1, which a virtual-time capture can witness but a WS
+// frame can never reach. Wording mirrors handleBriefing()'s line so the two
+// sources sound like the same assistant.
+function briefingSpeech(d) {
+  const b = d || {};
+  const n = (a) => (Array.isArray(a) ? a.length : 0);
+  const count = (c, one, many) => c + ' ' + (c === 1 ? one : many);
+  const parts = [count(n(b.healthy), 'platform healthy', 'platforms healthy')];
+  if (n(b.attention)) parts.push(count(n(b.attention), 'needs attention', 'need attention'));
+  if (n(b.unaudited)) parts.push(n(b.unaudited) + ' not yet audited');
+  let line = 'Here is your briefing. ' + parts.join(', ') + '.';
+  if (n(b.jobs)) line += ' ' + count(n(b.jobs), 'job running', 'jobs running') + '.';
+  const open = Number(b.openIssues) || 0;
+  if (open) line += ' ' + count(open, 'unresolved issue', 'unresolved issues') + ' in memory.';
+  return line;
+}
+
+function showBriefing(d, speech) {
   const box = $('briefing');
   const row = (dot, name, extra, extraColor) =>
     '<div class="brief-row"><span style="color:' + dot + '">●</span>' +
@@ -3036,6 +3065,11 @@ function showBriefing(d) {
   document.addEventListener('keydown', function esc(e) {
     if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
   });
+  // Say it. speak() is the single funnel — it honours the /tts contract, so
+  // this rides the free Google voice like everything else and never touches an
+  // audio API itself. discardReply = Craig tapped the mic to interrupt this
+  // turn: render the panel, stay quiet, exactly as onChatFinal does.
+  if (!discardReply) speak(speech || briefingSpeech(d));
 }
 
 // ── Spoken alert banner (warn/alert notifications, announced aloud) ─────────

@@ -233,6 +233,16 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
   on screen every 10 minutes forever, for the configuration Craig asked for
   (2026-08-16). `jarvis-experience`'s `checkVoice` calls this "off by choice"
   and passes — correctly; the deck is what had it wrong.
+- **A panel that renders must speak (2026-08-27).** The briefing panel rendered
+  in silence for its whole life: `handleBriefing()` returns `{text, speech,
+  data}` and deck-server forwarded only `data`, while `showBriefing()` built
+  innerHTML and returned — the one of the three frame handlers with no `speak()`
+  (`showAlert()` has always ended with one). It looked like a voice fault and
+  was not: `TTS_DISABLED=1` → `/tts` 503 `unconfigured` → the Google voice, so
+  the VOICE-sheet test spoke perfectly the whole time. `closeEar()`/`isSelfEcho()`
+  gate the MIC and the NEXT inbound utterance — neither can mute an outbound
+  `speak()`. The line is now sent AND derived client-side (`briefingSpeech(d)`),
+  so `?demo-briefing=1` is voiced too. Test: `test/deck-briefing-voice.test.js`.
 - **The ear is SHUT while Jarvis talks — every platform, no exceptions.**
   `closeEar()` + `isSelfEcho()` (LCS) as backstop. No voice barge-in (Craig
   accepted 2026-07-31): Escape, STOP bar, or mic button.
