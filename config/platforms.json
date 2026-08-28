@@ -72,7 +72,11 @@
       ],
       "status": "active",
       "notes": "Registry truth pass 2026-08-08: path corrected /root/gatetest -> /opt/gatetest (the newer checkout, the one deploy-gate uses, per CLAUDE.md). repo corrected to crclabs-hq/GateTest — BOTH on-box checkouts point there; the old ccantynz-alt/gatetest value was the roadmap move-8 mismatch. /root/gatetest is a stale Aug-5 duplicate awaiting Craig's deletion. gatetest.ai is in .ai redemption since 2026-07-29 — registry-level, only Craig can fix.",
-      "site_url": "https://gatetest.ai"
+      "site_url": "https://gatetest.ai",
+      "probes": {
+        "gatetest": "https://gatetest.ai",
+        "gatetest-mcp": "https://mcp.gatetest.ai/healthz"
+      }
     },
     "alecrae": {
       "name": "alecrae",
@@ -101,6 +105,7 @@
       "display_name": "Jarvis Platform",
       "server": "66.42.121.161",
       "path": "/opt/jarvis",
+      "health_url": "http://127.0.0.1:9206/health",
       "repo": "git@github.com:ccantynz-alt/jarvis-platform.git",
       "branch_strategy": "direct-to-main",
       "default_branch": "main",
@@ -159,7 +164,8 @@
         "Docker"
       ],
       "status": "active",
-      "notes": "Local-only, no git remote as of 2026-07-06 (master_engine.py + venv + Dockerfile). No public domain."
+      "notes": "Local-only, no git remote as of 2026-07-06 (master_engine.py + venv + Dockerfile). No public domain. monitor:false 2026-08-20 — scratch checkout with no .git, no public site; not a fleet product.",
+      "monitor": false
     },
     "marcoreid": {
       "name": "marcoreid",
@@ -213,7 +219,8 @@
         "TypeScript"
       ],
       "status": "active",
-      "notes": "Third-party fork (abi/screenshot-to-code). Container restarted 2026-07-17 (was OOM-exited 2026-07-03). Runs on :5173 (frontend) / :7001 (backend), loopback only. Bring up: cd /opt/screenshot-to-code && docker compose up -d. 2026-07-17: restart: unless-stopped set on both services (compose + docker update) after self-heal session 78; frontend/backend verified HTTP 200."
+      "notes": "Third-party fork (abi/screenshot-to-code). Container restarted 2026-07-17 (was OOM-exited 2026-07-03). Runs on :5173 (frontend) / :7001 (backend), loopback only. Bring up: cd /opt/screenshot-to-code && docker compose up -d. 2026-07-17: restart: unless-stopped set on both services (compose + docker update) after self-heal session 78; frontend/backend verified HTTP 200. monitor:false 2026-08-20 — third-party fork, excluded from code-health/audit; not a fleet product, must not sit in NEEDS ATTENTION.",
+      "monitor": false
     },
     "marco-demo": {
       "name": "marco-demo",

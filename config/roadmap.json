@@ -336,6 +336,12 @@
           "id": 51,
           "title": "Second-box alert redundancy — 158 pushes when the master's own path is broken",
           "status": "pending"
+        },
+        {
+          "id": 52,
+          "title": "The registry reconciler — verify what the registry CLAIMS about each platform",
+          "status": "pending",
+          "note": "Spec: docs/REGISTRY-SYNC.md. Axis 3 of four: liveness, code truth and birth are watched; topology truth is not. DavenRoe read \"server\":\"vercel\" for five days after moving onto this box while twelve services stayed green. Daily read-only timer; verifies path/server/repo/site_url per entry, reverse-sweeps the box for live things nobody registered, reaps stale platform_state rows. Proposes, never edits the registry (infrastructure = ALWAYS_HUMAN). Phase 1 shipped 2026-08-28: fleet-check targets now derive from the registry (src/lib/fleet-targets.js) — marco-demo had been registered at birth and never probed once."
         }
       ]
     }

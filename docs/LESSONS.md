@@ -439,6 +439,47 @@ the UPDATE half over a real status. Pinned by
 checkouts, **run it on the box**. Remaining cosmetic gap and the designed fix
 (per-writer columns + derived worst-of `status`): see KNOWN DEBT in CLAUDE.md.
 
+### The list that decided who was watched at all (2026-08-28)
+
+Craig: *"how do we keep jarvis/marco synchronised with the platforms."* The
+answer turned out to be: for uptime, we didn't. `scripts/fleet-check.sh`
+carried its own hardcoded `FLEET=` list — the precise thing CLAUDE.md forbids
+("read the registry; never trust a list in a doc") — and it had drifted from
+`config/platforms.json` three ways at once.
+
+The sharpest: **`marco-demo`, the first platform the build pipeline ever
+produced, was registered at birth on 2026-08-25 with a `site_url`, and was
+never probed once.** Its `platform_state` row still read `unknown / health 0 /
+2026-08-25T13:41` three days later. CLAUDE.md said "platforms.json entry at
+birth — the fleet watches the newborn". The registration half was real; the
+watching half was a sentence. Nothing reported this, because *the failure mode
+of a monitor is an absence*: no probe, no status change, no alert, and a row
+that simply stops moving looks identical to one nobody has any news about.
+
+Also live in that list: `gatetest-mcp`, probed for months but not a registry
+key at all — a `platform_state` row no config could explain; and `davenroe`,
+probed at `www.davenroe.com` while the registry declared `davenroe.com`, two
+spellings of one claim with nothing comparing them.
+
+Fixed by deriving the targets from the registry (`src/lib/fleet-targets.js`),
+so *registered* and *watched* are one word. Three rules earned their comments:
+`site_url` beats `health_url` (vapron has both, and preferring its tailnet
+health endpoint would make the headline "vapron healthy" true of something no
+customer can reach); a row name may be written at most once per tick (two
+declarations of one row is the last-writer-wins trap in miniature); and an
+empty target list must SHOUT and exit non-zero, because fleet-check is the only
+thing that notices a platform is down and self-heal acts solely on the status
+it writes — probing nothing looks exactly like a fleet in perfect health. The
+shout is `warn`, not `alert`: its 10-minute dedup window matches the timer's
+cadence, where `alert` is dedup-exempt and would buzz 144 times a day over a
+config only a human can fix (see the 235-push flood).
+
+What this does NOT fix, and is the larger half of Craig's question: nothing
+verifies the registry's *claims* — `server`, `path`, `repo`, `site_url`. That
+is how DavenRoe sat at `"server":"vercel"` for five days after it moved onto
+this box while twelve services stayed green. The designed reconciler is
+`docs/REGISTRY-SYNC.md`.
+
 ---
 
 ## The dispatch confirmation gate

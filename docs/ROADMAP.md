@@ -35,7 +35,7 @@ live (`mcp.gatetest.ai`).
 
 ---
 
-## THE 51 MOVES (order = strategy; reliability is the floor)
+## THE 52 MOVES (order = strategy; reliability is the floor)
 
 ### Phase 1 — STABILIZE (kill "everything breaks")
 1. ✅ Restart policies — all jarvis-* + gatetest-mcp = `Restart=always`, alecrae = `on-failure`. (Container autoheal deferred — could conflict with Coolify; Craig call.)
@@ -208,6 +208,14 @@ at the right volume, at the right hour, with somewhere to tap.
 51. ⬜ **Second-box alert redundancy.** 158 watches the master and can push;
     the master cannot currently hand its alerts over when its own push path is
     the thing that is broken.
+52. ⬜ **The registry reconciler** — verify what the registry CLAIMS, not
+    just whether the sites are up. Spec: `docs/REGISTRY-SYNC.md`. DavenRoe read
+    `"server":"vercel"` for five days after it moved onto this box, with twelve
+    services green throughout, because nothing has ever asked the registry whether
+    it still describes reality. Daily, read-only, proposes rather than edits.
+    Phase 1 landed 2026-08-28: fleet-check's targets now come from the registry
+    instead of a hardcoded list — `marco-demo` had been registered at birth and
+    never probed once.
 
 ---
 

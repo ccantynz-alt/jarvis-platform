@@ -27,19 +27,36 @@ FLAP_THRESHOLD=3
 
 # platform|probe-url   — probes the platform's REAL public presence (the site
 # the owner cares about), so dashboard numbers match reality.
-FLEET="
-jarvis|http://127.0.0.1:9206/health
-zoobicon|https://zoobicon.com
-vapron|https://vapron.ai
-gluecron|https://gluecron.com
-alecrae|https://alecrae.com
-marcoreid|https://www.marcoreid.com
-davenroe|https://www.davenroe.com
-bookaride|https://www.bookaride.co.nz
-voxlen|https://www.voxlen.ai
-gatetest|https://gatetest.ai
-gatetest-mcp|https://mcp.gatetest.ai/healthz
-"
+#
+# Derived from THE registry, config/platforms.json, never from a list kept here
+# (2026-08-28). The list that used to live at this spot had drifted from the
+# registry three ways at once — most sharply, marco-demo was registered at
+# birth on 2026-08-25 and never probed once, its platform_state row still
+# reading `unknown / health 0` three days later while CLAUDE.md claimed the
+# fleet watches the newborn. Registered and watched are one word now. Rules,
+# tests and the incidents: src/lib/fleet-targets.js, test/fleet-targets.test.js.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FLEET_ERR="$(mktemp)"
+FLEET="$(node "$ROOT/src/lib/fleet-targets.js" 2>"$FLEET_ERR")"
+FLEET_RC=$?
+FLEET_WHY="$(tr '\n"' ' ' < "$FLEET_ERR")"; rm -f "$FLEET_ERR"
+
+# An empty target list must SHOUT, never coast. fleet-check is the only thing
+# that notices a platform is down and self-heal acts solely on the status it
+# writes, so probing nothing looks exactly like a fleet that is perfectly well:
+# every row simply stops being updated, and an absence cannot alarm. Bail
+# before the loop and file it — level `warn`, whose 10-minute dedup window
+# matches this timer's cadence, because `alert` is exempt from dedup and would
+# buzz Craig's phone 144 times a day over a config he must fix by hand anyway
+# (LESSONS: the 235-push flood, 2026-08-10).
+if [ "$FLEET_RC" -ne 0 ] || [ -z "$FLEET" ]; then
+  echo "[fleet-check] $TS FATAL: no probe targets — $FLEET_WHY" >&2
+  curl -s -X POST http://127.0.0.1:9200/memory/notifications \
+    -H 'Content-Type: application/json' --max-time 10 \
+    -d "{\"source\":\"fleet-check\",\"level\":\"warn\",\"title\":\"Fleet check has no platforms to probe\",\"body\":\"config/platforms.json yielded no probeable platform (rc=$FLEET_RC). NOTHING in the fleet is being monitored until this is fixed. $FLEET_WHY\",\"speech\":\"Fleet monitoring is down, sir. The platform registry yielded nothing to probe.\"}" \
+    -o /dev/null 2>/dev/null
+  exit 1
+fi
 
 summary=""
 while IFS='|' read -r name url expected; do
