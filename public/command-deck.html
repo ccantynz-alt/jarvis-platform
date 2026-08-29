@@ -1413,6 +1413,80 @@ function stopAllAudio() {
 // still mean a genuine degradation and still announce themselves — that
 // distinction is the whole point (principle 6: never degrade quietly, but never
 // cry degradation over a deliberate setting either).
+// SpeechRecognition is the EAR. Its absence must never mute the MOUTH
+// (2026-08-29). `voiceMode` is forced to 'off' when this browser has no
+// SpeechRecognition — and `speak()` used to return early on 'off', so a device
+// that cannot LISTEN was also, silently, a device Marco could never SPEAK from.
+// The pill read "MIC OFF", which is true and completely misleading: it names
+// the input while the real casualty is the output. Craig heard nothing from his
+// iPhone and there was no badge, no announcement and no log to say why — a
+// quiet degradation, which is the one thing principle 6 forbids.
+//
+// So: a mode Craig CHOSE ('off' via the mic button) still mutes everything,
+// because that is what he asked for. A mode forced on him by a missing API
+// must not.
+// QA: ?nosr=1 simulates a browser with no SpeechRecognition — the iPhone case
+// this whole section exists for. Without it the branch below is unreachable in
+// any headless capture (Chromium has webkitSpeechRecognition), which is how it
+// shipped unverified in the first place.
+const SR_AVAILABLE = qs.get('nosr') !== '1' &&
+  !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+// How old a queued utterance may be and still be worth speaking at the first
+// tap. 90s keeps a reply or an alert he just missed; it drops a greeting from
+// a page he opened and left.
+const SPEECH_STALE_MS = 90000;
+
+// ── Does this device ACTUALLY speak? Tell the box. (2026-08-29) ─────────────
+//
+// "I still can't hear Marco on my iPhone" has been diagnosed four times from
+// the code alone, because every fact that would settle it — did getVoices()
+// return anything, which voice got picked, was audio ever unlocked, did the
+// utterance end or silently time out — lives in a console on a phone in
+// Craig's pocket. Each fix was plausible and none was verified on the device
+// that was failing. Two short reports per page load end that: one when the
+// deck settles, one after the first utterance resolves. Never more (this is a
+// diagnostic, not a telemetry pipe), and never any transcript text.
+let lastSpeechOutcome = 'none';
+let voiceReportsSent = 0;
+function reportVoice(when) {
+  if (voiceReportsSent >= 2) return;
+  voiceReportsSent++;
+  let v = null;
+  try { v = pickBritishMaleVoice(voiceCache, voiceSetting('name', null)); } catch { /* pre-init */ }
+  const body = {
+    when,
+    ua: navigator.userAgent,
+    ios: IS_IOS,
+    standalone: !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+      !!window.navigator.standalone,
+    srAvailable: SR_AVAILABLE,
+    mode: voiceMode,
+    primed: ttsPrimed,
+    armed,
+    engine: voiceEngine,
+    voices: (voiceCache || []).length,
+    chosen: v ? v.name : null,
+    chosenLang: v ? v.lang : null,
+    tier: v ? voiceTier(v.name) : null,
+    outcome: lastSpeechOutcome,
+    queued: speechQ.length,
+    // Whether the page believes it is allowed to make sound at all. On iOS this
+    // is the difference between "we never asked" and "we asked and were denied".
+    audioState: (() => { try { return (window.AudioContext || window.webkitAudioContext) && outAnalyser ? 'running' : 'unknown'; } catch { return 'unknown'; } })(),
+  };
+  try {
+    fetch('/api/voice-report', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body), keepalive: true,
+    }).catch(() => {});
+  } catch { /* never let a diagnostic break the deck */ }
+}
+setTimeout(() => reportVoice('settled'), 4000);
+
+// Each entry is { text, at } — the timestamp matters at the first tap. See
+// armVoice(): the queue used to be dropped wholesale by the very gesture whose
+// badge promised to speak it.
 const speechQ = [];
 let speechActive = false;
 // 'neural'  — try ElevenLabs (only reachable if someone re-enables TTS)
@@ -1424,11 +1498,15 @@ let backupSince = 0, ttsFailStreak = 0;
 let lastSpeechEndAt = 0; // Date.now() when Jarvis last stopped talking — see MIC_COOLDOWN_MS
 
 function speak(text) {
-  if (qs.get('voice') === '0' || voiceMode === 'off') return;
+  if (qs.get('voice') === '0') return;
+  // A DELIBERATE 'off' (he cycled the mic button to OFF) mutes everything. An
+  // 'off' forced by a browser with no SpeechRecognition must not — see
+  // SR_AVAILABLE above.
+  if (voiceMode === 'off' && SR_AVAILABLE) return;
   const t = String(text == null ? '' : text).trim();
   if (!t) return;
   rememberSpoken(t); // what the next utterance is judged against — see isSelfEcho
-  speechQ.push(t);
+  speechQ.push({ text: t, at: Date.now() });
   while (speechQ.length > 6) speechQ.shift(); // never build a backlog monologue
   updatePendingBadge();
   pumpSpeech();
@@ -1446,9 +1524,11 @@ async function pumpSpeech() {
     // barge-in; that is deliberately given up (Craig's call, 2026-07-31) in
     // favour of Escape / the STOP bar / the mic button.
     closeEar();
-    const text = speechQ.shift();
+    const text = speechQ.shift().text;
     updatePendingBadge();
     try { await speakOnce(text); } catch { /* keep the queue moving */ }
+    // One report carrying a REAL outcome beats any amount of code reading.
+    reportVoice('after-utterance');
   }
   speechActive = false;
   openFollowUpWindow(); // he just spoke to Craig — Craig's reply needs no wake word
@@ -1499,7 +1579,7 @@ function enterBrowserVoice(pendingText) {
   voiceEngine = 'browser';
   ttsFailStreak = 0;
   setVoiceBadge('');
-  if (pendingText) speechQ.unshift(pendingText);
+  if (pendingText) speechQ.unshift({ text: pendingText, at: Date.now() });
   updatePendingBadge();
 }
 
@@ -1507,10 +1587,10 @@ function enterBackupVoice(reason, pendingText) {
   const announce = voiceEngine !== 'backup';
   voiceEngine = 'backup'; backupSince = Date.now(); ttsFailStreak = 0;
   setVoiceBadge('⚠ BACKUP VOICE');
-  if (pendingText) speechQ.unshift(pendingText);
-  if (announce) speechQ.unshift(reason === 'budget'
+  if (pendingText) speechQ.unshift({ text: pendingText, at: Date.now() });
+  if (announce) speechQ.unshift({ at: Date.now(), text: reason === 'budget'
     ? 'Neural voice budget exhausted for today, sir — switching to the backup voice.'
-    : 'Neural voice link unavailable, sir — switching to the backup voice.');
+    : 'Neural voice link unavailable, sir — switching to the backup voice.' });
   updatePendingBadge();
 }
 
@@ -1760,9 +1840,21 @@ function speakChunkAsync(text) {
     u.pitch = Number(savedPitch) || (enhanced ? 1.0 : 0.9);
     u.volume = 1;                                   // never below full — see ALERT VOLUME for loudness
     let done = false, keepAlive = null;
-    const finish = () => { if (done) return; done = true; if (keepAlive) { clearInterval(keepAlive); keepAlive = null; } resolve(); };
-    u.onend = u.onerror = finish;
-    setTimeout(finish, 2000 + text.length * 90); // belt & braces: never wedge the queue
+    // WHICH of the three ways this ended is the whole diagnosis on a phone
+    // (2026-08-29). onend = the device really spoke. onerror = it refused and
+    // said why. The timeout = it accepted the utterance and did nothing, which
+    // is what silent-switch / locked-audio iOS looks like from in here. They
+    // used to share one handler, so all three were indistinguishable and the
+    // only evidence lived in a console nobody can read. See reportVoice().
+    const finish = (how) => {
+      if (done) return; done = true;
+      if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
+      lastSpeechOutcome = how;
+      resolve();
+    };
+    u.onend = () => finish('ended');
+    u.onerror = (e) => finish('error:' + ((e && e.error) || 'unknown'));
+    setTimeout(() => finish('timeout'), 2000 + text.length * 90); // never wedge the queue
     speechSynthesis.speak(u);
     // Chrome desktop bug (Craig's laptop, 2026-08-27: "the voice is gone
     // again"): the synthesis engine pauses ITSELF mid-utterance and after brief
@@ -1787,7 +1879,9 @@ function setVoiceBadge(text) {
 function updatePendingBadge() {
   const el = $('voice-pending');
   const n = speechQ.length;
-  const show = !ttsPrimed && n > 0 && voiceMode !== 'off';
+  // Same rule as speak(): a forced 'off' (no SpeechRecognition here) still has
+  // a mouth, so it still has a queue worth announcing.
+  const show = !ttsPrimed && n > 0 && !(voiceMode === 'off' && SR_AVAILABLE);
   el.classList.toggle('hidden', !show);
   if (show) el.textContent = '🔇 ' + n + ' SPOKEN ' + (n === 1 ? 'MESSAGE' : 'MESSAGES') + ' WAITING — TAP TO HEAR';
 }
@@ -1883,7 +1977,11 @@ function updateOrbLabel() {
 function updateVoiceState() {
   const pill = $('voice-state'); if (!pill) return;
   let label, cls;
-  if (voiceMode === 'off') { label = 'MIC OFF'; cls = 'off'; }
+  // "MIC OFF" on a browser that never had a mic names the input while hiding
+  // the thing Craig actually notices — so say which half is missing, and never
+  // imply the mouth is off when it is not (2026-08-29).
+  if (!SR_AVAILABLE) { label = S.speaking ? 'SPEAKING' : 'VOICE OUT ONLY'; cls = S.speaking ? 'speaking' : 'off'; }
+  else if (voiceMode === 'off') { label = 'MIC OFF'; cls = 'off'; }
   else if (S.speaking) { label = 'SPEAKING'; cls = 'speaking'; }
   else if (S.thinking) { label = 'THINKING'; cls = 'thinking'; }
   else if (!armed) { label = 'TAP TO TALK'; cls = 'wake'; }
@@ -1937,7 +2035,10 @@ function sendCommand(c) {
 // Wake mode is the default: the deck listens passively while open; a sentence
 // starting with "Jarvis" (fuzzy — STT often hears "Java"/"drivers") becomes a
 // command. The mic never listens while Jarvis himself is speaking.
-const SRCls = window.SpeechRecognition || window.webkitSpeechRecognition;
+// ONE source of truth for "can this browser listen" — SR_AVAILABLE, declared
+// with the speech-output code above, because that is where its absence used to
+// do its damage.
+const SRCls = SR_AVAILABLE ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
 const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); // iPadOS masquerades as Mac
 const SR_LANG = qs.get('lang') || localStorage.getItem('jarvis_lang') || 'en-NZ';
@@ -1982,12 +2083,27 @@ function armVoice() {
   if (armed || voiceMode === 'off') return;
   armed = true;
   updateOrbLabel();
-  // Anything queued while audio was locked is STALE — it was composed before
-  // Craig tapped, and speaking it now is both wrong ("I'm already up") and the
-  // thing that bled into the mic. Drop it rather than play it late.
+  // What the first tap does with the queue (rewritten 2026-08-29).
+  //
+  // This used to drop the queue WHOLESALE — and primeTTS, three lines earlier,
+  // schedules `pumpSpeech` at +300ms to "flush anything that queued before the
+  // first tap". Two opposite intentions, and the synchronous one won: the tap
+  // deleted the queue, then the flush found it empty. Meanwhile the badge on
+  // screen read "🔇 2 SPOKEN MESSAGES WAITING — TAP TO HEAR". Tapping was the
+  // one gesture guaranteed to make sure he never heard them.
+  //
+  // The original instinct is still right for the case that earned it: a boot
+  // greeting composed minutes ago is stale, and playing it late is both wrong
+  // ("I'm already up") and what bled into the mic. But a reply or an alert from
+  // four seconds ago is exactly what he tapped for. So age decides, not the
+  // gesture — and the badge stops lying either way.
   if (speechQ.length) {
-    console.warn(`[voice] dropping ${speechQ.length} utterance(s) queued before audio was unlocked`);
+    const now = Date.now();
+    const fresh = speechQ.filter(q => now - (q.at || 0) < SPEECH_STALE_MS);
+    const dropped = speechQ.length - fresh.length;
+    if (dropped) console.warn(`[voice] dropping ${dropped} stale utterance(s) queued before audio was unlocked`);
     speechQ.length = 0;
+    for (const q of fresh) speechQ.push(q);
     updatePendingBadge();
   }
   // startListening() re-tests every gate, so if anything IS still speaking the

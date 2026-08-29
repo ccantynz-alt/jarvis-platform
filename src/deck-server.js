@@ -482,6 +482,49 @@ app.post('/api/ops/inbox-read', async (req, res) => {
   }
 });
 
+// ── Does Craig's device actually speak? (2026-08-29) ────────────────────────
+//
+// "I still can't hear Marco on my iPhone" had been diagnosed four times from
+// the code alone — plausibly, and without once seeing the failing device. Every
+// deciding fact (did getVoices() return anything, which voice was picked, was
+// audio ever unlocked, did the utterance END or silently TIME OUT) lived in a
+// console on a phone in his pocket. This is the smallest thing that turns that
+// into evidence on the box: at most two short reports per page load, no
+// transcript text, newest-first, capped.
+//
+// Deliberately NOT auth-gated beyond the deck's own gate: a device that cannot
+// authenticate is exactly the device whose failure we most want to hear about,
+// and the payload is a fixed set of capability booleans, not user content.
+const VOICE_REPORT_KEY = 'deck-voice-reports';
+const VOICE_REPORT_KEEP = 12;
+// Only these keys are ever stored. A client cannot post arbitrary JSON into
+// memory through this route — it is a diagnostic, not a write channel.
+const VOICE_REPORT_FIELDS = ['when', 'ua', 'ios', 'standalone', 'srAvailable', 'mode', 'primed',
+  'armed', 'engine', 'voices', 'chosen', 'chosenLang', 'tier', 'outcome', 'queued', 'audioState'];
+
+app.post('/api/voice-report', async (req, res) => {
+  const raw = req.body || {};
+  const clean = { ts: new Date().toISOString(), who: identityLogin(req) || 'token/local' };
+  for (const k of VOICE_REPORT_FIELDS) {
+    const v = raw[k];
+    if (v === undefined || v === null) continue;
+    clean[k] = typeof v === 'string' ? v.slice(0, 200) : (typeof v === 'boolean' || typeof v === 'number' ? v : String(v).slice(0, 200));
+  }
+  try {
+    let list = [];
+    const r = await fetch(`${MEMORY}/memory/kv/${VOICE_REPORT_KEY}`, { signal: AbortSignal.timeout(5000) });
+    if (r.ok) { try { list = JSON.parse((await r.json()).value) || []; } catch { list = []; } }
+    if (!Array.isArray(list)) list = [];
+    list.unshift(clean);
+    await fetch(`${MEMORY}/memory/kv`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: VOICE_REPORT_KEY, value: JSON.stringify(list.slice(0, VOICE_REPORT_KEEP)) }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch { /* a diagnostic must never be the thing that breaks the deck */ }
+  res.json({ ok: true });
+});
+
 // Job log tail (move 31 phase 4): the phone can pull a finished/running job's
 // captured output + error so orchestration is inspectable from the deck, not
 // just a status word. Read-only; auth-gated like the other ops routes.
