@@ -233,6 +233,24 @@ verify with `systemctl show <svc> -p MemoryMax`, never by reading a unit.
   on screen every 10 minutes forever, for the configuration Craig asked for
   (2026-08-16). `jarvis-experience`'s `checkVoice` calls this "off by choice"
   and passes — correctly; the deck is what had it wrong.
+- **Marco's MOUTH is not wired to his EAR (2026-08-29).** `speak()` consults
+  `speechMuted` (`jarvis_speech_muted`) and `?voice=0` — never `voiceMode`,
+  `armed`, `SRCls` or `listening`. It used to return early on
+  `voiceMode === 'off'`, i.e. the MICROPHONE's mode, which the mic button
+  cycles to and PERSISTS, and which is forced to `'off'` on any browser without
+  SpeechRecognition (an iPhone home-screen PWA, Lockdown Mode, an in-app
+  browser) — where the mic button then refuses to cycle back out. Craig's
+  iPhone was mute for two days: no briefing, no reply, nothing on screen
+  saying why. A deck that cannot speak must SAY so — the state pill reports
+  **MARCO MUTED** / **NO VOICE** above every mic state, and the ⚙ VOICE sheet
+  names the cause and undoes it. Mic-off still stops him NOW (one-shot
+  `stopAllAudio()`), never persistently. Tests:
+  `test/deck-speech-output.test.js`.
+- **A browser workaround is gated to the browser it was written for.** The
+  Chrome keep-alive nudge (`speechSynthesis.resume()` while speaking, for
+  Blink's self-pausing engine) rides `SPEECH_KEEPALIVE` — non-iOS Chrome/Edge
+  only. Shipping it to every platform on the untested claim that "iOS ignores
+  it" is what silenced the phone.
 - **The ear is SHUT while Jarvis talks — every platform, no exceptions.**
   `closeEar()` + `isSelfEcho()` (LCS) as backstop. No voice barge-in (Craig
   accepted 2026-07-31): Escape, STOP bar, or mic button.
@@ -550,6 +568,14 @@ auth).
   dependency, i.e. exactly when Craig talks to Jarvis most (2026-08-07).
 - The ear is shut while Jarvis talks; the open mic has bounds; diagnose voice
   via the `jarvis-conversation` KV first.
+- **Deck silent but otherwise fine? Check the MOUTH's own switch, not the
+  mic.** `speak()` never reads `voiceMode`; the pill says MARCO MUTED / NO
+  VOICE when it can't speak. And a per-browser TTS workaround goes behind
+  `SPEECH_KEEPALIVE`, never to every platform.
+- **`loadVoices()` runs once at parse time, above every `let` in the voice
+  section** — anything it calls that reads `voiceEngine`/`ttsPrimed`/
+  `speechMuted` is a TDZ ReferenceError that kills the whole deck script.
+  That is what `voicesReady` guards.
 - Drop-ins beat unit files; oneshot units need explicit `TimeoutStartSec`.
 - A registry path is a claim about WHOSE code lives there — verify before
   adding a platform (over ssh for a remote one).

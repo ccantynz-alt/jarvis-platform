@@ -417,6 +417,7 @@ body{font-family:'Rajdhani',sans-serif;color:#d7e7f0}
   <div class="vs-row"><label for="vs-rate">RATE <span id="vs-rate-v">1.02</span></label><input id="vs-rate" type="range" min="0.8" max="1.3" step="0.02" value="1.02"></div>
   <div class="vs-row"><label for="vs-pitch">PITCH <span id="vs-pitch-v">0.9</span></label><input id="vs-pitch" type="range" min="0.6" max="1.3" step="0.05" value="0.9"></div>
   <div class="vs-row"><label for="vs-lang">MIC LANGUAGE</label><select id="vs-lang"><option>en-NZ</option><option>en-GB</option><option>en-AU</option><option>en-US</option></select></div>
+  <div class="vs-row"><label for="vs-mute">MARCO&#39;S VOICE</label><div id="vs-mute" class="btn" role="button" tabindex="0" aria-pressed="false">🔊 SPEAKING</div></div>
   <div class="vs-row" style="justify-content:flex-end;gap:8px">
     <div id="vs-test" class="btn" role="button" tabindex="0">▶ TEST</div>
     <div id="vs-reset" class="btn" role="button" tabindex="0">RESET</div>
@@ -1300,6 +1301,14 @@ function renderOrg() {
 
 // ── Voice output (gateway.html patterns — iOS needs priming + fresh queue) ──
 let voiceCache = [];
+// loadVoices() is called ONCE synchronously during parse (below), from above
+// every `let` in this section — and renderVoiceSheet() reads voiceEngine,
+// ttsPrimed and speechMuted, all declared further down. Rendering the sheet
+// from that first pass is a TDZ ReferenceError that kills the whole deck
+// script, on any browser whose getVoices() happens to answer synchronously.
+// Nobody is looking at the sheet during boot; it renders when it is opened and
+// on every voiceschanged after this flag flips.
+let voicesReady = false;
 // Hoisted (2026-08-19) so primeTTS can call it: iOS often returns [] from
 // getVoices() until the first user gesture and sometimes never fires
 // voiceschanged — an empty cache meant no voice AND no lang on the utterance,
@@ -1307,7 +1316,8 @@ let voiceCache = [];
 function loadVoices() {
   if (!('speechSynthesis' in window)) return;
   const v = speechSynthesis.getVoices();
-  if (v && v.length) { voiceCache = v; if (typeof renderVoiceSheet === 'function') renderVoiceSheet(); }
+  if (v && v.length) voiceCache = v;
+  if (voicesReady) renderVoiceSheet();
 }
 if ('speechSynthesis' in window) {
   loadVoices();
@@ -1393,8 +1403,53 @@ let voiceEngine = 'neural';
 let backupSince = 0, ttsFailStreak = 0;
 let lastSpeechEndAt = 0; // Date.now() when Jarvis last stopped talking — see MIC_COOLDOWN_MS
 
+// Blink-only (Chrome/Edge on desktop). Computed here from the UA rather than
+// read from IS_IOS further down, so the speech section cannot be broken by
+// someone moving a declaration: this file is one long script and IS_IOS is a
+// `const` several hundred lines below.
+const SPEECH_KEEPALIVE = (() => {
+  const ua = navigator.userAgent || '';
+  const iOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  return !iOS && /Chrome\/|Edg\//.test(ua) && !/OPR\//.test(ua);
+})();
+
+// ── Is Marco allowed to SPEAK? ──────────────────────────────────────────────
+// This is deliberately NOT voiceMode. For a year `speak()` began
+//
+//     if (qs.get('voice') === '0' || voiceMode === 'off') return;
+//
+// and voiceMode is the MICROPHONE's mode. Two consequences, both of which end
+// with a silent deck and no way back:
+//
+//   1. The mic button cycles WAKE → LIVE → OFF and PERSISTS the choice. One
+//      extra tap and Marco was mute on that device forever — across reloads —
+//      while the pill next to it read "MIC OFF", promising the mic and nothing
+//      else. Craig had no reason to connect "I turned the mic off" with "he
+//      stopped reading me the briefing".
+//   2. `voiceMode` is forced to 'off' when the browser has no SpeechRecognition
+//      (`!SRCls`) — an iPhone home-screen PWA, Lockdown Mode, an in-app
+//      browser. And the mic button returns EARLY on !SRCls, before
+//      setVoiceMode(), so it could never cycle back out. A device that merely
+//      cannot LISTEN was made permanently unable to TALK, with no control on
+//      screen able to undo it.
+//
+// Output and input are now separate switches. The mic can be off, or missing
+// entirely, and Marco still speaks. Muting him is its own deliberate act with
+// its own key, surfaced in the ⚙ VOICE sheet and on the state pill.
+let speechMuted = (() => {
+  try { return localStorage.getItem('jarvis_speech_muted') === '1'; } catch { return false; }
+})();
+function setSpeechMuted(on) {
+  speechMuted = !!on;
+  try { on ? localStorage.setItem('jarvis_speech_muted', '1') : localStorage.removeItem('jarvis_speech_muted'); } catch {}
+  if (speechMuted) stopAllAudio();
+  updatePendingBadge();
+  updateVoiceState();
+}
+voicesReady = true; // every dependency of renderVoiceSheet is initialised now
+
 function speak(text) {
-  if (qs.get('voice') === '0' || voiceMode === 'off') return;
+  if (qs.get('voice') === '0' || speechMuted) return;
   const t = String(text == null ? '' : text).trim();
   if (!t) return;
   rememberSpoken(t); // what the next utterance is judged against — see isSelfEcho
@@ -1563,16 +1618,26 @@ function speakBrowserAsync(text) {
     speechSynthesis.speak(u);
     // Chrome desktop bug (Craig's laptop, 2026-08-27: "the voice is gone
     // again"): the synthesis engine pauses ITSELF mid-utterance and after brief
-    // idle, so the voice works, then silently stops. The documented workaround
-    // is to nudge it awake: resume() right after speak() (Chrome sometimes
-    // starts an utterance paused), then keep resuming while it's meant to be
-    // speaking. resume() on a healthy engine is a harmless no-op, and iOS
-    // ignores it — so this is safe on every platform.
-    try { speechSynthesis.resume(); } catch { /* older engines */ }
-    keepAlive = setInterval(() => {
-      if (speechSynthesis.speaking && !done) { try { speechSynthesis.resume(); } catch { /* */ } }
-      else { clearInterval(keepAlive); keepAlive = null; }
-    }, 4000);
+    // idle, so the voice works, then silently stops. The workaround is to nudge
+    // it awake: resume() right after speak() (Chrome sometimes starts an
+    // utterance paused), then keep resuming while it's meant to be speaking.
+    //
+    // It ships GATED (2026-08-29). The version that shipped on 08-27 ran this
+    // on every platform, on the reasoning that "resume() on a healthy engine is
+    // a harmless no-op, and iOS ignores it". That was asserted, never tested —
+    // and it was the only change to the audio path in the window where Craig's
+    // iPhone went completely mute: no briefing, no reply, two days. WebKit's
+    // speechSynthesis is not Blink's; `speaking` is unreliable there and
+    // resume() on a queue that is not paused is not a no-op we have ever
+    // proven. A workaround for one engine belongs on that engine (Rule 2: the
+    // code looking right is not proof).
+    if (SPEECH_KEEPALIVE) {
+      try { speechSynthesis.resume(); } catch { /* older engines */ }
+      keepAlive = setInterval(() => {
+        if (speechSynthesis.speaking && !done) { try { speechSynthesis.resume(); } catch { /* */ } }
+        else { clearInterval(keepAlive); keepAlive = null; }
+      }, 4000);
+    }
   });
 }
 
@@ -1584,7 +1649,7 @@ function setVoiceBadge(text) {
 function updatePendingBadge() {
   const el = $('voice-pending');
   const n = speechQ.length;
-  const show = !ttsPrimed && n > 0 && voiceMode !== 'off';
+  const show = !ttsPrimed && n > 0 && !speechMuted;
   el.classList.toggle('hidden', !show);
   if (show) el.textContent = '🔇 ' + n + ' SPOKEN ' + (n === 1 ? 'MESSAGE' : 'MESSAGES') + ' WAITING — TAP TO HEAR';
 }
@@ -1612,9 +1677,22 @@ function renderVoiceSheet() {
     if (v.name === chosen) o.selected = true;
     sel.appendChild(o);
   }
-  $('vs-note').textContent = voiceCache.length
-    ? `${voiceCache.length} voices on this device · engine: ${voiceEngine === 'browser' ? 'browser (free Google/Apple voice)' : voiceEngine}`
-    : 'No voices reported yet — tap anywhere once (iOS lists voices after a gesture).';
+  const mute = $('vs-mute');
+  if (mute) {
+    mute.textContent = speechMuted ? '🔇 MUTED' : '🔊 SPEAKING';
+    mute.setAttribute('aria-pressed', speechMuted ? 'true' : 'false');
+  }
+  // "Why can't I hear him" answered on the device itself, in order of what
+  // actually silences a deck. Craig spent two days on a mute iPhone with
+  // nothing on screen to read; this line is the whole remedy for that.
+  $('vs-note').textContent =
+      speechMuted ? 'Marco is MUTED on this device — tap the button above to give him his voice back.'
+    : !window.speechSynthesis ? 'This browser has no speech synthesis at all, sir. Text only here.'
+    : qs.get('voice') === '0' ? 'Voice is off for this tab via ?voice=0 — reload without it.'
+    : !ttsPrimed ? 'Tap anywhere once to unlock audio — browsers hold sound until you do.'
+    : voiceCache.length
+      ? `${voiceCache.length} voices on this device · engine: ${voiceEngine === 'browser' ? 'browser (free Google/Apple voice)' : voiceEngine}`
+      : 'No voices reported yet — tap anywhere once (iOS lists voices after a gesture).';
 }
 (function wireVoiceSheet() {
   const sheet = $('voice-sheet-wrap'); if (!sheet) return;
@@ -1629,6 +1707,11 @@ function renderVoiceSheet() {
   $('vs-rate').oninput = (e) => { $('vs-rate-v').textContent = e.target.value; save('rate', e.target.value); };
   $('vs-pitch').oninput = (e) => { $('vs-pitch-v').textContent = e.target.value; save('pitch', e.target.value); };
   $('vs-lang').onchange = (e) => { try { localStorage.setItem('jarvis_lang', e.target.value); } catch {} $('vs-note').textContent = 'Mic language saved — reload the deck to apply.'; };
+  // The ONLY persistent mute. It used to be the third tap of the mic button,
+  // where it was invisible, unlabelled as a mute, and unreachable on a device
+  // with no speech recognition. Here it is named, it shows its state, and the
+  // pill above says MARCO MUTED for as long as it is on.
+  $('vs-mute').onclick = () => { setSpeechMuted(!speechMuted); renderVoiceSheet(); };
   $('vs-test').onclick = () => { voiceEngine === 'neural' ? speak('Voice check, sir.') : speakBrowserAsync('Voice check, sir. This is the voice you will hear.'); };
   $('vs-reset').onclick = () => { save('name', null); save('rate', null); save('pitch', null); open(); };
   if (qs.get('voicesheet') === '1') setTimeout(open, 300);   // QA hook, like ?demo-alert=1
@@ -1653,7 +1736,13 @@ function updateOrbLabel() {
 function updateVoiceState() {
   const pill = $('voice-state'); if (!pill) return;
   let label, cls;
-  if (voiceMode === 'off') { label = 'MIC OFF'; cls = 'off'; }
+  // MUTED outranks everything (2026-08-29). A deck that cannot speak must say
+  // so: the two days Craig lost were two days of a deck that looked completely
+  // normal while producing no sound. Principle 6 — degraded modes announce
+  // themselves; a silent fallback is indistinguishable from a broken assistant.
+  if (speechMuted) { label = 'MARCO MUTED'; cls = 'off'; }
+  else if (!window.speechSynthesis) { label = 'NO VOICE'; cls = 'off'; }
+  else if (voiceMode === 'off') { label = 'MIC OFF'; cls = 'off'; }
   else if (S.speaking) { label = 'SPEAKING'; cls = 'speaking'; }
   else if (S.thinking) { label = 'THINKING'; cls = 'thinking'; }
   else if (!armed) { label = 'TAP TO TALK'; cls = 'wake'; }
@@ -2160,7 +2249,10 @@ setInterval(() => {
   if (armed && voiceMode !== 'off' && !listening && !busy && !document.hidden) startListening();
 }, 3000);
 
-const MODE_LABEL = { wake: '👂 WAKE: “MARCO…”', live: '◼ MIC LIVE', off: '🎙 VOICE OFF' };
+// 'off' is MIC OFF, not "voice off" (2026-08-29). It was labelled VOICE OFF
+// back when the third tap really did mute Marco as well — the conflation that
+// cost Craig two silent days. It stops the ear; his mouth has its own switch.
+const MODE_LABEL = { wake: '👂 WAKE: “MARCO…”', live: '◼ MIC LIVE', off: '🎙 MIC OFF' };
 function updateMicBtn() {
   $('btn-mic').classList.toggle('live', voiceMode === 'live');
   $('btn-mic').textContent = (voiceMode !== 'off' && !armed) ? '👂 TAP TO ARM VOICE' : MODE_LABEL[voiceMode];
@@ -2173,6 +2265,9 @@ function setVoiceMode(mode, persist = true) {
   // back with a hot mic (see the boot-time mapping above for the incident).
   if (persist) try { localStorage.setItem('jarvis_voice', mode === 'live' ? 'wake' : mode); } catch {}
   if (mode === 'off') {
+    // stopAllAudio() here shuts him up NOW — deliberately a one-shot, not a
+    // mute. Marco's voice has its own switch (speechMuted); this branch must
+    // never persist silence, which is the trap that cost 2026-08-27..29.
     clearTimeout(relistenTimer);
     recGen++; // orphan any in-flight session
     if (rec) try { rec.abort(); } catch {}

@@ -12,6 +12,61 @@
 
 ## Voice & the open mic
 
+**The mute nobody could see (2026-08-27 → 08-29, iPhone).** Craig: *"the deck
+is not been able to speak we can't get a briefing nor can we hear Marco in
+response. Two days now with this error on iPhone."* Two symptoms, one cause —
+speech output produced nothing — and the deck looked entirely normal while it
+happened. Three defects, each on its own sufficient:
+
+1. **A Blink workaround shipped to every engine.** The 08-27 keep-alive nudge
+   (`speechSynthesis.resume()` after `speak()`, then every 4s) was written for
+   Chrome desktop, where the engine pauses itself mid-utterance. It shipped
+   ungated on the reasoning that *"resume() on a healthy engine is a harmless
+   no-op, and iOS ignores it"* — asserted in a comment, never tested on iOS,
+   and it was the ONLY change to the audio path in the window the phone went
+   silent. WebKit's speechSynthesis is not Blink's: `speaking` is unreliable
+   there and `resume()` on an unpaused queue is not a no-op we have ever
+   proven. **A workaround for one engine belongs on that engine** —
+   `SPEECH_KEEPALIVE` gates it to non-iOS Chrome/Edge, so Craig's laptop keeps
+   its fix and his phone never sees it. This is Rule 2 in miniature: the code
+   looking right, on a platform nobody probed, is not proof.
+2. **The mouth was wired to the ear.** `speak()` began
+   `if (qs.get('voice') === '0' || voiceMode === 'off') return;` — and
+   `voiceMode` is the MICROPHONE's mode. The mic button cycles
+   WAKE → LIVE → OFF and **persists** the choice, so one extra tap muted Marco
+   on that device forever, across reloads, under a pill reading "MIC OFF" that
+   promised the mic and nothing else. Worse, `voiceMode` is forced to `'off'`
+   whenever the browser has no SpeechRecognition (`!SRCls` — an iPhone
+   home-screen PWA, Lockdown Mode, an in-app browser), and the mic button
+   returns EARLY on `!SRCls` *before* it can call `setVoiceMode`: a device that
+   merely could not LISTEN was made permanently unable to TALK, with no control
+   on screen able to undo it. Output now has its own switch (`speechMuted`,
+   key `jarvis_speech_muted`) and its own named control in the ⚙ VOICE sheet.
+   Turning the mic off still shuts him up NOW — a one-shot `stopAllAudio()`,
+   never a persisted silence.
+3. **The silence was invisible.** Nothing on screen said why. The state pill
+   now reports **MARCO MUTED** and **NO VOICE** *above* the mic states (a mute
+   must never hide behind "MIC OFF"), and the voice sheet names the actual
+   cause in order — muted, no synthesis engine, `?voice=0`, audio not yet
+   unlocked by a tap. Principle 6: a silent fallback is indistinguishable from
+   a broken assistant.
+
+A fourth, found while fixing the above and latent since 2026-08-19:
+`loadVoices()` runs **once synchronously at parse time**, from above every
+`let` in the voice section, and it called `renderVoiceSheet()` — which reads
+`voiceEngine`, `ttsPrimed` and `speechMuted`. On any browser whose
+`getVoices()` answers synchronously that is a TDZ `ReferenceError` at boot,
+which kills the entire deck script, voice and all. iOS returning `[]` before
+the first gesture is the only reason it never fired. Gated on `voicesReady`,
+which flips after the section is initialised.
+
+Tests: `test/deck-speech-output.test.js` — the UA matrix for the keep-alive,
+behavioural runs proving the mic being off (or absent) no longer silences him,
+and a boot check that a warm `getVoices()` cannot reach the sheet.
+Verified at 390×844 iPhone metrics over raw CDP: no boot exceptions, no
+horizontal overflow, pill reads MARCO MUTED, sheet explains it.
+
+
 **The echo loop, three times "fixed" (2026-07-26 → 2026-07-31).** Jarvis
 transcribed his own TTS as Craig's input. The rule that held: *an open mic
 pointed at a speaker cannot be rescued by a text-similarity heuristic* — the
