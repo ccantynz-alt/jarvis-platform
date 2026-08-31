@@ -70,19 +70,11 @@ except Exception as e:
 # this platform learned the hard way, so this one doesn't relearn it.
 echo ""
 echo "━━━ LESSONS FROM PAST SESSIONS ━━━"
-curl -sf "${MEMORY_URL}/memory/lessons?platform=$PLATFORM&limit=8" 2>/dev/null | \
-  python3 -c "
-import sys, json
-try:
-  rows = json.load(sys.stdin)
-  if not rows:
-    print('None recorded yet for this platform.')
-  for l in rows:
-    seen = f' (seen {l[\"seen_count\"]}x)' if l.get('seen_count', 1) > 1 else ''
-    print(f'• [{l[\"kind\"]}] {l[\"lesson\"]}{seen}')
-except Exception as e:
-  print(f'Lessons read error: {e}')
-" 2>/dev/null || echo "Memory service not responding for lessons."
+curl -sf "${MEMORY_URL}/marco/briefing?platform=$PLATFORM&limit=8" 2>/dev/null | \
+  jq -r '(.lessons[] | "• [\(.kind)] \(.lesson)"),
+         (if (.recent_failures|length) > 0 then "━━ RECENT FAILURES (don'\''t repeat) ━━" else empty end),
+         (.recent_failures[] | "✗ \(.agent): \(.action) → \(.outcome)")' \
+  || echo "Marco not responding for briefing."
 
 # GateTest awareness
 echo ""

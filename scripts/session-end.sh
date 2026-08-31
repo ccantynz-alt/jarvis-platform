@@ -47,4 +47,7 @@ else
   echo "❌ Failed to record session $SESSION_ID (memory said: ${RESULT:-no response}) — the summary below is NOT in memory"
 fi
 
+# Mirror this session's close into the Marco flywheel (never fails this script).
+bash /opt/jarvis/scripts/marco-report.sh "claude-session" "$PLATFORM" "ok" \
+  "session $SESSION_ID ended" "$SUMMARY" "session"
 
