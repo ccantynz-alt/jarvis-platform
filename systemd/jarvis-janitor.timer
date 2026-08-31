@@ -1,0 +1,8 @@
+# systemd/jarvis-janitor.timer
+[Unit]
+Description=Daily Jarvis janitor at 03:00 UTC
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target

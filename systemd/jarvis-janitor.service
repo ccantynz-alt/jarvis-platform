@@ -1,0 +1,7 @@
+# systemd/jarvis-janitor.service
+[Unit]
+Description=Jarvis daily box janitor (Marco spec §6) — whitelist maintenance
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash /opt/jarvis/scripts/janitor.sh
+Nice=10
