@@ -1319,6 +1319,31 @@ app.get('/marco/ask', (req, res) => {
   });
 });
 
+// POST /marco/lesson — the curator's write path (Task 6 fix round 1). The
+// harvest/distilled route is transcript-bound (needs a coding_sessions row);
+// curator lessons come from events, so they file here. Same fingerprint
+// dedup contract: re-filing a known lesson bumps seen_count, never duplicates.
+app.post('/marco/lesson', (req, res) => {
+  if (marcoEnv().mode === 'off') return res.status(503).json({ error: 'MARCO_MODE=off' });
+  const platform = String(req.body?.platform || 'all').toLowerCase();
+  const norm = normalizeLesson(req.body, platform);
+  if (!norm) return res.status(400).json({ error: 'lesson text required' });
+  const fp = lessonFingerprint(norm);
+  const now = new Date().toISOString();
+  const existing = db.prepare('SELECT id FROM lessons WHERE fingerprint = ?').get(fp);
+  if (existing) {
+    db.prepare('UPDATE lessons SET seen_count = seen_count + 1, last_seen = ? WHERE id = ?').run(now, existing.id);
+    return res.json({ id: existing.id, deduped: true });
+  }
+  const source = String(req.body?.source_event_ids || '').slice(0, 500);
+  const info = db.prepare(`INSERT INTO lessons (fingerprint, session_id, platform, kind, lesson, evidence, confidence, status, seen_count, created_at, last_seen, source_event_ids, author)
+    VALUES (?, NULL, ?, ?, ?, ?, 'medium', 'active', 1, ?, ?, ?, 'curator')`)
+    .run(fp, norm.platform, norm.kind, norm.lesson, norm.evidence || '', now, now, source);
+  db.prepare("INSERT INTO marco_fts (kind, ref_id, text) VALUES ('lesson', ?, ?)")
+    .run(String(info.lastInsertRowid), `${norm.platform} ${norm.kind} ${norm.lesson} ${norm.evidence || ''}`);
+  res.json({ id: info.lastInsertRowid });
+});
+
 // ── Governance: proposals (docs/GOVERNANCE.md) ──────────────────────────────
 //
 // The gate is enforced HERE, server-side, not in the callers. Every caller is
