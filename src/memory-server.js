@@ -10,6 +10,7 @@ import { validateProposal, canTransition, describeDecision } from './lib/proposa
 // fingerprints: the field that decides new-vs-recurring must not be a caller's.
 import { normalizeLesson, lessonFingerprint } from './lib/harvest.js';
 import { internalGuard } from './lib/internal-http.js';
+import { normalizeEvent, capVerdict, parseMarcoEnv } from './lib/marco.js';
 
 mkdirSync('/opt/jarvis/memory', { recursive: true });
 mkdirSync('/opt/jarvis/logs', { recursive: true });
@@ -291,6 +292,25 @@ db.exec(`
     source TEXT DEFAULT 'brain'
   );
   CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
+
+  -- Marco in the Loop (2026-08-31): the fleet's shared event stream. Lessons
+  -- REUSE the existing lessons table above (additive columns below). Spec:
+  -- docs/superpowers/specs/2026-08-31-marco-in-the-loop-design.md
+  CREATE TABLE IF NOT EXISTS marco_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    host TEXT NOT NULL DEFAULT 'vultr',
+    platform TEXT NOT NULL,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    detail TEXT,
+    tags TEXT,
+    session_id INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_marco_events_ts ON marco_events(ts);
+  CREATE INDEX IF NOT EXISTS idx_marco_events_agent ON marco_events(agent, ts);
+  CREATE INDEX IF NOT EXISTS idx_marco_events_platform ON marco_events(platform, ts);
 `);
 
 // Additive migrations for columns added after a table first shipped.
@@ -323,6 +343,13 @@ try { db.exec('ALTER TABLE code_findings ADD COLUMN commit_sha TEXT'); } catch {
 // reciting repaired bugs — the same firehose failure this design fights, one
 // level up. Re-check candidates are ordered by COALESCE(last_checked, first_seen).
 try { db.exec('ALTER TABLE code_findings ADD COLUMN last_checked TEXT'); } catch { /* already present */ }
+try { db.exec('ALTER TABLE lessons ADD COLUMN source_event_ids TEXT'); } catch { /* already present */ }
+try { db.exec("ALTER TABLE lessons ADD COLUMN author TEXT DEFAULT 'harvester'"); } catch { /* already present */ }
+// FTS over lessons + events for /marco/ask. External-content-free (contentless
+// would forbid the delete triggers); rebuilt cheap, sized small by the caps.
+db.exec(`
+  CREATE VIRTUAL TABLE IF NOT EXISTS marco_fts USING fts5(kind, ref_id, text);
+`);
 
 // ── Indexes + retention (2026-08-19, audit move 10) ──────────────────────────
 // `notifications` had NO index: the 10-minute dedupe in POST /memory/notifications
@@ -1152,6 +1179,74 @@ app.patch('/memory/lessons/:id', (req, res) => {
   const r = db.prepare('UPDATE lessons SET status = ? WHERE id = ?').run(status, req.params.id);
   if (!r.changes) return res.status(404).json({ error: 'no such lesson' });
   res.json({ id: Number(req.params.id), status });
+});
+
+// ── Marco in the Loop: fleet event ingest ──────────────────────────────────
+const MARCO_ENV_PATH = '/opt/jarvis/config/marco.env';
+let marcoEnvCache = { at: 0, val: parseMarcoEnv('') };
+function marcoEnv() {
+  if (Date.now() - marcoEnvCache.at > 5000) {
+    let text = '';
+    try { text = readFileSync(MARCO_ENV_PATH, 'utf8'); } catch { /* missing file = mode off */ }
+    marcoEnvCache = { at: Date.now(), val: parseMarcoEnv(text) };
+  }
+  return marcoEnvCache.val;
+}
+
+function marcoTokenOk(req) {
+  let expected = process.env.MARCO_INGEST_TOKEN || '';
+  if (!expected) {
+    try {
+      const m = readFileSync('/opt/jarvis/config/secrets.env', 'utf8').match(/^MARCO_INGEST_TOKEN=(.+)$/m);
+      if (m) expected = m[1].trim();
+    } catch { /* no secrets file */ }
+  }
+  if (!expected) return true;   // fails OPEN pre-rollout, same contract as internal-http.js
+  const got = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  return got === expected;
+}
+
+function insertMarcoEvent(raw) {
+  const norm = normalizeEvent(raw);
+  if (!norm.ok) return { status: 400, body: { error: norm.error } };
+  const env = marcoEnv();
+  const today = new Date().toISOString().slice(0, 10);
+  const n = db.prepare("SELECT COUNT(*) c FROM marco_events WHERE agent = ? AND ts >= ?")
+    .get(norm.event.agent, today).c;
+  const cap = capVerdict(n, env.eventCap);
+  if (!cap.allowed) {
+    if (cap.warn) {
+      db.prepare('INSERT INTO notifications (ts, level, title, body) VALUES (?,?,?,?)')
+        .run(new Date().toISOString(), 'warn', 'Marco flood cap hit',
+          `agent ${norm.event.agent} hit ${env.eventCap} events today; dropping further events until UTC midnight`);
+    }
+    return { status: 429, body: { dropped: true } };
+  }
+  const e = norm.event;
+  const info = db.prepare(`INSERT INTO marco_events (ts, agent, host, platform, action, outcome, detail, tags, session_id)
+    VALUES (?,?,?,?,?,?,?,?,?)`)
+    .run(new Date().toISOString(), e.agent, e.host, e.platform, e.action, e.outcome, e.detail, e.tags, e.session_id);
+  db.prepare("INSERT INTO marco_fts (kind, ref_id, text) VALUES ('event', ?, ?)")
+    .run(String(info.lastInsertRowid), `${e.agent} ${e.platform} ${e.action} ${e.outcome} ${e.detail} ${e.tags}`);
+  return { status: 200, body: { id: info.lastInsertRowid } };
+}
+
+app.post('/marco/event', (req, res) => {
+  if (marcoEnv().mode === 'off') return res.status(503).json({ error: 'MARCO_MODE=off' });
+  if (!marcoTokenOk(req)) return res.status(401).json({ error: 'bad ingest token' });
+  const r = insertMarcoEvent(req.body);
+  res.status(r.status).json(r.body);
+});
+
+app.get('/marco/events', (req, res) => {
+  if (marcoEnv().mode === 'off') return res.status(503).json({ error: 'MARCO_MODE=off' });
+  const limit = clampLimit(req.query.limit, 50, 500);
+  const where = ['1=1']; const params = [];
+  if (req.query.agent) { where.push('agent = ?'); params.push(req.query.agent); }
+  if (req.query.platform) { where.push('platform = ?'); params.push(req.query.platform); }
+  if (req.query.since) { where.push('ts >= ?'); params.push(req.query.since); }
+  res.json(db.prepare(`SELECT * FROM marco_events WHERE ${where.join(' AND ')} ORDER BY ts DESC LIMIT ?`)
+    .all(...params, limit));
 });
 
 // ── Governance: proposals (docs/GOVERNANCE.md) ──────────────────────────────
