@@ -23,7 +23,7 @@ BAKS=$(find /opt/jarvis/src /opt/jarvis/scripts /opt/jarvis/config -maxdepth 2 \
 OLDLOGS=$(find /opt/jarvis/logs -type f -mtime +14 2>/dev/null | head -50)
 if [ -n "$BAKS$OLDLOGS" ]; then
   if [ "$MODE" = "clean" ]; then
-    echo "$OLDLOGS" | xargs -r rm -f && ACTIONS+=("deleted $(echo "$OLDLOGS" | grep -c .) logs >14d")
+    find /opt/jarvis/logs -type f -mtime +14 -print0 2>/dev/null | xargs -0 -r rm -f && ACTIONS+=("deleted $(echo "$OLDLOGS" | grep -c .) logs >14d")
     ISSUES+=("bak files present (never auto-deleted, listed for review): $(echo "$BAKS" | tr '\n' ' ')")
   else
     ISSUES+=("cleanup candidates (report mode): $(echo "$BAKS $OLDLOGS" | wc -w) files")
