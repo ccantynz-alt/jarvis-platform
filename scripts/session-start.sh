@@ -70,11 +70,14 @@ except Exception as e:
 # this platform learned the hard way, so this one doesn't relearn it.
 echo ""
 echo "━━━ LESSONS FROM PAST SESSIONS ━━━"
-curl -sf "${MEMORY_URL}/marco/briefing?platform=$PLATFORM&limit=8" 2>/dev/null | \
-  jq -r '(.lessons[] | "• [\(.kind)] \(.lesson)"),
+BRIEFING_RESP=$(curl -sf "${MEMORY_URL}/marco/briefing?platform=$PLATFORM&limit=8" 2>/dev/null) || BRIEFING_RESP=""
+if [ -z "$BRIEFING_RESP" ]; then
+  echo "Marco not responding for briefing."
+else
+  echo "$BRIEFING_RESP" | jq -r '(.lessons[] | "• [\(.kind)] \(.lesson)"),
          (if (.recent_failures|length) > 0 then "━━ RECENT FAILURES (don'\''t repeat) ━━" else empty end),
-         (.recent_failures[] | "✗ \(.agent): \(.action) → \(.outcome)")' \
-  || echo "Marco not responding for briefing."
+         (.recent_failures[] | "✗ \(.agent): \(.action) → \(.outcome)")'
+fi
 
 # GateTest awareness
 echo ""
