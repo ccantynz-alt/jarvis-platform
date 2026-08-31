@@ -447,6 +447,10 @@ app.post('/memory/notes', (req, res) => {
   const k = ['note', 'preference', 'fact'].includes(kind) ? kind : 'note';
   const info = db.prepare('INSERT INTO notes (ts, kind, text, tags, source) VALUES (?,?,?,?,?)')
     .run(new Date().toISOString(), k, String(text).slice(0, 4000), tags ? String(tags).slice(0, 300) : null, source);
+  try {
+    insertMarcoEvent({ agent: 'gateway-brain', platform: 'fleet', action: `noted: ${String(text).slice(0, 150)}`,
+      outcome: 'ok', detail: '', tags: `note,${k}` });
+  } catch { /* Marco bridge must never break the primary notes write */ }
   res.json({ ok: true, id: info.lastInsertRowid });
 });
 // GET /memory/notes?q=&kind=&limit= — recall (LIKE over text+tags, newest first)

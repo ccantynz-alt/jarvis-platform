@@ -769,3 +769,5 @@ curl -s -X POST http://127.0.0.1:9200/memory/repair/log \
 # end — a session that doesn't write memory has not ended
 bash /opt/jarvis/scripts/session-end.sh <platform> <session_id> "<summary>"
 ```
+
+Fleet flywheel calls (briefing/report/ask, TRIP rule, privacy boundary): docs/MARCO.md.
