@@ -351,6 +351,17 @@ db.exec(`
   CREATE VIRTUAL TABLE IF NOT EXISTS marco_fts USING fts5(kind, ref_id, text);
 `);
 
+// One-time backfill: mirror existing lessons into marco_fts so /marco/ask can
+// find lessons filed before this table existed. Idempotent — skips once any
+// lesson row is present.
+const marcoFtsLessonCount = db.prepare("SELECT COUNT(*) c FROM marco_fts WHERE kind = 'lesson'").get().c;
+if (marcoFtsLessonCount === 0) {
+  for (const l of db.prepare('SELECT id, platform, kind, lesson, evidence FROM lessons').all()) {
+    db.prepare("INSERT INTO marco_fts (kind, ref_id, text) VALUES ('lesson', ?, ?)")
+      .run(String(l.id), `${l.platform} ${l.kind} ${l.lesson} ${l.evidence || ''}`);
+  }
+}
+
 // ── Indexes + retention (2026-08-19, audit move 10) ──────────────────────────
 // `notifications` had NO index: the 10-minute dedupe in POST /memory/notifications
 // (source, level, title, ts) and the deck's 15-second unread polls were full
@@ -1151,6 +1162,8 @@ app.post('/memory/harvest/distilled', (req, res) => {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(fp, session_id, l.platform, l.kind, l.lesson, l.evidence || null,
         l.confidence, now, now);
+      db.prepare("INSERT INTO marco_fts (kind, ref_id, text) VALUES ('lesson', ?, ?)")
+        .run(String(r.lastInsertRowid), `${l.platform} ${l.kind} ${l.lesson} ${l.evidence || ''}`);
       filed.push({ id: r.lastInsertRowid, created: true });
     }
   }
@@ -1247,6 +1260,47 @@ app.get('/marco/events', (req, res) => {
   if (req.query.since) { where.push('ts >= ?'); params.push(req.query.since); }
   res.json(db.prepare(`SELECT * FROM marco_events WHERE ${where.join(' AND ')} ORDER BY ts DESC LIMIT ?`)
     .all(...params, limit));
+});
+
+// Briefing: what an agent should know before starting work on <platform>.
+// Active lessons for the platform (and 'all'), most-seen first — the exact
+// ordering session-start.sh already trusts — plus the platform's recent failures
+// so an agent never repeats yesterday's dead end.
+app.get('/marco/briefing', (req, res) => {
+  if (marcoEnv().mode === 'off') return res.status(503).json({ error: 'MARCO_MODE=off' });
+  const platform = String(req.query.platform || 'all').toLowerCase();
+  const limit = clampLimit(req.query.limit, 15, 50);
+  const lessons = db.prepare(`
+    SELECT id, platform, kind, lesson, evidence, seen_count, last_seen FROM lessons
+    WHERE status = 'active' AND (platform = ? OR platform = 'all')
+    ORDER BY seen_count DESC, last_seen DESC LIMIT ?`).all(platform, limit);
+  const recent_failures = db.prepare(`
+    SELECT ts, agent, action, outcome, detail FROM marco_events
+    WHERE platform = ? AND outcome IN ('failed','blocked') AND ts >= ?
+    ORDER BY ts DESC LIMIT 5`)
+    .all(platform, new Date(Date.now() - 7 * 864e5).toISOString());
+  res.json({ platform, lessons, recent_failures });
+});
+
+// Ask-Marco: keyword search over lessons + events (FTS5). Quotes stripped so a
+// caller's natural phrasing can't inject FTS syntax errors.
+app.get('/marco/ask', (req, res) => {
+  if (marcoEnv().mode === 'off') return res.status(503).json({ error: 'MARCO_MODE=off' });
+  const q = String(req.query.q || '').replace(/["'^*()]/g, ' ').trim();
+  if (!q) return res.status(400).json({ error: 'q required' });
+  const limit = clampLimit(req.query.limit, 10, 50);
+  let hits = [];
+  try {
+    hits = db.prepare("SELECT kind, ref_id FROM marco_fts WHERE marco_fts MATCH ? LIMIT ?")
+      .all(q.split(/\s+/).map((w) => `"${w}"`).join(' OR '), limit * 2);
+  } catch { /* malformed query after sanitizing — return empty rather than 500 */ }
+  const lessonIds = hits.filter((h) => h.kind === 'lesson').map((h) => h.ref_id).slice(0, limit);
+  const eventIds = hits.filter((h) => h.kind === 'event').map((h) => h.ref_id).slice(0, limit);
+  const inList = (ids) => ids.map(() => '?').join(',') || 'NULL';
+  res.json({
+    lessons: db.prepare(`SELECT id, platform, kind, lesson, evidence, status FROM lessons WHERE id IN (${inList(lessonIds)})`).all(...lessonIds),
+    events: db.prepare(`SELECT id, ts, agent, platform, action, outcome, detail FROM marco_events WHERE id IN (${inList(eventIds)})`).all(...eventIds),
+  });
 });
 
 // ── Governance: proposals (docs/GOVERNANCE.md) ──────────────────────────────
