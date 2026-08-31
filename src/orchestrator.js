@@ -1,10 +1,12 @@
 import express from 'express';
+import os from 'os';
 import { readFileSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import cron from 'node-cron';
 import { pickExecutor } from './executors.js';
+import { computeSlots } from './lib/capacity.js';
 import { notify } from './lib/notify.js';
 import { spawnClaude, spawnClaudeRemote, ensureClaudeVerified } from './lib/spawn-agent.js';
 import { modelFor } from './lib/model-routing.js';
@@ -90,11 +92,13 @@ const DEFAULT_WORKER_MODEL = process.env.JARVIS_WORKER_MODEL || modelFor('repair
 // Jobs live in the SQLite `jobs` table, not in this process, so they survive
 // restarts (previously an in-memory Map — every restart silently dropped the
 // whole job list). The orchestrator is the single scheduler: it enqueues on
-// /dispatch and a tick loop starts queued jobs up to MAX_CONCURRENT_JOBS.
+// /dispatch and a tick loop starts queued jobs up to the adaptive slot count
+// (computeSlots — see FIXED_CONCURRENCY below for the fixed-cap override).
 
-// Fleet-wide concurrency is a guardrail — parse it so a malformed value is
-// reported and defaulted rather than quietly becoming NaN (see lib/guardrail.js).
-const MAX_CONCURRENT_JOBS = guardrail('MAX_CONCURRENT_JOBS', 3, { source: 'orchestrator' });
+// Adaptive capacity (Marco spec §7): MAX_CONCURRENT_JOBS set explicitly in the
+// env pins a fixed cap (rollback path); unset, computeSlots adapts per tick.
+const FIXED_CONCURRENCY = process.env.MAX_CONCURRENT_JOBS
+  ? guardrail('MAX_CONCURRENT_JOBS', 3, { source: 'orchestrator' }) : null;
 const SCHEDULER_TICK_MS = 4000;
 const CANARY_RETRY_MS = 30 * 60_000;
 // Grace past a job's OWN timeout before it is treated as a zombie. The worker is
@@ -198,7 +202,34 @@ function loadDesignRefs(platformPath) {
   }
 }
 
-function buildPrompt(platform, task, platformPath, executor = null) {
+// Marco briefing (spec §4a): lessons + recent failures for the platform, fed
+// into the spawned agent's own prompt so it doesn't repeat yesterday's dead
+// end. This must NEVER delay or fail a dispatch — a slow or down memory-server
+// degrades to an empty briefing, silently, on a hard 2s budget.
+async function fetchMarcoBriefing(platform) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2000);
+  try {
+    const r = await fetch(`${MEMORY_URL}/marco/briefing?platform=${encodeURIComponent(platform)}&limit=8`, { signal: ctrl.signal });
+    if (!r.ok) return { lessons: [], recent_failures: [] };
+    const data = await r.json();
+    return { lessons: data.lessons || [], recent_failures: data.recent_failures || [] };
+  } catch {
+    return { lessons: [], recent_failures: [] };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function formatMarcoBriefing({ lessons, recent_failures }) {
+  if (!lessons.length && !recent_failures.length) return '';
+  const lines = ['━━ MARCO BRIEFING ━━'];
+  for (const l of lessons.slice(0, 8)) lines.push(`• [${l.kind}] ${l.lesson}`);
+  for (const f of recent_failures) lines.push(`✗ ${f.agent}: ${f.action} → ${f.outcome}`);
+  return lines.join('\n');
+}
+
+async function buildPrompt(platform, task, platformPath, executor = null) {
   // PC-worker jobs run on Craig's Windows machine, not the Linux fleet box —
   // none of the session-start.sh / CLAUDE.md / git-push boilerplate applies
   // (no /opt/jarvis there, no platform repo to push).
@@ -226,7 +257,10 @@ function buildPrompt(platform, task, platformPath, executor = null) {
     `Push to the default branch using the configured git remote.`,
     `End with bash /opt/jarvis/scripts/session-end.sh ${platform}.`,
   );
-  return parts.join(' ');
+  const prompt = parts.join(' ');
+
+  const briefing = formatMarcoBriefing(await fetchMarcoBriefing(platform));
+  return briefing ? `${briefing}\n\n${prompt}` : prompt;
 }
 
 async function logToMemory(payload) {
@@ -537,8 +571,13 @@ async function schedulerTick() {
     if (!queued.length) return;
 
     const running = await dbGet('/memory/jobs?status=running&limit=100');
-    const slots = MAX_CONCURRENT_JOBS - running.length;
+    const slots = computeSlots({
+      queued: queued.length, running: running.length,
+      load1: os.loadavg()[0], cores: os.cpus().length,
+      freeMemGB: os.freemem() / 1073741824, fixed: FIXED_CONCURRENCY,
+    });
     if (slots <= 0) return;
+    logEvent('JOB', `capacity: ${running.length} running, ${queued.length} queued → ${slots} new slot(s)`);
 
     // Usage-limit gate: while EVERY subscription login is inside its cooldown,
     // starting a claude job just burns a spawn to hit the same wall — and, until
@@ -647,8 +686,8 @@ async function schedulerTick() {
  *   - self-heal's anyJobInFlight() and audit-runner's hasJobInFlight() both see
  *     a live job for that platform and refuse to dispatch, so the platform can
  *     never be auto-repaired again;
- *   - the concurrency slot is consumed permanently, shrinking MAX_CONCURRENT_JOBS
- *     for the rest of the process's life.
+ *   - the concurrency slot is consumed permanently, shrinking the pool of slots
+ *     computeSlots has to work with for the rest of the process's life.
  *
  * The rule is safe because spawnProcess GUARANTEES the worker is dead: it
  * SIGTERMs at timeout_min and SIGKILLs 10s later. So once a job is past its own
@@ -1162,7 +1201,7 @@ app.post('/dispatch', internalGuard, async (req, res) => {
         enqueued_by: (req.body && req.body.enqueued_by) || 'api',
         parent_job_id: (req.body && req.body.parent_job_id) || null,
         // 8, not 5 (2026-07-26): the scheduler sorts by priority ASC with only
-        // MAX_CONCURRENT_JOBS slots, and scheduled role agents used to enter at
+        // a handful of slots available at once, and scheduled role agents used to enter at
         // the SAME priority as an emergency repair. Five accountant agents with
         // 30-minute timeouts could therefore hold a self-heal repair for a
         // genuinely DOWN production site in the queue behind them. Routine
@@ -1221,7 +1260,7 @@ app.post('/dispatch', internalGuard, async (req, res) => {
   // Choose the executor. With JARVIS_CLOUD_ENABLED unset, pickExecutor returns
   // exactly the legacy result: 'local' for OWN_IP, 'remote' otherwise.
   const executor = pickExecutor(platform, entry, task, requestedExecutor);
-  const prompt = buildPrompt(platform, task, isLocal ? entry.path : null, executor);
+  const prompt = await buildPrompt(platform, task, isLocal ? entry.path : null, executor);
 
   const designRefs = isLocal ? loadDesignRefs(entry.path) : [];
   if (designRefs.length > 0) {
@@ -1407,7 +1446,7 @@ app.get('/health', async (_req, res) => {
     port: PORT,
     queue,
     canaryHeld: gateHeld,
-    maxConcurrent: MAX_CONCURRENT_JOBS,
+    maxConcurrent: FIXED_CONCURRENCY ?? 'adaptive',
     events: eventLog.length,
   });
 });
@@ -1603,7 +1642,7 @@ app.listen(PORT, '127.0.0.1', async () => {
     flushHeld().then(r => { if (r.flushed) console.log(`[orchestrator] held-alert digest sent: ${r.flushed} item(s), ${r.devices} device(s)`); })
       .catch(e => console.warn(`[orchestrator] held digest failed: ${e.message}`));
   }, 30_000);
-  console.log(`[orchestrator] scheduler running (tick ${SCHEDULER_TICK_MS}ms, max ${MAX_CONCURRENT_JOBS} concurrent)`);
+  console.log(`[orchestrator] scheduler running (tick ${SCHEDULER_TICK_MS}ms, max ${FIXED_CONCURRENCY ?? 'adaptive'} concurrent)`);
 });
 
 // Deliver reminders that have come due (2026-08-19, move 14). The orchestrator

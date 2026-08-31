@@ -14,7 +14,7 @@
 // orchestrator lets any claude-runtime job start. Verified version persists
 // in agent_context (memory-server :9200) so it survives restarts.
 
-import { spawn, execFile } from 'child_process';
+import { spawn, execFile, execSync } from 'child_process';
 import { profileEnv, classifyFailure, reportExhausted, reportAuthFailure, noteSpawnSuccess, getActiveProfile } from './claude-auth.js';
 
 const MEMORY = 'http://127.0.0.1:9200';
@@ -22,6 +22,24 @@ const CANARY_KEY = 'claude_verified_version';
 const VERSION_CACHE_MS = 10 * 60 * 1000;
 
 let versionCache = { value: null, at: 0 };
+
+// Adaptive capacity (Marco spec §7, 2026-08-31) can now run more workers at
+// once, so LOCAL workers are niced down: full-priority CPU/IO must not starve
+// the box's own services (memory-server, orchestrator, Slack bridge). Checked
+// once and cached — `command -v` is a cheap sh builtin, no need to shell out
+// per spawn.
+let hasIonice = null;
+function ioniceAvailable() {
+  if (hasIonice === null) {
+    try {
+      execSync('command -v ionice', { stdio: 'ignore' });
+      hasIonice = true;
+    } catch {
+      hasIonice = false;
+    }
+  }
+  return hasIonice;
+}
 
 export function workerEnv(extraEnv = {}) {
   const env = {
@@ -53,7 +71,17 @@ export function workerEnv(extraEnv = {}) {
 // `timeoutMs` overrides `timeoutMin` for callers whose limit is sub-minute.
 export function spawnProcess(cmd, args, { cwd, env, timeoutMin = 30, timeoutMs } = {}) {
   return new Promise((resolve) => {
-    const proc = spawn(cmd, args, {
+    // Nice/ionice the LOCAL worker only — the remote/ssh path (cmd === 'ssh')
+    // is untouched, remote boxes manage their own load. nice/ionice exec()
+    // straight into `cmd` rather than forking, so the spawned process keeps
+    // its pid and stays the detached group leader killTree() below relies on.
+    const [spawnCmd, spawnArgs] = cmd === 'ssh'
+      ? [cmd, args]
+      : ioniceAvailable()
+        ? ['nice', ['-n', '10', 'ionice', '-c', '3', cmd, ...args]]
+        : ['nice', ['-n', '10', cmd, ...args]];
+
+    const proc = spawn(spawnCmd, spawnArgs, {
       cwd,
       env: env || workerEnv(),
       stdio: ['ignore', 'pipe', 'pipe'],
