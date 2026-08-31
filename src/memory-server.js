@@ -714,6 +714,10 @@ app.post('/memory/repair/log', (req, res) => {
     INSERT INTO repair_log (platform, file_path, issue, fix_applied, attempted_at)
     VALUES (?, ?, ?, ?, ?)
   `).run(platform, file_path, issue, fix_applied || null, new Date().toISOString());
+  try {
+    insertMarcoEvent({ agent: 'self-heal', platform, action: `repair: ${issue}`.slice(0, 200),
+      outcome: fix_applied ? 'fixed' : 'failed', detail: fix_applied || '', tags: 'self-heal,repair' });
+  } catch { /* Marco bridge must never break the primary repair-log write */ }
   res.json({ repair_id: result.lastInsertRowid });
 });
 
@@ -885,6 +889,13 @@ app.post('/memory/jobs/:id/transition', (req, res) => {
       const now = db.prepare('SELECT status FROM jobs WHERE id = ?').get(req.params.id);
       return res.status(409).json({ error: 'status changed since read', expected: from, actual: now?.status });
     }
+    if (to === 'completed' || to === 'failed') {
+      try {
+        insertMarcoEvent({ agent: job.agent || 'orchestrator', platform: job.platform || 'fleet',
+          action: `job ${req.params.id}: ${String(job.task || '').slice(0, 150)}`,
+          outcome: to === 'completed' ? 'ok' : 'failed', tags: 'job' });
+      } catch { /* Marco bridge must never break the primary job transition */ }
+    }
     res.json({ ok: true, id: job.id, from: job.status, to });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -904,6 +915,10 @@ app.post('/memory/agent-report', (req, res) => {
     INSERT INTO agent_reports (job_id, agent, ts, status, summary, details)
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(job_id || null, agent, new Date().toISOString(), status, summary, details || null);
+  try {
+    insertMarcoEvent({ agent, platform: 'fleet', action: `report: ${summary}`.slice(0, 200),
+      outcome: status === 'ok' ? 'ok' : 'blocked', detail: details || '', tags: `agent-org,${status}` });
+  } catch { /* Marco bridge must never break the primary agent-report write */ }
   res.json({ id: result.lastInsertRowid });
 });
 
