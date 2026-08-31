@@ -402,6 +402,12 @@ export function runRetention(now = new Date()) {
   // Delivered/canceled reminders are telemetry once past; a pending one is
   // never aged out however old. Notes are DURABLE memory — never aged.
   run('reminders', "DELETE FROM reminders WHERE status IN ('fired','canceled') AND COALESCE(fired_at, created_at) < ?", cutoff);
+  // Marco events/fts telemetry, same 90d window as the rest of this sweep.
+  // marco_fts is deleted first (capturing the target ids via subquery) so the
+  // marco_events rows it references still exist at delete time; lessons are
+  // NOT touched here — they're durable knowledge, not telemetry.
+  run('marco_fts_events', "DELETE FROM marco_fts WHERE kind = 'event' AND ref_id IN (SELECT CAST(id AS TEXT) FROM marco_events WHERE ts < ?)", cutoff);
+  run('marco_events', 'DELETE FROM marco_events WHERE ts < ?', cutoff);
   if (STALE_DAYS) {
     const staleCut = new Date(now.getTime() - STALE_DAYS * 86400_000).toISOString();
     run('findings_stale', `UPDATE code_findings SET status = 'stale', resolved_at = ?
@@ -450,7 +456,7 @@ app.post('/memory/notes', (req, res) => {
   try {
     insertMarcoEvent({ agent: 'gateway-brain', platform: 'fleet', action: `noted: ${String(text).slice(0, 150)}`,
       outcome: 'ok', detail: '', tags: `note,${k}` });
-  } catch { /* Marco bridge must never break the primary notes write */ }
+  } catch (e) { console.error('[marco-bridge] notes:', e.message); }
   res.json({ ok: true, id: info.lastInsertRowid });
 });
 // GET /memory/notes?q=&kind=&limit= — recall (LIKE over text+tags, newest first)
@@ -721,7 +727,7 @@ app.post('/memory/repair/log', (req, res) => {
   try {
     insertMarcoEvent({ agent: 'self-heal', platform, action: `repair: ${issue}`.slice(0, 200),
       outcome: fix_applied ? 'fixed' : 'failed', detail: fix_applied || '', tags: 'self-heal,repair' });
-  } catch { /* Marco bridge must never break the primary repair-log write */ }
+  } catch (e) { console.error('[marco-bridge] repair/log:', e.message); }
   res.json({ repair_id: result.lastInsertRowid });
 });
 
@@ -898,7 +904,7 @@ app.post('/memory/jobs/:id/transition', (req, res) => {
         insertMarcoEvent({ agent: job.agent || 'orchestrator', platform: job.platform || 'fleet',
           action: `job ${req.params.id}: ${String(job.task || '').slice(0, 150)}`,
           outcome: to === 'completed' ? 'ok' : 'failed', tags: 'job' });
-      } catch { /* Marco bridge must never break the primary job transition */ }
+      } catch (e) { console.error('[marco-bridge] jobs transition:', e.message); }
     }
     res.json({ ok: true, id: job.id, from: job.status, to });
   } catch (e) {
@@ -922,7 +928,7 @@ app.post('/memory/agent-report', (req, res) => {
   try {
     insertMarcoEvent({ agent, platform: 'fleet', action: `report: ${summary}`.slice(0, 200),
       outcome: status === 'ok' ? 'ok' : 'blocked', detail: details || '', tags: `agent-org,${status}` });
-  } catch { /* Marco bridge must never break the primary agent-report write */ }
+  } catch (e) { console.error('[marco-bridge] agent-report:', e.message); }
   res.json({ id: result.lastInsertRowid });
 });
 
@@ -1238,6 +1244,15 @@ function marcoTokenOk(req) {
   return got === expected;
 }
 
+// Fires-once-per-agent-per-day guard for the flood-cap warning notification:
+// the stored event count is pinned AT the cap once it's hit (we stop
+// inserting), so `capVerdict(...).warn` stays true on every subsequent
+// over-cap attempt for the rest of the day — without this, we'd re-INSERT a
+// duplicate warning into `notifications` on every dropped event. Keyed
+// `${agent}:${todayDate}` so it self-scopes per day. In-memory only — resets
+// on service restart, which just means at most one extra warning after a
+// restart; acceptable.
+const marcoWarned = new Set();
 function insertMarcoEvent(raw) {
   if (marcoEnv().mode === 'off') return { status: 503, body: { error: 'MARCO_MODE=off' } };
   const norm = normalizeEvent(raw);
@@ -1249,9 +1264,17 @@ function insertMarcoEvent(raw) {
   const cap = capVerdict(n, env.eventCap);
   if (!cap.allowed) {
     if (cap.warn) {
-      db.prepare('INSERT INTO notifications (ts, level, title, body) VALUES (?,?,?,?)')
-        .run(new Date().toISOString(), 'warn', 'Marco flood cap hit',
-          `agent ${norm.event.agent} hit ${env.eventCap} events today; dropping further events until UTC midnight`);
+      const warnKey = `${norm.event.agent}:${today}`;
+      if (!marcoWarned.has(warnKey)) {
+        marcoWarned.add(warnKey);
+        // Prune stale (not-today) keys so this doesn't grow unbounded across days.
+        if (marcoWarned.size > 200) {
+          for (const k of marcoWarned) if (!k.endsWith(`:${today}`)) marcoWarned.delete(k);
+        }
+        db.prepare('INSERT INTO notifications (ts, level, title, body) VALUES (?,?,?,?)')
+          .run(new Date().toISOString(), 'warn', 'Marco flood cap hit',
+            `agent ${norm.event.agent} hit ${env.eventCap} events today; dropping further events until UTC midnight`);
+      }
     }
     return { status: 429, body: { dropped: true } };
   }
@@ -1329,6 +1352,16 @@ app.get('/marco/ask', (req, res) => {
 // dedup contract: re-filing a known lesson bumps seen_count, never duplicates.
 app.post('/marco/lesson', (req, res) => {
   if (marcoEnv().mode === 'off') return res.status(503).json({ error: 'MARCO_MODE=off' });
+  // Lessons inject verbatim into every future agent prompt (see
+  // formatMarcoBriefing in orchestrator.js) — that makes this route a
+  // prompt-injection channel reachable over the tailnet. Gate it the same way
+  // /marco/event is gated: bearer token required (auth, checked first — same
+  // 401-before-403 order as the rest of the ingest surface), AND only live in
+  // full mode (observe mode's dry-run contract — see curator.md — means the
+  // server must refuse writes here too, not just trust the curator to not
+  // call it).
+  if (!marcoTokenOk(req)) return res.status(401).json({ error: 'bad ingest token' });
+  if (marcoEnv().mode !== 'full') return res.status(403).json({ error: 'lesson writes require MARCO_MODE=full' });
   const platform = String(req.body?.platform || 'all').toLowerCase();
   const norm = normalizeLesson(req.body, platform);
   if (!norm) return res.status(400).json({ error: 'lesson text required' });
@@ -1341,8 +1374,8 @@ app.post('/marco/lesson', (req, res) => {
   }
   const source = String(req.body?.source_event_ids || '').slice(0, 500);
   const info = db.prepare(`INSERT INTO lessons (fingerprint, session_id, platform, kind, lesson, evidence, confidence, status, seen_count, created_at, last_seen, source_event_ids, author)
-    VALUES (?, NULL, ?, ?, ?, ?, 'medium', 'active', 1, ?, ?, ?, 'curator')`)
-    .run(fp, norm.platform, norm.kind, norm.lesson, norm.evidence || '', now, now, source);
+    VALUES (?, NULL, ?, ?, ?, ?, ?, 'active', 1, ?, ?, ?, 'curator')`)
+    .run(fp, norm.platform, norm.kind, norm.lesson, norm.evidence || '', norm.confidence, now, now, source);
   db.prepare("INSERT INTO marco_fts (kind, ref_id, text) VALUES ('lesson', ?, ?)")
     .run(String(info.lastInsertRowid), `${norm.platform} ${norm.kind} ${norm.lesson} ${norm.evidence || ''}`);
   res.json({ id: info.lastInsertRowid });

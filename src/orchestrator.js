@@ -214,7 +214,8 @@ async function fetchMarcoBriefing(platform) {
     if (!r.ok) return { lessons: [], recent_failures: [] };
     const data = await r.json();
     return { lessons: data.lessons || [], recent_failures: data.recent_failures || [] };
-  } catch {
+  } catch (e) {
+    console.warn('[marco] briefing fetch failed:', e.message);
     return { lessons: [], recent_failures: [] };
   } finally {
     clearTimeout(timer);

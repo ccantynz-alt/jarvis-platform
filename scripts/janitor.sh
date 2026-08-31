@@ -10,6 +10,15 @@
 set -uo pipefail
 MODE=$(grep -m1 '^JANITOR_MODE=' /opt/jarvis/config/marco.env 2>/dev/null | cut -d= -f2)
 MODE=${MODE:-report}
+
+# Master kill switch: MARCO_MODE=off means the whole flywheel is off, not just
+# the ingest API — janitor must no-op too, before any checks run.
+MARCO_MODE=$(grep -m1 '^MARCO_MODE=' /opt/jarvis/config/marco.env 2>/dev/null | cut -d= -f2)
+if [ "$MARCO_MODE" = "off" ]; then
+  echo "marco off — janitor no-op"
+  exit 0
+fi
+
 ISSUES=(); ACTIONS=()
 
 # 1. Disk
@@ -54,8 +63,12 @@ fi
 SSH_FAILS=$(journalctl -u ssh --since yesterday 2>/dev/null | grep -c 'Failed password')
 SSH_FAILS=${SSH_FAILS:-0}
 [ "$SSH_FAILS" -gt 200 ] && ISSUES+=("$SSH_FAILS failed SSH attempts in 24h")
-DRIFT=$(comm -13 <(jq -r '.ports[]' /opt/jarvis/config/ports-baseline.json | sort -n) \
-  <(ss -tln | awk 'NR>1 {print $4}' | sed 's/.*://' | sort -un))
+# comm requires its inputs sorted in the SAME collating order it uses to
+# compare them, which is plain lexicographic — `sort -n`/`sort -un` (numeric)
+# disagree with that and comm errors "file 2 is not in sorted order",
+# producing false-positive drift. Plain `sort` on both sides fixes it.
+DRIFT=$(comm -13 <(jq -r '.ports[]' /opt/jarvis/config/ports-baseline.json | sort) \
+  <(ss -tln | awk 'NR>1 {print $4}' | sed 's/.*://' | sort -u))
 [ -n "$DRIFT" ] && ISSUES+=("NEW listening ports vs baseline: $(echo "$DRIFT" | tr '\n' ' ')")
 
 # Report
