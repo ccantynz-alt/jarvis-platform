@@ -70,6 +70,14 @@
     "legal-au": { "display_name": "Legal — Australia",   "jurisdiction": "AU", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-au", "schedule": "10 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
     "legal-us": { "display_name": "Legal — United States", "jurisdiction": "US", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-us", "schedule": "20 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
     "legal-uk": { "display_name": "Legal — United Kingdom", "jurisdiction": "UK", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-uk", "schedule": "30 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
-    "legal-sg": { "display_name": "Legal — Singapore",    "jurisdiction": "SG", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-sg", "schedule": "40 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" }
+    "legal-sg": { "display_name": "Legal — Singapore",    "jurisdiction": "SG", "persona": "config/personas/legal.md", "knowledge_pack": "config/knowledge/legal-sg", "schedule": "40 17 * * 2", "budget": { "max_jobs_per_day": 2, "timeout_min": 30 }, "professional_review_required": true, "escalation": "craig", "reports_to": "clo" },
+
+    "curator": {
+      "display_name": "Curator — Marco's librarian",
+      "persona": "config/personas/curator.md",
+      "schedule": "0 4 * * *",
+      "budget": { "max_jobs_per_day": 1, "timeout_min": 15 },
+      "status": "active"
+    }
   }
 }
