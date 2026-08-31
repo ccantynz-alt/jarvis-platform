@@ -1235,6 +1235,7 @@ function marcoTokenOk(req) {
 }
 
 function insertMarcoEvent(raw) {
+  if (marcoEnv().mode === 'off') return { status: 503, body: { error: 'MARCO_MODE=off' } };
   const norm = normalizeEvent(raw);
   if (!norm.ok) return { status: 400, body: { error: norm.error } };
   const env = marcoEnv();
