@@ -80,7 +80,19 @@ test('pc worker: a sleeping PC is not a fault, a never-seen one is', () => {
 
 test('show_me: a dead browser service is caught', () => {
   assert.equal(checkShowMe({ browserOk: false }).ok, false);
-  assert.equal(checkShowMe({ browserOk: true }).ok, true);
+  assert.equal(checkShowMe({ browserOk: true, chromeOk: true }).ok, true);
+});
+
+// 2026-08-30 (docs/RENDER-AUDIT-2026-08-30.md): for weeks every render 502'd
+// while this check said "capture path healthy", because it trusted a static
+// health 200 that never touched Chrome. Green process + broken Chrome must
+// fail, and passing needs positive evidence — the deep probe said chromeOk.
+test('show_me: a live service whose Chrome cannot launch is NOT healthy', () => {
+  const r = checkShowMe({ browserOk: true, chromeOk: false, chromeError: 'no such file: google-chrome' });
+  assert.equal(r.ok, false);
+  assert.match(r.detail, /no such file: google-chrome/, 'the launch error must reach the announcement');
+  assert.equal(checkShowMe({ browserOk: true }).ok, false, 'no chromeOk evidence at all must not pass');
+  assert.equal(checkShowMe({ browserOk: true, chromeOk: null }).ok, false);
 });
 
 // ── noise discipline: the part that stops this becoming the problem ─────────

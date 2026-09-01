@@ -126,7 +126,13 @@ async function main() {
 
   const [voice, brain, lastHour, browser, pc, spawnOk, pushKv] = await Promise.all([
     voiceState(), brainState(), alertRate(),
-    jget(`${BROWSER}/browser/health`),
+    // Probe the REAL path, not the flag — the same fix voiceState() got.
+    // ?deep=1 makes browser-service actually launch Chrome, so this answers
+    // "can a show_me capture anything", not "is an Express process alive".
+    // Parse the JSON regardless of status: an honest 503 carries chromeError,
+    // and jget()'s ok-only parsing would flatten it back into "service down".
+    fetch(`${BROWSER}/browser/health?deep=1`, { signal: AbortSignal.timeout(30_000) })
+      .then(r => r.json()).catch(() => null),
     jget('http://127.0.0.1:9205/pc/status'),
     jget(`${MEMORY}/memory/kv/claude-last-spawn-ok`),
     jget(`${MEMORY}/memory/kv/push-devices`),
@@ -152,7 +158,7 @@ async function main() {
     checkAlertRate({ lastHour, threshold: ALERT_THRESHOLD }),
     checkPcWorker({ secondsSinceSeen: pc ? pc.seconds_since_seen : null }),
     checkAgentSpawns({ secondsSinceOk }),
-    checkShowMe({ browserOk: !!browser }),
+    checkShowMe({ browserOk: !!browser, chromeOk: browser?.chromeOk === true, chromeError: browser?.chromeError || null }),
     // Can an alert still reach a phone at all? (2026-08-27)
     checkAlertChannel({ ntfy: !!(process.env.NTFY_TOPIC || '').trim(), devices: pushDevices }),
   ];

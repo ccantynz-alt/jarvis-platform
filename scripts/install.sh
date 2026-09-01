@@ -39,10 +39,14 @@ if ! command -v chromium-browser &> /dev/null && ! command -v chromium &> /dev/n
   apt-get install -y chromium-browser 2>/dev/null || apt-get install -y chromium
 fi
 
+# Record the ABSOLUTE path, not the bare name (2026-08-30 render audit): a
+# bare name works for screenshot-service's spawn() but Playwright's
+# executablePath needs a full path, and the bare-name shape has already broken
+# every /browser/render call once while everything else stayed green.
 CHROMIUM_BIN=""
 for bin in chromium-browser chromium google-chrome; do
   if command -v $bin &> /dev/null; then
-    CHROMIUM_BIN=$bin
+    CHROMIUM_BIN=$(command -v $bin)
     break
   fi
 done

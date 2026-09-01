@@ -270,7 +270,6 @@ export function checkAgentSpawns({ secondsSinceOk, staleAfter = 6 * 3600 }) {
   return result('agent_spawns', true, { detail: `last successful agent spawn ${Math.round(secondsSinceOk / 60)}m ago` });
 }
 
-/** show_me depends on the guarded render path; a dead browser service kills it silently. */
 /**
  * Can an alert still REACH a device? (2026-08-27)
  *
@@ -323,8 +322,22 @@ export function checkAlertChannel({ ntfy, devices = [], staleDays = 14, now = Da
   return result('alert_channel', true, { detail: `device push live via ${legs}` });
 }
 
-export function checkShowMe({ browserOk }) {
-  return browserOk
-    ? result('show_me', true, { detail: 'capture path healthy' })
-    : result('show_me', false, { severity: 'warn', incident: '2026-08-11', detail: 'the browser service is down — "show me" cannot capture anything' });
+/**
+ * show_me depends on the guarded render path; a dead browser service kills it
+ * silently — and so does a live one whose Chrome cannot launch (2026-08-30:
+ * for weeks every render 502'd while this check reported "capture path
+ * healthy", because it trusted a static health 200 that never touched Chrome).
+ * Passes only on positive evidence: the deep probe launched Chrome and said so.
+ */
+export function checkShowMe({ browserOk, chromeOk = null, chromeError = null }) {
+  if (!browserOk) {
+    return result('show_me', false, { severity: 'warn', incident: '2026-08-11', detail: 'the browser service is down — "show me" cannot capture anything' });
+  }
+  if (chromeOk !== true) {
+    return result('show_me', false, {
+      severity: 'warn', incident: '2026-08-30',
+      detail: `the browser service is up but Chrome failed its launch probe${chromeError ? ` (${chromeError})` : ''} — every "show me" and render fails while the port stays green`,
+    });
+  }
+  return result('show_me', true, { detail: 'capture path healthy — Chrome launch verified' });
 }
